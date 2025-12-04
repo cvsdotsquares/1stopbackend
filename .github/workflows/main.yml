@@ -1,0 +1,35 @@
+name: Build & Deploy to Staging
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SEVER_PASSWORD }}
+          script: |
+            echo "Navigating to repo folder..."
+            cd /var/www/html/1stop/1stopbackend || exit 1
+
+            echo "Pulling latest code from dev branch..."
+            git reset --hard
+            git clean -fd
+            git pull origin dev
+
+            echo "Installing dependencies..."
+            cd 1stop
+            npm install
+
+            echo "Building Next.js project..."
+            npm run build
+
+            echo "Deployment finished!"
