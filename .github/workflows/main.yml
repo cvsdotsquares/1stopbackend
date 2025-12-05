@@ -30,15 +30,15 @@ jobs:
 
             echo "Creating production .env file..."
             cat > .env << EOF
-            PORT=${{ secrets.env.PORT }}
-            DB_HOST=${{ secrets.env.DB_HOST }}
-            DB_PORT=${{ secrets.env.DB_PORT }}
-            DB_USER=${{ secrets.env.DB_USER }}
-            DB_PASSWORD=${{ secrets.env.DB_PASSWORD }}
-            DB_NAME=${{ secrets.env.DB_NAME }}
-            JWT_SECRET=${{ secrets.env.JWT_SECRET }}
-            JWT_EXPIRES_IN=${{ secrets.env.JWT_EXPIRES_IN }}
-            REFRESH_TOKEN_EXPIRES_IN=${{ secrets.env.REFRESH_TOKEN_EXPIRES_IN }}
+            PORT=${{ env.PORT }}
+            DB_HOST=${{ env.DB_HOST }}
+            DB_PORT=${{ env.DB_PORT }}
+            DB_USER=${{ env.DB_USER }}
+            DB_PASSWORD=${{ env.DB_PASSWORD }}
+            DB_NAME=${{ env.DB_NAME }}
+            JWT_SECRET=${{ env.JWT_SECRET }}
+            JWT_EXPIRES_IN=${{ env.JWT_EXPIRES_IN }}
+            REFRESH_TOKEN_EXPIRES_IN=${{ env.REFRESH_TOKEN_EXPIRES_IN }}
             NODE_ENV=production
             EOF
 
