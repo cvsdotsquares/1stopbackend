@@ -28,6 +28,23 @@ jobs:
             echo "Installing dependencies..."
             npm install --production
 
+            echo "Creating production .env file..."
+            cat > .env << EOF
+            PORT=${{ vars.PORT }}
+            DB_HOST=${{ vars.DB_HOST }}
+            DB_PORT=${{ vars.DB_PORT }}
+            DB_USER=${{ vars.DB_USER }}
+            DB_PASSWORD=${{ vars.DB_PASSWORD }}
+            DB_NAME=${{ vars.DB_NAME }}
+            JWT_SECRET=${{ vars.JWT_SECRET }}
+            JWT_EXPIRES_IN=${{ vars.JWT_EXPIRES_IN }}
+            REFRESH_TOKEN_EXPIRES_IN=${{ vars.REFRESH_TOKEN_EXPIRES_IN }}
+            NODE_ENV=production
+            EOF
+
+            echo "Setting .env file permissions..."
+            chmod 600 .env
+
             echo "Stopping existing API service..."
             pm2 stop api || echo "No running process found"
 
