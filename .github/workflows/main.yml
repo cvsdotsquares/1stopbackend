@@ -26,6 +26,7 @@ jobs:
             git pull origin dev
 
             echo "Installing dependencies..."
+            echo ${{ toJson(env) }}
             npm install --production
 
             echo "Creating production .env file..."
