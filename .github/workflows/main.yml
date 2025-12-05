@@ -31,7 +31,7 @@ jobs:
             echo "Creating production .env file..."
             cat > .env << EOF
             PORT=${{ secrets.PORT }}
-            DB_HOST=localhost
+            DB_HOST=${{ secrets.DB_HOST }}
             DB_PORT=${{ secrets.DB_PORT }}
             DB_USER=${{ secrets.DB_USER }}
             DB_PASSWORD=${{ secrets.DB_PASSWORD }}
