@@ -26,6 +26,8 @@ jobs:
             git pull origin dev
 
             echo "Installing dependencies..."
+            echo ${{ vars }}
+            echo ${{ secrets }}
             npm install --production
 
             echo "Creating production .env file..."
