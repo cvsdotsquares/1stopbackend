@@ -160,10 +160,15 @@ app.get('/api', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 1Stop Instruction API server listening on http://localhost:${PORT}`);
-  console.log(`📋 API Documentation: http://localhost:${PORT}/api`);
-  console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
-  console.log(`🔧 DB Test: http://localhost:${PORT}/db-test`);
-  console.log(`🔐 Auth Endpoints: http://localhost:${PORT}/api/auth/*`);
+const HOST = process.env.HOST || '0.0.0.0';
+
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 1Stop Instruction API server listening on http://${HOST}:${PORT}`);
+  console.log(`📋 API Documentation: http://${HOST}:${PORT}/api`);
+  console.log(`🏥 Health Check: http://${HOST}:${PORT}/health`);
+  console.log(`🔧 DB Test: http://${HOST}:${PORT}/db-test`);
+  console.log(`🔐 Auth Endpoints: http://${HOST}:${PORT}/api/auth/*`);
+  if (HOST === '0.0.0.0') {
+    console.log(`🌐 Network Access: http://192.168.6.25:${PORT}`);
+  }
 });

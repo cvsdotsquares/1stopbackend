@@ -1,4 +1,4 @@
-name: Build & Deploy to Staging
+name: Deploy Node.js API to Staging
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SEVER_PASSWORD }}
           script: |
-            echo "Navigating to repo folder..."
+            echo "Navigating to API directory..."
             cd /var/www/html/1stop/1stopbackend || exit 1
 
             echo "Pulling latest code from dev branch..."
@@ -26,10 +26,29 @@ jobs:
             git pull origin dev
 
             echo "Installing dependencies..."
-            cd 1stop
-            npm install
+            npm install --production
 
-            echo "Building Next.js project..."
-            npm run build
+            echo "Creating production .env file..."
+            cat > .env << EOF
+            PORT=${{ secrets.PORT }}
+            DB_HOST=${{ secrets.DB_HOST }}
+            DB_PORT=${{ secrets.DB_PORT }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}
+            REFRESH_TOKEN_EXPIRES_IN=${{ secrets.REFRESH_TOKEN_EXPIRES_IN }}
+            NODE_ENV=production
+            EOF
+
+            echo "Setting .env file permissions..."
+            chmod 600 .env
+
+            echo "Stopping existing API service..."
+            pm2 stop api || echo "No running process found"
+
+            echo "Starting API service..."
+            pm2 start src/index.js --name api --env production
 
             echo "Deployment finished!"
