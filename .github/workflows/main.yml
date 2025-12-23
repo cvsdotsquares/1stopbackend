@@ -46,9 +46,11 @@ jobs:
             chmod 600 .env
 
             echo "Stopping existing API service..."
-            pm2 stop api || echo "No running process found"
-
+            npx pm2 stop api || true || echo "No running process found"
+            npx pm2 delete api
             echo "Starting API service..."
-            pm2 start src/index.js --name api --env production
+            npx pm2 start src/index.js --name api
+            npx pm2 save
+            npx pm2 list
 
             echo "Deployment finished!"
