@@ -7,6 +7,7 @@ const createCourseRoutes = require('./routes/courses');
 const createBookingRoutes = require('./routes/bookings');
 const createDatabaseRoutes = require('./routes/database');
 const createCMSRoutes = require('./routes/cms');
+const createHomepageRoutes = require('./routes/homepage');
 const BookingStatusManager = require('./middleware/bookingStatusManager');
 
 const app = express();
@@ -73,6 +74,7 @@ app.use('/api/courses', createCourseRoutes(pool));
 app.use('/api/bookings', createBookingRoutes(pool));
 app.use('/api/database', createDatabaseRoutes(pool));
 app.use('/api/cms', createCMSRoutes(pool));
+app.use('/api/homepage', createHomepageRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
@@ -121,6 +123,9 @@ app.get('/api', (req, res) => {
         'PUT /api/bookings/admin/:id/status': 'Update booking status - admin only (requires admin token)',
         'GET /api/bookings/admin/statistics': 'Get booking statistics - admin only (requires admin token)'
       },
+      homepage: {
+        'GET /api/homepage': 'Get homepage content from existing database tables'
+      },
       cms: {
         'GET /api/cms/pages': 'Get all pages with pagination and filtering',
         'GET /api/cms/pages/:identifier': 'Get page by ID or slug',
@@ -160,15 +165,10 @@ app.get('/api', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
-
-app.listen(PORT, HOST, () => {
-  console.log(`🚀 1Stop Instruction API server listening on http://${HOST}:${PORT}`);
-  console.log(`📋 API Documentation: http://${HOST}:${PORT}/api`);
-  console.log(`🏥 Health Check: http://${HOST}:${PORT}/health`);
-  console.log(`🔧 DB Test: http://${HOST}:${PORT}/db-test`);
-  console.log(`🔐 Auth Endpoints: http://${HOST}:${PORT}/api/auth/*`);
-  if (HOST === '0.0.0.0') {
-    console.log(`🌐 Network Access: http://192.168.6.25:${PORT}`);
-  }
+app.listen(PORT, () => {
+  console.log(`🚀 1Stop Instruction API server listening on http://localhost:${PORT}`);
+  console.log(`📋 API Documentation: http://localhost:${PORT}/api`);
+  console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
+  console.log(`🔧 DB Test: http://localhost:${PORT}/db-test`);
+  console.log(`🔐 Auth Endpoints: http://localhost:${PORT}/api/auth/*`);
 });
