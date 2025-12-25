@@ -46,7 +46,7 @@ class HomepageController {
           reviews: []
         },
         accreditations: {
-          title: "Our Accreditations",
+          title: "Our <span class=\"text-gray-900\">Accreditations</span>",
           logos: [],
           cards: [
             {
@@ -62,7 +62,6 @@ class HomepageController {
             {
               id: 2,
               type: "gift",
-              image: "/home/gift-bow.png"
             }
           ]
         },
@@ -275,6 +274,50 @@ class HomepageController {
             link: exceptional[0].button_link
           }
         });
+      }
+
+      // Get FAQs data
+      const [faqCategories] = await this.pool.query(`
+        SELECT fc.id, fc.category_name, fc.weight
+        FROM faq_categories fc
+        ORDER BY fc.weight ASC
+      `);
+
+      const [faqs] = await this.pool.query(`
+        SELECT f.faq_title, f.category_id, f.content, f.weight
+        FROM faqs f
+        WHERE f.status = 1
+        ORDER BY f.category_id ASC, f.weight ASC
+      `);
+
+      if (faqCategories.length > 0) {
+        homepage.faqs.faqs = faqCategories.map(category => ({
+          id: category.id,
+          category: category.category_name,
+          questions: faqs
+            .filter(faq => faq.category_id === category.id)
+            .map((faq, index) => ({
+              id: index + 1,
+              question: faq.faq_title,
+              answer: faq.content
+            }))
+        })).filter(category => category.questions.length > 0);
+      }
+
+      // Get accreditations data
+      const [accreditations] = await this.pool.query(`
+        SELECT id, image, weight
+        FROM accreditations
+        ORDER BY weight ASC
+      `);
+
+      if (accreditations.length > 0) {
+        homepage.accreditations.logos = accreditations.map(accreditation => ({
+          id: accreditation.id,
+          name: null,
+          image: accreditation.image ? `/uploads/accreditations/${accreditation.image}` : null,
+          alt: null
+        }));
       }
 
       // Get CTAs/banners data
