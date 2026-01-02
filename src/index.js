@@ -9,7 +9,7 @@ const createDatabaseRoutes = require('./routes/database');
 const createCMSRoutes = require('./routes/cms');
 const createHomepageRoutes = require('./routes/homepage');
 const BookingStatusManager = require('./middleware/bookingStatusManager');
-
+const createContactUsRoutes = require('./routes/contactus');
 const app = express();
 
 // Middleware
@@ -75,6 +75,7 @@ app.use('/api/bookings', createBookingRoutes(pool));
 app.use('/api/database', createDatabaseRoutes(pool));
 app.use('/api/cms', createCMSRoutes(pool));
 app.use('/api/homepage', createHomepageRoutes(pool));
+app.use('/api/contactus', createContactUsRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
@@ -154,6 +155,10 @@ app.get('/api', (req, res) => {
       system: {
         'GET /health': 'Health check',
         'GET /db-test': 'Database connection test'
+      },
+      contactus: {
+        'GET /api/contactus': 'Get contact us content from existing database tables',
+        'POST /api/contactus': 'Create a new contact us entry in the database'
       }
     },
     authentication: {

@@ -91,7 +91,7 @@ class HomepageController {
           title: null,
           subtitle: null,
           description: null,
-          image: null
+          image: null,
         },
         cbtTestLondon: {
           title: null,
@@ -322,7 +322,7 @@ class HomepageController {
 
       // Get CTAs/banners data
       const [banners] = await this.pool.query(`
-        SELECT bg_title, bg_image, button_title, button_link, bg_color, container_full_width, banner_position
+        SELECT bg_title, bg_image, button_title, button_link, bg_color, container_full_width, banner_position, title_color
         FROM pages_banner
         WHERE page_id = ?
         ORDER BY banner_position ASC
@@ -336,6 +336,7 @@ class HomepageController {
           backgroundColor: banner.bg_color || null,
           containerFullWidth: banner.container_full_width === '1',
           position: banner.banner_position || 0,
+          titleColor: banner.title_color || 0,
           cta: {
             text: banner.button_title || null,
             link: banner.button_link || null
