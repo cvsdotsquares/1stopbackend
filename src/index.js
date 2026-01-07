@@ -10,6 +10,9 @@ const createCMSRoutes = require('./routes/cms');
 const createHomepageRoutes = require('./routes/homepage');
 const BookingStatusManager = require('./middleware/bookingStatusManager');
 const createContactUsRoutes = require('./routes/contactus');
+const searchRoutes = require('./routes/search');
+const locationCourseRoutes = require('./routes/locationcourse');
+
 const app = express();
 
 // Middleware
@@ -29,7 +32,7 @@ app.use((req, res, next) => {
 });
 
 // MySQL pool (uses env vars)
-const pool = mysql.createPool({
+/* const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER,
@@ -38,7 +41,19 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+});*/
+
+const pool = mysql.createPool({
+    host: '172.236.21.167',
+    port: 3306,
+    user: '1stop',
+    password: 'Gbgz&En4Wg&HmFJTFf',
+    database: '1stop',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
 });
+
 
 // Health check
 app.get('/health', (req, res) => {
@@ -76,6 +91,8 @@ app.use('/api/database', createDatabaseRoutes(pool));
 app.use('/api/cms', createCMSRoutes(pool));
 app.use('/api/homepage', createHomepageRoutes(pool));
 app.use('/api/contactus', createContactUsRoutes(pool));
+app.use('/api/search', searchRoutes(pool));
+app.use('/api/location-course', locationCourseRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
