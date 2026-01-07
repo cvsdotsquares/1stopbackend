@@ -55,8 +55,12 @@ class HomepageController {
               subtitle: "CBT Training and Motorcycle Courses across London",
               type: "locations",
               locations: [
-                "High Barnet CBT", "Friern Barnet CBT", "Finchley CBT", "Southgate CBT",
-                "Arnos Grove CBT", "Muswell Hill CBT", "Hornsey CBT", "Wood Green CBT", "Highgate CBT"
+                  {
+                    location_id: null,
+                    name: null,
+                    pageTitle: null,
+                    slugUrl: ""
+                  }
               ]
             },
             {
@@ -69,6 +73,12 @@ class HomepageController {
           title: "FAQS",
           subtitle: "The world of driving can be a very confusing place. So, to help out, we have compiled a list of the most frequently asked questions for you to have a browse through.",
           faqs: []
+        },
+        locations: {
+          location_id: null,          
+          name: null,
+          pageTitle: null,
+          slugUrl: ""
         },
         hero: {
           backgroundImages: [],
@@ -319,6 +329,19 @@ class HomepageController {
           alt: null
         }));
       }
+
+      const [locations] = await this.pool.query(`
+        SELECT l.id AS location_id, l.location_name, p.page_title,p.slug FROM locations l INNER JOIN location_course_pages p ON p.location_id = l.id WHERE l.status = '1' AND p.is_active = 1 ORDER BY l.location_name ASC`);
+
+      const locationCard = homepage.accreditations.cards.find(
+        card => card.type === 'locations'
+      );
+      locationCard.locations = locations.map(loc => ({
+        location_id: loc.location_id,
+        name: loc.location_name,
+        pageTitle: loc.page_title,
+        slugUrl: loc.slug
+      }));
 
       // Get CTAs/banners data
       const [banners] = await this.pool.query(`
