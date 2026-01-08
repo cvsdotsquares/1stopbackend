@@ -29,6 +29,7 @@ class AllLocationsController {
 
   async getalllocation(req, res) {
     try {
+        const courseData = [];
         const locationData = {
             locationName: '',
             locationPicture: '',
@@ -48,30 +49,45 @@ class AllLocationsController {
             l.latitude,
             l.longitude,
             l.direction_map,
-            GROUP_CONCAT(c.course_name) AS course_names
+            GROUP_CONCAT(CONCAT(c.id, ':', c.course_name)) AS course_data
           FROM locations l
-          LEFT JOIN location_course_pages lcp ON lcp.location_id = l.id
+          LEFT JOIN location_course_pages lcp ON lcp.location_id = l.id AND lcp.is_active = 1
           LEFT JOIN courses c ON c.id = lcp.course_id
           GROUP BY l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode, l.latitude, l.longitude, l.direction_map
         `);
 
-        const locations = content.map(location => ({
-          locationName: location.location_name || '',
-          locationPicture: location.direction_map || '',
-          address: [
-            location.address1 || '',
-            location.address2 || '',
-            location.address3 || '',
-            location.address4 || '',
-            location.postcode || ''
-          ],
-          coordinates: {
-            lat: location.latitude || '',
-            lng: location.longitude || ''
-          },
-          course_names: location.course_names ? location.course_names.split(',') : []
-        }));
+        // Get all courses first
+        const [allcourses] = await this.pool.query(`
+          SELECT id, course_name FROM courses WHERE status = '1' ORDER BY course_name ASC
+        `);
+
+        const locations = content.map(location => {
+          const courses = location.course_data ?
+            location.course_data.split(',').map(courseItem => {
+              const [id, name] = courseItem.split(':');
+              return { [id]: name };
+            }) : [];
+
+          return {
+            locationName: location.location_name || '',
+            locationPicture: location.location_picture || '',
+            address: [{
+              addressLine1: location.address1 || '',
+              addressLine2: location.address2 || '',
+              addressLine3: location.address3 || '',
+              addressLine4: location.address4 || '',
+              citypostcode: location.postcode || ''
+            }],
+            coordinates: {
+              lat: location.latitude || '',
+              lng: location.longitude || ''
+            },
+            direction_map: location.direction_map || '',
+            courses: courses
+          };
+        });
         res.json({
+            courseData: allcourses,
             locationData: locations
         });
     } catch (err) {
