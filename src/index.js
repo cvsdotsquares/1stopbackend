@@ -13,7 +13,7 @@ const createContactUsRoutes = require('./routes/contactus');
 const searchRoutes = require('./routes/search');
 const locationCourseRoutes = require('./routes/locationcourse');
 const allLocationsRoutes = require('./routes/alllocation');
-
+const pageMenuRoutes = require('./routes/pagemenu');
 const app = express();
 
 // Middleware
@@ -95,7 +95,7 @@ app.use('/api/contactus', createContactUsRoutes(pool));
 app.use('/api/search', searchRoutes(pool));
 app.use('/api/location-course', locationCourseRoutes(pool));
 app.use('/api/all-locations', allLocationsRoutes(pool));
-
+app.use('/api/pagemenu', pageMenuRoutes(pool));
 // API Documentation endpoint
 app.get('/api', (req, res) => {
   res.json({
