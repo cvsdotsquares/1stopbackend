@@ -12,6 +12,7 @@ const BookingStatusManager = require('./middleware/bookingStatusManager');
 const createContactUsRoutes = require('./routes/contactus');
 const searchRoutes = require('./routes/search');
 const locationCourseRoutes = require('./routes/locationcourse');
+const allLocationsRoutes = require('./routes/alllocation');
 
 const app = express();
 
@@ -93,6 +94,7 @@ app.use('/api/homepage', createHomepageRoutes(pool));
 app.use('/api/contactus', createContactUsRoutes(pool));
 app.use('/api/search', searchRoutes(pool));
 app.use('/api/location-course', locationCourseRoutes(pool));
+app.use('/api/all-locations', allLocationsRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {

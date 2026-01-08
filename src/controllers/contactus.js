@@ -143,12 +143,19 @@ class ContactUsController {
           mailInfo = await this.transporter.sendMail(mailOptions);
 
           // If message was successfully sent, log it into the database
-          // if (mailInfo && mailInfo.messageId) {
-          //   await this.pool.query(`
-          //     INSERT INTO contact_us_messages (to, name, email, subject, message, message_id, created_at)
-          //     VALUES (?, ?, ?, ?, ?, NOW())
-          //   `, [name, email, subject, message, mailInfo.messageId]);
-          // }
+          if (mailInfo && mailInfo.messageId) {
+
+            var getIP = require('ipware')().get_ip;
+            app.use(function(req, res, next) {
+                var ipInfo = getIP(req);
+                console.log(ipInfo);
+                next();
+            });
+            // await this.pool.query(`
+            //   INSERT INTO contact_us_messages (to, from, subject, email_content, email_by, status, type, ip)
+            //   VALUES (?, ?, ?, ?, ?, NOW())
+            // `, [name, email, subject, message, mailInfo.messageId]);
+          }
         } catch (mailErr) {
           console.error('Failed to send contact email:', mailErr);
           // don't fail the whole request if email fails; proceed to return success for DB insert
