@@ -14,6 +14,7 @@ const searchRoutes = require('./routes/search');
 const locationCourseRoutes = require('./routes/locationcourse');
 const allLocationsRoutes = require('./routes/alllocation');
 const pageMenuRoutes = require('./routes/pagemenu');
+const dynamicDataRoutes = require('./routes/dynamicData');
 const app = express();
 
 // Middleware
@@ -96,6 +97,7 @@ app.use('/api/search', searchRoutes(pool));
 app.use('/api/location-course', locationCourseRoutes(pool));
 app.use('/api/all-locations', allLocationsRoutes(pool));
 app.use('/api/pagemenu', pageMenuRoutes(pool));
+app.use('/api/get-data', dynamicDataRoutes(pool));
 // API Documentation endpoint
 app.get('/api', (req, res) => {
   res.json({

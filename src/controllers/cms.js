@@ -663,6 +663,74 @@ class CMSController {
   }
 
   /**
+   * Get accreditations
+   */
+  async getAccreditations(req, res) {
+    try {
+
+      const [accreditations] = await this.pool.query(`
+        SELECT id, image, weight, created, modified
+        FROM accreditations
+        ${whereClause}
+        ORDER BY weight
+      `, [...queryParams, parseInt(limit), offset]);
+
+      res.json({
+        success: true,
+        data: accreditations,
+      });
+
+    } catch (error) {
+      console.error('Error fetching accreditations:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch accreditations',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Create testimonial
+   */
+  async createTestimonial(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation errors',
+          errors: errors.array()
+        });
+      }
+
+      const { review, review_name, status = 0 } = req.body;
+
+      const [result] = await this.pool.query(`
+        INSERT INTO testimonials (review, review_name, status, created)
+        VALUES (?, ?, ?, NOW())
+      `, [review, review_name, status]);
+
+      res.status(201).json({
+        success: true,
+        message: 'Testimonial created successfully',
+        data: { id: result.insertId }
+      });
+
+    } catch (error) {
+      console.error('Error creating testimonial:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create testimonial',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   *
+   */
+  /**
    * Get testimonials with pagination
    */
   async getTestimonials(req, res) {
@@ -717,43 +785,6 @@ class CMSController {
       res.status(500).json({
         success: false,
         message: 'Failed to fetch testimonials',
-        error: error.message
-      });
-    }
-  }
-
-  /**
-   * Create testimonial
-   */
-  async createTestimonial(req, res) {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation errors',
-          errors: errors.array()
-        });
-      }
-
-      const { review, review_name, status = 0 } = req.body;
-
-      const [result] = await this.pool.query(`
-        INSERT INTO testimonials (review, review_name, status, created)
-        VALUES (?, ?, ?, NOW())
-      `, [review, review_name, status]);
-
-      res.status(201).json({
-        success: true,
-        message: 'Testimonial created successfully',
-        data: { id: result.insertId }
-      });
-
-    } catch (error) {
-      console.error('Error creating testimonial:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to create testimonial',
         error: error.message
       });
     }

@@ -49,11 +49,12 @@ class AllLocationsController {
             l.latitude,
             l.longitude,
             l.direction_map,
+            lcp.locationPicture,
             GROUP_CONCAT(CONCAT(c.id, ':', c.course_name)) AS course_data
           FROM locations l
-          LEFT JOIN location_course_pages lcp ON lcp.location_id = l.id AND lcp.is_active = 1
+          INNER JOIN location_course_pages lcp ON lcp.location_id = l.id AND lcp.is_active = 1
           LEFT JOIN courses c ON c.id = lcp.course_id
-          GROUP BY l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode, l.latitude, l.longitude, l.direction_map
+          GROUP BY l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode, l.latitude, l.longitude, l.direction_map, lcp.locationPicture
         `);
 
         // Get all courses first
@@ -70,14 +71,14 @@ class AllLocationsController {
 
           return {
             locationName: location.location_name || '',
-            locationPicture: location.location_picture || '',
-            address: [{
-              addressLine1: location.address1 || '',
-              addressLine2: location.address2 || '',
-              addressLine3: location.address3 || '',
-              addressLine4: location.address4 || '',
-              citypostcode: location.postcode || ''
-            }],
+            locationPicture: location.locationPicture ? 'uploads/location_course_files/' + location.locationPicture : '',
+            address: [
+              location.address1 || '',
+              location.address2 || '',
+              location.address3 || '',
+              location.address4 || '',
+              location.postcode || ''
+            ],
             coordinates: {
               lat: location.latitude || '',
               lng: location.longitude || ''
@@ -86,8 +87,11 @@ class AllLocationsController {
             courses: courses
           };
         });
+
+        const courseList = allcourses.map(course => ({ [course.id]: course.course_name }));
+
         res.json({
-            courseData: allcourses,
+            courseData: courseList,
             locationData: locations
         });
     } catch (err) {
