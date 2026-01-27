@@ -50,97 +50,89 @@ class BookingFlowController {
     }
   }
 
-  async getCourseAvailability(req, res) {
-    try {
-      const { course_id, location_id } = req.query;
+async getCourseAvailability(req, res) {
+  try {
+    const { course_id, location_id } = req.query;
 
-      if (!course_id || !location_id) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'VALIDATION_ERROR', message: 'Course ID and Location ID are required' }
-        });
-      }
-
-      if (isNaN(course_id) || isNaN(location_id)) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'VALIDATION_ERROR', message: 'Course ID and Location ID must be numeric' }
-        });
-      }
-
-      const [events] = await this.pool.query(`
-        SELECT
-          ced.course_event_id,
-          ced.event_date,
-          ced.event_start_time,
-          ced.event_end_time,
-          ce.booking_limit,
-          ce.bookings_done,
-          ce.current_locks,
-          ce.event_type,
-          c.course_name
-        FROM course_event_dates ced
-        JOIN course_events ce ON ced.course_event_id = ce.id
-        JOIN courses c ON ce.course_id = c.id
-        WHERE ce.course_id = ?
-          AND ce.location_id = ?
-          AND c.status = '1'
-          AND ce.status = '1'
-          AND ced.event_date > CURDATE()
-          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 6 WEEK)
-        ORDER BY ced.event_date ASC
-      `, [course_id, location_id]);
-
-      if (events.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: { code: 'NOT_FOUND', message: 'No availability found for this course and location' }
-        });
-      }
-
-      const availability = [];
-
-      for (const event of events) {
-        const [freezeCheck] = await this.pool.query(`
-          SELECT COUNT(*) as freeze_count
-          FROM freeze
-          WHERE course_event_id = ?
-        `, [event.course_event_id]);
-
-        const availableSpaces = event.booking_limit - event.bookings_done - event.current_locks;
-        const isAvailable = availableSpaces > 0;
-        const isFrozen = freezeCheck[0].freeze_count > 0;
-
-        availability.push({
-          date: event.event_date,
-          available: isAvailable && !isFrozen,
-          available_spaces: availableSpaces,
-          booking_limit: event.booking_limit,
-          bookings_done: event.bookings_done,
-          current_locks: event.current_locks,
-          event_start_time: event.event_start_time,
-          event_end_time: event.event_end_time,
-          course_event_id: event.course_event_id,
-          freeze: isFrozen ? 1 : 0
-        });
-      }
-
-      res.json({
-        success: true,
-        data: {
-          course_id: parseInt(course_id),
-          location_id: parseInt(location_id),
-          availability
-        }
-      });
-    } catch (error) {
-      console.error('Error fetching course availability:', error);
-      res.status(500).json({
+    if (!course_id || !location_id) {
+      return res.status(400).json({
         success: false,
-        error: { code: 'SERVER_ERROR', message: 'Failed to fetch course availability' }
+        error: { code: 'VALIDATION_ERROR', message: 'Course ID and Location ID are required' }
       });
     }
+
+    // Query matching PHP course_avails exactly - without DISTINCT
+    const [events] = await this.pool.query(`
+      SELECT
+        ced.course_event_id,
+        ced.event_date,
+        ced.event_start_time,
+        ced.event_end_time,
+        ce.booking_limit,
+        ce.bookings_done,
+        ce.current_locks,
+        ce.event_type,
+        c.course_name,
+        COALESCE(f.freeze_count, 0) as freeze_count
+      FROM course_event_dates ced
+      JOIN course_events ce ON ced.course_event_id = ce.id
+      JOIN courses c ON ce.course_id = c.id
+      LEFT JOIN (
+        SELECT course_event_id, COUNT(*) as freeze_count
+        FROM freeze
+        GROUP BY course_event_id
+      ) f ON f.course_event_id = ced.course_event_id
+      WHERE ce.course_id = ?
+        AND ce.location_id = ?
+        AND c.status = '1'
+        AND ce.status = '1'
+        AND ced.event_date > CURDATE()
+        AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 6 WEEK)
+      ORDER BY ced.event_date ASC
+    `, [course_id, location_id]);
+
+    if (events.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'No availability found' }
+      });
+    }
+
+    const availability = events.map(event => {
+      const availableSpaces = event.booking_limit - event.bookings_done - event.current_locks;
+      const isFullyBooked = (event.bookings_done + event.current_locks) >= event.booking_limit;
+      const isFrozen = event.freeze_count > 0;
+
+      return {
+        date: event.event_date,
+        available: !isFullyBooked && !isFrozen,
+        available_spaces: Math.max(0, availableSpaces),
+        booking_limit: event.booking_limit,
+        bookings_done: event.bookings_done,
+        current_locks: event.current_locks,
+        event_start_time: event.event_start_time,
+        event_end_time: event.event_end_time,
+        course_event_id: event.course_event_id,
+        freeze: isFrozen ? 1 : 0
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        course_id: parseInt(course_id),
+        location_id: parseInt(location_id),
+        availability
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching course availability:', error);
+    res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: 'Failed to fetch course availability' }
+    });
   }
+}
 
   async getLocationsByCourse(req, res) {
     try {

@@ -7,6 +7,7 @@ const createCourseRoutes = require('./routes/courses');
 const createBookingRoutes = require('./routes/bookings');
 const createDatabaseRoutes = require('./routes/database');
 const createCMSRoutes = require('./routes/cms');
+const createCMSPagesRoutes = require('./routes/cmspages');
 const createHomepageRoutes = require('./routes/homepage');
 const BookingStatusManager = require('./middleware/bookingStatusManager');
 const createContactUsRoutes = require('./routes/contactus');
@@ -92,6 +93,7 @@ app.use('/api/courses', createCourseRoutes(pool));
 app.use('/api/bookings', createBookingRoutes(pool));
 app.use('/api/database', createDatabaseRoutes(pool));
 app.use('/api/cms', createCMSRoutes(pool));
+app.use('/api/cmspages', createCMSPagesRoutes(pool));
 app.use('/api/homepage', createHomepageRoutes(pool));
 app.use('/api/contactus', createContactUsRoutes(pool));
 app.use('/api/search', searchRoutes(pool));
@@ -100,6 +102,7 @@ app.use('/api/all-locations', allLocationsRoutes(pool));
 app.use('/api/pagemenu', pageMenuRoutes(pool));
 app.use('/api/get-data', dynamicDataRoutes(pool));
 app.use('/api/booking', bookingFlowRoutes(pool));
+
 // API Documentation endpoint
 app.get('/api', (req, res) => {
   res.json({
