@@ -200,8 +200,179 @@ class BookingController {
   }
 
   /**
-   * Get user's bookings
+   * Get course availability for booking calendar
    */
+  async getCourseAvailability(req, res) {
+    try {
+      const { course_id, location_id, start_date, weeks = 6 } = req.query;
+
+      if (!course_id || !location_id) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Course ID and Location ID are required',
+            details: {
+              course_id: !course_id ? ['Course ID is required'] : [],
+              location_id: !location_id ? ['Location ID is required'] : []
+            }
+          }
+        });
+      }
+
+      const startDate = start_date || new Date().toISOString().split('T')[0];
+      const endDate = new Date(startDate);
+      endDate.setDate(endDate.getDate() + (weeks * 7));
+
+      // Get course events with availability
+      const [availability] = await this.pool.query(`
+        SELECT 
+          ced.event_date as date,
+          ced.event_start_time,
+          ced.event_end_time,
+          ced.freeze,
+          ce.id as course_event_id,
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          (ce.booking_limit - ce.bookings_done - ce.current_locks) as available_spaces
+        FROM course_events ce
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id
+        WHERE ce.course_id = ? 
+          AND ce.location_id = ?
+          AND ce.status = '1'
+          AND ced.event_date >= ?
+          AND ced.event_date <= ?
+          AND ced.freeze != 1
+        ORDER BY ced.event_date ASC
+      `, [course_id, location_id, startDate, endDate.toISOString().split('T')[0]]);
+
+      const formattedAvailability = availability.map(item => ({
+        date: item.date,
+        available: item.available_spaces > 0,
+        available_spaces: item.available_spaces,
+        booking_limit: item.booking_limit,
+        bookings_done: item.bookings_done,
+        current_locks: item.current_locks,
+        event_start_time: item.event_start_time,
+        event_end_time: item.event_end_time,
+        course_event_id: item.course_event_id,
+        freeze: item.freeze
+      }));
+
+      res.json({
+        success: true,
+        data: {
+          course_id: parseInt(course_id),
+          location_id: parseInt(location_id),
+          availability: formattedAvailability
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching course availability:', error);
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'SERVER_ERROR',
+          message: 'Failed to fetch course availability',
+          details: error.message
+        }
+      });
+    }
+  }
+
+  /**
+   * Create booking lock (temporary hold)
+   */
+  async createBookingLock(req, res) {
+    try {
+      const { course_event_id, spaces_required = 1, user_session } = req.body;
+
+      if (!course_event_id) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Course event ID is required'
+          }
+        });
+      }
+
+      // Check if event has availability
+      const [eventCheck] = await this.pool.query(`
+        SELECT 
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          (ce.booking_limit - ce.bookings_done - ce.current_locks) as available_spaces
+        FROM course_events ce
+        WHERE ce.id = ? AND ce.status = '1'
+      `, [course_event_id]);
+
+      if (eventCheck.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Course event not found'
+          }
+        });
+      }
+
+      const event = eventCheck[0];
+      if (event.available_spaces < spaces_required) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_SPACES',
+            message: `Only ${event.available_spaces} spaces available`
+          }
+        });
+      }
+
+      // Create lock (expires in 15 minutes)
+      const expiresAt = new Date();
+      expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+
+      const [lockResult] = await this.pool.query(`
+        INSERT INTO lock_bookings (
+          event_id, space_required, user_id, ip_address, 
+          created, modified
+        ) VALUES (?, ?, ?, ?, NOW(), NOW())
+      `, [
+        course_event_id,
+        spaces_required,
+        req.user?.id || 0,
+        req.ip
+      ]);
+
+      // Update current locks
+      await this.pool.query(`
+        UPDATE course_events 
+        SET current_locks = current_locks + ?
+        WHERE id = ?
+      `, [spaces_required, course_event_id]);
+
+      res.json({
+        success: true,
+        data: {
+          lock_id: lockResult.insertId,
+          expires_at: expiresAt.toISOString()
+        }
+      });
+
+    } catch (error) {
+      console.error('Error creating booking lock:', error);
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'SERVER_ERROR',
+          message: 'Failed to create booking lock'
+        }
+      });
+    }
+  }
   async getUserBookings(req, res) {
     try {
       const user_id = req.user.id;
