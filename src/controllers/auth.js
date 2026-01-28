@@ -24,19 +24,29 @@ class AuthController {
       }
 
       const {
-        first_name,
-        sur_name,
+        firstName,
+        surname,
         email,
         password,
-        add1,
-        add2,
-        add3,
+        addressLine1,
+        addressLine2,
+        addressLine3,
         postcode,
-        contact1,
-        contact2,
-        contact3,
+        contactNumber1,
+        contactNumber2,
+        contactNumber3,
         reg_type = 'm' // 'm' for member, 'a' for admin
       } = req.body;
+
+      // Map frontend field names to database field names
+      const first_name = firstName;
+      const sur_name = surname;
+      const add1 = addressLine1;
+      const add2 = addressLine2;
+      const add3 = addressLine3;
+      const contact1 = contactNumber1;
+      const contact2 = contactNumber2;
+      const contact3 = contactNumber3;
 
       // Check if user already exists
       const [existingUsers] = await this.pool.query(

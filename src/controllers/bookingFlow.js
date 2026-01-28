@@ -201,6 +201,48 @@ async getCourseAvailability(req, res) {
     }
   }
 
+  async getVehicleTypesByCourseLocation(req, res) {
+    try {
+      const { courseId, locationId } = req.params;
+
+      const [rows] = await this.pool.query(`
+        SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own,
+               automatic_lock_done, manual_lock_done
+        FROM course_events
+        WHERE course_id = ? AND location_id = ? AND status = '1'
+      `, [courseId, locationId]);
+
+      if (!rows.length) {
+        return res.json({ error: 'No course events found' });
+      }
+
+      const event = rows[0];
+      const vTypeSelect = {};
+
+      if (event.vehicle_type_automatic > 0 &&
+          event.vehicle_type_automatic > event.automatic_lock_done) {
+        vTypeSelect['1'] = 'Automatic';
+      }
+
+      if (event.vehicle_type_manual > 0 &&
+          event.vehicle_type_manual > event.manual_lock_done) {
+        vTypeSelect['0'] = 'Manual';
+      }
+
+      if (event.vehicle_type_own == 1) {
+        vTypeSelect['3'] = 'I will be using my own vehicle';
+      }
+
+      res.json({ vehicleTypes: vTypeSelect });
+    } catch (error) {
+      console.error('Error fetching vehicle types by course/location:', error);
+      res.status(500).json({
+        success: false,
+        error: { code: 'SERVER_ERROR', message: 'Failed to fetch vehicle types' }
+      });
+    }
+  }
+
   async getVehicleTypes(req, res) {
     try {
       const [vehicleTypes] = await this.pool.query(`
@@ -222,19 +264,108 @@ async getCourseAvailability(req, res) {
 
   async getLicenseTypes(req, res) {
     try {
-      const [licenseTypes] = await this.pool.query(`
-        SELECT id, licence_type, status
+      const [rows] = await this.pool.query(`
+        SELECT id, licence_type
         FROM driving_licence_types
-        WHERE status = 1
-        ORDER BY id ASC
+        ORDER BY id
       `);
 
-      res.json({ success: true, data: licenseTypes });
+      const licenceTypeSelect = {};
+      rows.forEach(type => {
+        licenceTypeSelect[type.id] = type.licence_type;
+      });
+
+      res.json({ licenseTypes: licenceTypeSelect });
     } catch (error) {
       console.error('Error fetching license types:', error);
       res.status(500).json({
         success: false,
         error: { code: 'SERVER_ERROR', message: 'Failed to fetch license types' }
+      });
+    }
+  }
+
+  async processAttendee(req, res) {
+    try {
+      const attendeeData = { ...req.body };
+
+      // Process license_number (uppercase)
+      if (attendeeData.license_number) {
+        attendeeData.license_number = attendeeData.license_number.toUpperCase();
+      }
+
+      // Process names (title case)
+      const toTitleCase = (str) => {
+        return str.replace(/\w\S*/g, (txt) =>
+          txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase()
+        );
+      };
+
+      if (attendeeData.first_name) {
+        attendeeData.first_name = toTitleCase(attendeeData.first_name);
+      }
+      if (attendeeData.sur_name) {
+        attendeeData.sur_name = toTitleCase(attendeeData.sur_name);
+      }
+
+      // Process contacts (remove spaces)
+      ['contact1', 'contact2', 'contact3'].forEach(field => {
+        if (attendeeData[field]) {
+          attendeeData[field] = attendeeData[field].replace(/\s/g, '');
+        }
+      });
+
+      // Validate license_type exists
+      const [licenseTypes] = await this.pool.query(`
+        SELECT id FROM driving_licence_types WHERE id = ?
+      `, [attendeeData.license_type]);
+
+      if (!licenseTypes.length) {
+        return res.status(400).json({ error: 'Invalid license type' });
+      }
+
+      // Validate vehicle_type availability
+      const [vehicleAvail] = await this.pool.query(`
+        SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own,
+               automatic_lock_done, manual_lock_done
+        FROM course_events
+        WHERE course_id = ? AND location_id = ? AND status = 1
+      `, [attendeeData.course_id, attendeeData.location_id]);
+
+      if (!vehicleAvail.length) {
+        return res.status(400).json({ error: 'Course not available' });
+      }
+
+      const event = vehicleAvail[0];
+      const isValidVehicle =
+        (attendeeData.vehicle_type === '1' && event.vehicle_type_automatic > event.automatic_lock_done) ||
+        (attendeeData.vehicle_type === '0' && event.vehicle_type_manual > event.manual_lock_done) ||
+        (attendeeData.vehicle_type === '3' && event.vehicle_type_own === 1);
+
+      if (!isValidVehicle) {
+        return res.status(400).json({ error: 'Vehicle type not available' });
+      }
+
+      res.json({
+        success: true,
+        attendee: {
+          license_number: attendeeData.license_number,
+          license_type: attendeeData.license_type,
+          vehicle_type: attendeeData.vehicle_type,
+          first_name: attendeeData.first_name,
+          sur_name: attendeeData.sur_name,
+          contact1: attendeeData.contact1,
+          contact2: attendeeData.contact2,
+          contact3: attendeeData.contact3,
+          email: attendeeData.email,
+          theory_number: attendeeData.theory_number
+        }
+      });
+    } catch (error) {
+      console.error('Error processing attendee:', error);
+      res.status(500).json({
+        success: false,
+        error: { code: 'SERVER_ERROR', message: 'Failed to process attendee' }
       });
     }
   }

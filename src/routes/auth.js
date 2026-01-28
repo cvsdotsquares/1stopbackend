@@ -10,12 +10,12 @@ function createAuthRoutes(pool) {
 
   // Validation rules
   const registerValidation = [
-    body('first_name')
+    body('firstName')
       .trim()
       .isLength({ min: 2, max: 50 })
       .withMessage('First name must be between 2 and 50 characters'),
     
-    body('sur_name')
+    body('surname')
       .trim()
       .isLength({ min: 2, max: 50 })
       .withMessage('Surname must be between 2 and 50 characters'),
@@ -26,49 +26,67 @@ function createAuthRoutes(pool) {
       .normalizeEmail()
       .withMessage('Please provide a valid email address'),
     
+    body('confirmEmail')
+      .trim()
+      .isEmail()
+      .normalizeEmail()
+      .withMessage('Please provide a valid confirmation email address')
+      .custom((value, { req }) => {
+        if (value !== req.body.email) {
+          throw new Error('Email confirmation does not match email');
+        }
+        return true;
+      }),
+    
     body('password')
       .isLength({ min: 8 })
       .withMessage('Password must be at least 8 characters long')
       .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
       .withMessage('Password must contain at least one lowercase letter, one uppercase letter, and one number'),
     
-    body('contact1')
+    body('verifyPassword')
+      .custom((value, { req }) => {
+        if (value !== req.body.password) {
+          throw new Error('Password confirmation does not match password');
+        }
+        return true;
+      }),
+    
+    body('contactNumber1')
       .trim()
       .isMobilePhone('en-GB')
       .withMessage('Please provide a valid UK mobile phone number'),
     
-    body('add1')
-      .optional()
+    body('addressLine1')
       .trim()
-      .isLength({ max: 255 })
-      .withMessage('Address line 1 must not exceed 255 characters'),
-    
-    body('add2')
-      .optional()
-      .trim()
-      .isLength({ max: 255 })
-      .withMessage('Address line 2 must not exceed 255 characters'),
-    
-    body('add3')
-      .optional()
-      .trim()
-      .isLength({ max: 255 })
-      .withMessage('Address line 3 must not exceed 255 characters'),
+      .isLength({ min: 1, max: 255 })
+      .withMessage('Address line 1 is required and must not exceed 255 characters'),
     
     body('postcode')
-      .optional()
       .trim()
       .matches(/^[A-Z]{1,2}[0-9RCHNQ][0-9A-Z]?\s?[0-9][ABD-HJLNP-UW-Z]{2}$/i)
       .withMessage('Please provide a valid UK postcode'),
     
-    body('contact2')
-      .optional()
+    body('addressLine2')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isLength({ max: 255 })
+      .withMessage('Address line 2 must not exceed 255 characters'),
+    
+    body('addressLine3')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isLength({ max: 255 })
+      .withMessage('Address line 3 must not exceed 255 characters'),
+    
+    body('contactNumber2')
+      .optional({ values: 'falsy' })
       .trim()
       .isMobilePhone('en-GB')
       .withMessage('Contact 2 must be a valid UK phone number'),
     
-    body('contact3')
-      .optional()
+    body('contactNumber3')
+      .optional({ values: 'falsy' })
       .trim()
       .isMobilePhone('en-GB')
       .withMessage('Contact 3 must be a valid UK phone number')

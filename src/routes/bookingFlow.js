@@ -45,18 +45,25 @@ module.exports = (pool) => {
   router.get('/settings', bookingFlowController.getSettings.bind(bookingFlowController));
 
   /**
-   * @route GET /api/booking/vehicle-types
-   * @desc Get vehicle types
+   * @route GET /api/booking/vehicle-types/:courseId/:locationId
+   * @desc Get available vehicle types for course and location
    * @access Public
    */
-  router.get('/vehicle-types', bookingFlowController.getVehicleTypes.bind(bookingFlowController));
+  router.get('/vehicle-types/:courseId/:locationId', bookingFlowController.getVehicleTypesByCourseLocation.bind(bookingFlowController));
 
   /**
    * @route GET /api/booking/license-types
-   * @desc Get license types
+   * @desc Get all license types
    * @access Public
    */
   router.get('/license-types', bookingFlowController.getLicenseTypes.bind(bookingFlowController));
+
+  /**
+   * @route POST /api/booking/attendee
+   * @desc Process attendee data with validation
+   * @access Public
+   */
+  router.post('/attendee', bookingFlowController.processAttendee.bind(bookingFlowController));
 
   /**
    * @route POST /api/booking/promo-codes/validate
