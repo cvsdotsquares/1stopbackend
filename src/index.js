@@ -16,7 +16,9 @@ const locationCourseRoutes = require('./routes/locationcourse');
 const allLocationsRoutes = require('./routes/alllocation');
 const pageMenuRoutes = require('./routes/pagemenu');
 const dynamicDataRoutes = require('./routes/dynamicData');
+const createPreBookingRoutes = require('./routes/preBooking');
 const bookingFlowRoutes = require('./routes/bookingFlow');
+const createPriceCalculationRoutes = require('./routes/priceCalculation');
 const app = express();
 
 // Middleware
@@ -101,7 +103,9 @@ app.use('/api/location-course', locationCourseRoutes(pool));
 app.use('/api/all-locations', allLocationsRoutes(pool));
 app.use('/api/pagemenu', pageMenuRoutes(pool));
 app.use('/api/get-data', dynamicDataRoutes(pool));
+app.use('/api/booking', createPreBookingRoutes(pool));
 app.use('/api/booking', bookingFlowRoutes(pool));
+app.use('/api/booking/pricing', createPriceCalculationRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
@@ -185,6 +189,11 @@ app.get('/api', (req, res) => {
       contactus: {
         'GET /api/contactus': 'Get contact us content from existing database tables',
         'POST /api/contactus': 'Create a new contact us entry in the database'
+      },
+      pricing: {
+        'POST /api/booking/pricing/calculate': 'Calculate booking price with all business rules',
+        'GET /api/booking/pricing/validate/:course_event_id': 'Validate course event for pricing',
+        'GET /api/booking/pricing/options/:course_event_id': 'Get pricing options for course event'
       }
     },
     authentication: {

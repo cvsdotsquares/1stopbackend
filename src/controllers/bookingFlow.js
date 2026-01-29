@@ -12,7 +12,6 @@ class BookingFlowController {
           c.course_name,
           c.course_abb,
           '1 day' as duration,
-          ce.school_one_off_price,
           c.is_cbt,
           c.status,
           0 as isVoucher
