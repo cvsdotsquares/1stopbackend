@@ -77,7 +77,7 @@ class PreBookingController {
   // Lock booking spaces
   async lockSpaces(req, res) {
     try {
-      const { event_id, space_count, ip_address } = req.body;
+      const { event_id, space_count, ip_address, user_id = 0 } = req.body;
 
       if (!event_id || !space_count || !ip_address) {
         return res.status(400).json({ success: false, message: 'Missing required fields' });
@@ -102,8 +102,8 @@ class PreBookingController {
 
       const [result] = await this.pool.query(`
         INSERT INTO lock_bookings (event_id, parent, user_id, space_required, ip_address, manual_lock, automatic_lock, payment_page_stauts, delete_process, created, modified)
-        VALUES (?, ?, 0, ?, ?, 0, 0, 0, 0, NOW(), NOW())
-      `, [event_id, parentId, space_count, ip_address]);
+        VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, NOW(), NOW())
+      `, [event_id, parentId, user_id, space_count, ip_address]);
 
       // Update course_events current_locks
       await this.pool.query(`
@@ -266,7 +266,7 @@ class PreBookingController {
             await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
             await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
             await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
-            
+
             // Update course_events bookings_done
             await connection.query(`
               UPDATE course_events
@@ -280,7 +280,7 @@ class PreBookingController {
           const [userLocks] = await connection.query(`
             SELECT COUNT(*) as count FROM lock_bookings WHERE user_id = ?
           `, [user_id]);
-          
+
           await connection.query(`DELETE FROM lock_bookings WHERE user_id = ?`, [user_id]);
           cleanedLocks = userLocks[0].count;
 
@@ -298,7 +298,7 @@ class PreBookingController {
             await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
             await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
             await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
-            
+
             // Update course_events bookings_done
             await connection.query(`
               UPDATE course_events
@@ -312,7 +312,7 @@ class PreBookingController {
           const [ipLocks] = await connection.query(`
             SELECT COUNT(*) as count FROM lock_bookings WHERE ip_address = ?
           `, [ip_address]);
-          
+
           await connection.query(`DELETE FROM lock_bookings WHERE ip_address = ?`, [ip_address]);
           cleanedLocks = ipLocks[0].count;
         }

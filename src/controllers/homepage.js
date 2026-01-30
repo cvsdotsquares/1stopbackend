@@ -75,7 +75,7 @@ class HomepageController {
           faqs: []
         },
         locations: {
-          location_id: null,          
+          location_id: null,
           name: null,
           pageTitle: null,
           slugUrl: ""
@@ -86,7 +86,7 @@ class HomepageController {
             label: "Our Next Available CBT Course Is",
             dateText: "TOMORROW",
             ctaText: "Book Now!",
-            ctaLink: "/book"
+            ctaLink: "/bookings"
           },
           search: {
             title: "Find your training",
