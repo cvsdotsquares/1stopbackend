@@ -82,6 +82,7 @@ function createPreBookingRoutes(pool) {
   // Admin routes
   router.post('/cleanup-locks', authenticateToken, preBookingController.cleanupExpiredLocks.bind(preBookingController));
   router.post('/cleanup-prebookings', cleanupValidation, handleValidationErrors, preBookingController.cleanupExpiredPreBookings.bind(preBookingController));
+  router.post('/payment-result', preBookingController.handlePaymentResult.bind(preBookingController));
 
   return router;
 }

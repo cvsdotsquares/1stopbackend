@@ -4,6 +4,7 @@
  */
 
 const dotenv = require('dotenv');
+const nodemailer = require('nodemailer');
 dotenv.config();
 
 class AllLocationsController {

@@ -344,7 +344,7 @@ class BookingController {
         course_event_id,
         spaces_required,
         req.user?.id || 0,
-        req.ip
+        req.clientIp || req.ip
       ]);
 
       // Update current locks
