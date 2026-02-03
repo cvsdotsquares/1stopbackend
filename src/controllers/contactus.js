@@ -5,6 +5,7 @@
 
 const nodemailer = require('nodemailer');
 const dotenv = require('dotenv');
+const { replaceTokensInObject } = require('../utils/tokenReplacer');
 dotenv.config();
 
 class ContactUsController {
@@ -93,7 +94,10 @@ class ContactUsController {
                 status: office.status
             }));
         }
-        res.json({ success: true, data: contactContent });
+        
+        const processedContactContent = await replaceTokensInObject(this.pool, contactContent);
+        
+        res.json({ success: true, data: processedContactContent });
     } catch (error) {
       console.error('Error fetching contact us content:', error);
       res.status(500).json({ success: false, message: 'Internal server error' });

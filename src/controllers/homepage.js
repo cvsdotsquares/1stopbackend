@@ -2,6 +2,7 @@
 /**
  * Homepage Controller - handles homepage content from existing tables
  */
+const { replaceTokensInObject } = require('../utils/tokenReplacer');
 
 class HomepageController {
   constructor(pool) {
@@ -370,9 +371,10 @@ class HomepageController {
       // Remove pages_banner usage - not used for homepage
       // Homepage uses pageSliders for hero section instead
 
+      const processedHomepage = await replaceTokensInObject(this.pool, homepage);
       res.json({
         success: true,
-        data: homepage
+        data: processedHomepage
       });
 
     } catch (error) {

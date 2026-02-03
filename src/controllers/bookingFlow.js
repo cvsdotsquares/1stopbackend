@@ -49,89 +49,186 @@ class BookingFlowController {
     }
   }
 
-async getCourseAvailability(req, res) {
-  try {
-    const { course_id, location_id } = req.query;
+  async getCourseAvailability(req, res) {
+    try {
+      const { course_id, location_id } = req.query;
 
-    if (!course_id || !location_id) {
-      return res.status(400).json({
+      if (!course_id || !location_id) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Course ID and Location ID are required' }
+        });
+      }
+
+      // Query matching PHP course_avails exactly - without DISTINCT
+      const [events] = await this.pool.query(`
+        SELECT
+          ced.course_event_id,
+          ced.event_date,
+          ced.event_start_time,
+          ced.event_end_time,
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          ce.event_type,
+          c.course_name,
+          COALESCE(f.freeze_count, 0) as freeze_count
+        FROM course_event_dates ced
+        JOIN course_events ce ON ced.course_event_id = ce.id
+        JOIN courses c ON ce.course_id = c.id
+        LEFT JOIN (
+          SELECT course_event_id, COUNT(*) as freeze_count
+          FROM freeze
+          GROUP BY course_event_id
+        ) f ON f.course_event_id = ced.course_event_id
+        WHERE ce.course_id = ?
+          AND ce.location_id = ?
+          AND c.status = '1'
+          AND ce.status = '1'
+          AND ced.event_date > CURDATE()
+          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 6 WEEK)
+        ORDER BY ced.event_date ASC
+      `, [course_id, location_id]);
+
+      if (events.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'No availability found' }
+        });
+      }
+
+      const availability = events.map(event => {
+        const availableSpaces = event.booking_limit - event.bookings_done - event.current_locks;
+        const isFullyBooked = (event.bookings_done + event.current_locks) >= event.booking_limit;
+        const isFrozen = event.freeze_count > 0;
+
+        return {
+          date: event.event_date,
+          available: !isFullyBooked && !isFrozen,
+          available_spaces: Math.max(0, availableSpaces),
+          booking_limit: event.booking_limit,
+          bookings_done: event.bookings_done,
+          current_locks: event.current_locks,
+          event_start_time: event.event_start_time,
+          event_end_time: event.event_end_time,
+          course_event_id: event.course_event_id,
+          freeze: isFrozen ? 1 : 0
+        };
+      });
+
+      res.json({
+        success: true,
+        data: {
+          course_id: parseInt(course_id),
+          location_id: parseInt(location_id),
+          availability
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching course availability:', error);
+      res.status(500).json({
         success: false,
-        error: { code: 'VALIDATION_ERROR', message: 'Course ID and Location ID are required' }
+        error: { code: 'SERVER_ERROR', message: 'Failed to fetch course availability' }
       });
     }
+  }
 
-    // Query matching PHP course_avails exactly - without DISTINCT
-    const [events] = await this.pool.query(`
-      SELECT
-        ced.course_event_id,
-        ced.event_date,
-        ced.event_start_time,
-        ced.event_end_time,
-        ce.booking_limit,
-        ce.bookings_done,
-        ce.current_locks,
-        ce.event_type,
-        c.course_name,
-        COALESCE(f.freeze_count, 0) as freeze_count
-      FROM course_event_dates ced
-      JOIN course_events ce ON ced.course_event_id = ce.id
-      JOIN courses c ON ce.course_id = c.id
-      LEFT JOIN (
-        SELECT course_event_id, COUNT(*) as freeze_count
-        FROM freeze
-        GROUP BY course_event_id
-      ) f ON f.course_event_id = ced.course_event_id
-      WHERE ce.course_id = ?
-        AND ce.location_id = ?
-        AND c.status = '1'
-        AND ce.status = '1'
-        AND ced.event_date > CURDATE()
-        AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 6 WEEK)
-      ORDER BY ced.event_date ASC
-    `, [course_id, location_id]);
+  async getNextAvailabilityForCBT(req, res) {
+    try {
+      const cbtCourseId = 1; // CBT course ID
 
-    if (events.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 'NOT_FOUND', message: 'No availability found' }
-      });
-    }
+      // Query to find the next available date for CBT course across all locations
+      const [availability] = await this.pool.query(`
+        SELECT
+          ced.course_event_id,
+          DATE_FORMAT(ced.event_date, '%Y-%m-%d') as event_date,
+          ced.event_start_time,
+          ced.event_end_time,
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          ce.location_id,
+          ce.course_id,
+          c.course_name,
+          l.id as location_id,
+          l.location_name,
+          l.address1,
+          l.address2,
+          l.address3,
+          l.address4,
+          l.postcode,
+          l.latitude,
+          l.longitude,
+          COALESCE(f.freeze_count, 0) as freeze_count
+        FROM course_event_dates ced
+        JOIN course_events ce ON ced.course_event_id = ce.id
+        JOIN courses c ON ce.course_id = c.id
+        JOIN locations l ON ce.location_id = l.id
+        LEFT JOIN (
+          SELECT course_event_id, COUNT(*) as freeze_count
+          FROM freeze
+          GROUP BY course_event_id
+        ) f ON f.course_event_id = ced.course_event_id
+        WHERE ce.course_id = ?
+          AND c.is_cbt = 1
+          AND c.status = '1'
+          AND ce.status = '1'
+          AND DATE(ced.event_date) > DATE(NOW())
+          AND DATE(ced.event_date) <= DATE_ADD(DATE(NOW()), INTERVAL 6 WEEK)
+        ORDER BY ced.event_date ASC, l.location_name ASC
+        LIMIT 1
+      `, [cbtCourseId]);
 
-    const availability = events.map(event => {
+      if (availability.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'No CBT courses available' }
+        });
+      }
+
+      const event = availability[0];
       const availableSpaces = event.booking_limit - event.bookings_done - event.current_locks;
       const isFullyBooked = (event.bookings_done + event.current_locks) >= event.booking_limit;
       const isFrozen = event.freeze_count > 0;
 
-      return {
-        date: event.event_date,
-        available: !isFullyBooked && !isFrozen,
-        available_spaces: Math.max(0, availableSpaces),
-        booking_limit: event.booking_limit,
-        bookings_done: event.bookings_done,
-        current_locks: event.current_locks,
-        event_start_time: event.event_start_time,
-        event_end_time: event.event_end_time,
-        course_event_id: event.course_event_id,
-        freeze: isFrozen ? 1 : 0
-      };
-    });
-
-    res.json({
-      success: true,
-      data: {
-        course_id: parseInt(course_id),
-        location_id: parseInt(location_id),
-        availability
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching course availability:', error);
-    res.status(500).json({
-      success: false,
-      error: { code: 'SERVER_ERROR', message: 'Failed to fetch course availability' }
-    });
+      res.json({
+        success: true,
+        data: {
+          course_id: event.course_id,
+          course_name: event.course_name,
+          location_id: event.location_id,
+          location_name: event.location_name,
+          todays_date: new Date().toISOString().split('T')[0],
+          address: {
+            address1: event.address1,
+            address2: event.address2,
+            address3: event.address3,
+            address4: event.address4,
+            postcode: event.postcode
+          },
+          coordinates: {
+            latitude: event.latitude,
+            longitude: event.longitude
+          },
+          next_available: {
+            date: event.event_date,
+            event_start_time: event.event_start_time,
+            event_end_time: event.event_end_time,
+            course_event_id: event.course_event_id,
+            available: !isFullyBooked && !isFrozen,
+            available_spaces: Math.max(0, availableSpaces),
+            is_frozen: isFrozen ? 1 : 0
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching next CBT availability:', error);
+      res.status(500).json({
+        success: false,
+        error: { code: 'SERVER_ERROR', message: 'Failed to fetch next CBT availability' }
+      });
+    }
   }
-}
 
   async getLocationsByCourse(req, res) {
     try {
@@ -169,6 +266,46 @@ async getCourseAvailability(req, res) {
       res.status(500).json({
         success: false,
         error: { code: 'SERVER_ERROR', message: 'Failed to fetch locations' }
+      });
+    }
+
+    try {
+      const { courseId, locationId } = req.params;
+
+      const [rows] = await this.pool.query(`
+        SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own,
+               automatic_lock_done, manual_lock_done
+        FROM course_events
+        WHERE course_id = ? AND location_id = ? AND status = '1'
+      `, [courseId, locationId]);
+
+      if (!rows.length) {
+        return res.json({ error: 'No course events found' });
+      }
+
+      const event = rows[0];
+      const vTypeSelect = {};
+
+      if (event.vehicle_type_automatic > 0 &&
+          event.vehicle_type_automatic > event.automatic_lock_done) {
+        vTypeSelect['1'] = 'Automatic';
+      }
+
+      if (event.vehicle_type_manual > 0 &&
+          event.vehicle_type_manual > event.manual_lock_done) {
+        vTypeSelect['0'] = 'Manual';
+      }
+
+      if (event.vehicle_type_own == 1) {
+        vTypeSelect['3'] = 'I will be using my own vehicle';
+      }
+
+      res.json({ vehicleTypes: vTypeSelect });
+    } catch (error) {
+      console.error('Error fetching vehicle types by course/location:', error);
+      res.status(500).json({
+        success: false,
+        error: { code: 'SERVER_ERROR', message: 'Failed to fetch vehicle types' }
       });
     }
   }
@@ -459,7 +596,8 @@ async getCourseAvailability(req, res) {
       const {
         course_id, course_event_id, location_id, selected_date,
         attendees_count, user_details, attendees,
-        create_account = false, password = ''
+        create_account = false, password = '', lock_id = 0
+
       } = req.body;
 
       const connection = await this.pool.getConnection();
@@ -495,21 +633,21 @@ async getCourseAvailability(req, res) {
 
         const [bookingResult] = await connection.query(`
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
-                               payment_due, total_fees, vatrate, vat, total_amount, status, created, modified)
-          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())
-        `, [course_id, course_event_id, user_id || 0, attendees_count, totalAmount, totalFees, vatRate, vat, totalAmount]);
+                               payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by)
+          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, 0, NOW(), NOW(), 0, ?)
+        `, [course_id, course_event_id, user_id || 0, attendees_count, totalAmount, totalFees, vatRate, vat, totalAmount, lock_id, user_id || 0]);
 
         const booking_id = bookingResult.insertId;
 
         for (let attendee of attendees) {
           await connection.query(`
-            INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2,
+            INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                    email, vehicle_type, license_type, license_number, theory_number,
                                                    notes, \`primary\`, created, updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
-            attendee.contact1, attendee.contact2 || '', attendee.email,
+            attendee.contact1, attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             attendee.vehicle_type, attendee.license_type, attendee.license_number,
             attendee.theory_number, attendee.notes || '', attendee.primary ? 1 : 0
           ]);
@@ -522,7 +660,7 @@ async getCourseAvailability(req, res) {
         res.status(201).json({
           success: true,
           data: {
-            booking_id, booking_ref, payment_due: totalAmount,
+            booking_id, booking_ref: bookingRef, payment_due: totalAmount,
             total_fees: totalFees, vat, total_amount: totalAmount, payment_token: paymentToken
           }
         });

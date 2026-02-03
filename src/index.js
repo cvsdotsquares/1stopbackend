@@ -18,6 +18,7 @@ const pageMenuRoutes = require('./routes/pagemenu');
 const dynamicDataRoutes = require('./routes/dynamicData');
 const createPreBookingRoutes = require('./routes/preBooking');
 const bookingFlowRoutes = require('./routes/bookingFlow');
+const createHelperRoutes = require('./routes/helper');
 const createPriceCalculationRoutes = require('./routes/priceCalculation');
 const app = express();
 
@@ -105,6 +106,7 @@ app.use('/api/pagemenu', pageMenuRoutes(pool));
 app.use('/api/get-data', dynamicDataRoutes(pool));
 app.use('/api/booking', createPreBookingRoutes(pool));
 app.use('/api/booking', bookingFlowRoutes(pool));
+app.use('/api/helper', createHelperRoutes(pool));
 app.use('/api/booking/pricing', createPriceCalculationRoutes(pool));
 
 // API Documentation endpoint

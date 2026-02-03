@@ -31,6 +31,13 @@ module.exports = (pool) => {
   router.get('/course-availability', bookingFlowController.getCourseAvailability.bind(bookingFlowController));
 
   /**
+   * @route GET /api/booking/next-availability-cbt
+   * @desc Get next available date for CBT course (ID=1) with location details
+   * @access Public
+   */
+  router.get('/next-availability-cbt', bookingFlowController.getNextAvailabilityForCBT.bind(bookingFlowController));
+
+  /**
    * @route POST /api/booking/lock
    * @desc Create booking lock
    * @access Public

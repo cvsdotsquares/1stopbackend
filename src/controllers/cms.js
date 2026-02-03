@@ -1,5 +1,6 @@
 // src/controllers/cms.js
 const { validationResult } = require('express-validator');
+const { replaceTokensInObject } = require('../utils/tokenReplacer');
 
 class CMSController {
   constructor(pool) {
@@ -85,9 +86,11 @@ class CMSController {
       const total = countResult[0].total;
       const totalPages = Math.ceil(total / limit);
 
+      const processedPages = await replaceTokensInObject(this.pool, pages);
+
       res.json({
         success: true,
-        data: pages,
+        data: processedPages,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -204,20 +207,22 @@ class CMSController {
         current: true
       });
 
+      const processedData = await replaceTokensInObject(this.pool, {
+        ...page,
+        childPages,
+        parentPage,
+        breadcrumbs,
+        seo: {
+          title: page.meta_title || page.page_title,
+          description: page.meta_desc,
+          keywords: page.meta_keyword,
+          canonical: `/${page.slug}`
+        }
+      });
+
       res.json({
         success: true,
-        data: {
-          ...page,
-          childPages,
-          parentPage,
-          breadcrumbs,
-          seo: {
-            title: page.meta_title || page.page_title,
-            description: page.meta_desc,
-            keywords: page.meta_keyword,
-            canonical: `/${page.slug}`
-          }
-        }
+        data: processedData
       });
 
     } catch (error) {
