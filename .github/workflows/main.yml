@@ -39,6 +39,11 @@ jobs:
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}
             REFRESH_TOKEN_EXPIRES_IN=${{ secrets.REFRESH_TOKEN_EXPIRES_IN }}
+            CONTACT_TO=${{ secrets.CONTACT_TO }}
+            WORLDPAY_INST_ID=${{ secrets.WORLDPAY_INST_ID }}
+            WORLDPAY_MD5_SECRET=${{ secrets.WORLDPAY_MD5_SECRET }}
+            WORLDPAY_TEST_MODE=${{ secrets.WORLDPAY_TEST_MODE }}
+            SITE_URL=${{ secrets.SITE_URL }}
             NODE_ENV=production
             EOF
 
