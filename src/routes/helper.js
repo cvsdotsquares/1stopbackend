@@ -61,6 +61,10 @@ function createHelperRoutes(pool) {
     helperController.processContent.bind(helperController)
   );
 
+  router.get('/footer-data',
+    helperController.getFooterData.bind(helperController)
+  );
+
   return router;
 }
 

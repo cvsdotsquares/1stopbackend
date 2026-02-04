@@ -133,6 +133,119 @@ class HelperController {
       });
     }
   }
+
+  async getFooterData(req, res) {
+    try {
+      // Get footer blocks
+      const [footerBlocks] = await this.pool.query(`
+        SELECT page_content, footer_left_content
+        FROM pages
+        WHERE id = 73
+      `);
+
+      // Get footer menu sections - try all records first
+      const [allFooterMenuSections] = await this.pool.query(`
+        SELECT id, footer_menu_column, menu_weight, menu_status
+        FROM footer_menu_section
+        ORDER BY menu_weight ASC
+      `);
+
+      const [footerMenuSections] = await this.pool.query(`
+        SELECT id, footer_menu_column, menu_weight
+        FROM footer_menu_section
+        ORDER BY menu_weight ASC
+      `);
+
+      // Get all footer links
+      const [footerLinks] = await this.pool.query(`
+        SELECT footer_link_title, navigation_type, footer_link_url, menu_column, weight
+        FROM footer_links
+        ORDER BY weight ASC
+      `);
+
+      // Get page slugs for navigation links
+      const pageIds = footerLinks.map(link => link.navigation_type).filter(id => id);
+      let pageMenus = [];
+      if (pageIds.length > 0) {
+        const [results] = await this.pool.query(`
+          SELECT page_link_id, page_slug
+          FROM page_menus
+          WHERE page_link_id IN (${pageIds.map(() => '?').join(',')})
+        `, pageIds);
+        pageMenus = results;
+      }
+
+      // Create page slug lookup
+      const pageSlugMap = {};
+      pageMenus.forEach(page => {
+        pageSlugMap[page.page_link_id] = page.page_slug;
+      });
+
+      // Build menu structure - use fallback if no sections found
+      let menu = [];
+      if (footerMenuSections.length > 0) {
+        menu = footerMenuSections.map(section => {
+          const items = footerLinks.filter(link => link.menu_column === section.id);
+          return {
+            name: section.footer_menu_column,
+            items: items.map(link => ({
+              footer_link_title: link.footer_link_title,
+              navigation_type: link.navigation_type,
+              footer_link_url: link.footer_link_url || pageSlugMap[link.navigation_type] || '',
+              weight: link.weight
+            }))
+          };
+        });
+      } else {
+        // Fallback: group by menu_column values
+        const columnGroups = {};
+        footerLinks.forEach(link => {
+          if (!columnGroups[link.menu_column]) {
+            columnGroups[link.menu_column] = [];
+          }
+          columnGroups[link.menu_column].push({
+            footer_link_title: link.footer_link_title,
+            navigation_type: link.navigation_type,
+            footer_link_url: link.footer_link_url || pageSlugMap[link.navigation_type] || '',
+            weight: link.weight
+          });
+        });
+
+        menu = Object.keys(columnGroups).map(columnId => ({
+          name: `Menu Column ${columnId}`,
+          items: columnGroups[columnId]
+        }));
+      }
+
+      const footerData = {
+        lhs_block: footerBlocks[0]?.footer_left_content || '',
+        rhs_block: footerBlocks[0]?.page_content || '',
+        menu
+      };
+
+      // Process only the text blocks, keep menu as-is
+      const processedBlocks = await replaceTokensInObject(this.pool, {
+        lhs_block: footerData.lhs_block,
+        rhs_block: footerData.rhs_block
+      });
+
+      const finalData = {
+        ...processedBlocks,
+        menu: footerData.menu
+      };
+
+      res.json({
+        success: true,
+        data: finalData
+      });
+    } catch (error) {
+      console.error('Error fetching footer data:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch footer data'
+      });
+    }
+  }
 }
 
 module.exports = HelperController;
