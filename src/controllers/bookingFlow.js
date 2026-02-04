@@ -268,46 +268,6 @@ class BookingFlowController {
         error: { code: 'SERVER_ERROR', message: 'Failed to fetch locations' }
       });
     }
-
-    try {
-      const { courseId, locationId } = req.params;
-
-      const [rows] = await this.pool.query(`
-        SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own,
-               automatic_lock_done, manual_lock_done
-        FROM course_events
-        WHERE course_id = ? AND location_id = ? AND status = '1'
-      `, [courseId, locationId]);
-
-      if (!rows.length) {
-        return res.json({ error: 'No course events found' });
-      }
-
-      const event = rows[0];
-      const vTypeSelect = {};
-
-      if (event.vehicle_type_automatic > 0 &&
-          event.vehicle_type_automatic > event.automatic_lock_done) {
-        vTypeSelect['1'] = 'Automatic';
-      }
-
-      if (event.vehicle_type_manual > 0 &&
-          event.vehicle_type_manual > event.manual_lock_done) {
-        vTypeSelect['0'] = 'Manual';
-      }
-
-      if (event.vehicle_type_own == 1) {
-        vTypeSelect['3'] = 'I will be using my own vehicle';
-      }
-
-      res.json({ vehicleTypes: vTypeSelect });
-    } catch (error) {
-      console.error('Error fetching vehicle types by course/location:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Failed to fetch vehicle types' }
-      });
-    }
   }
 
   async getSettings(req, res) {
@@ -356,12 +316,12 @@ class BookingFlowController {
       const vTypeSelect = {};
 
       if (event.vehicle_type_automatic > 0 &&
-          event.vehicle_type_automatic > event.automatic_lock_done) {
+        event.vehicle_type_automatic > event.automatic_lock_done) {
         vTypeSelect['1'] = 'Automatic';
       }
 
       if (event.vehicle_type_manual > 0 &&
-          event.vehicle_type_manual > event.manual_lock_done) {
+        event.vehicle_type_manual > event.manual_lock_done) {
         vTypeSelect['0'] = 'Manual';
       }
 
@@ -592,6 +552,9 @@ class BookingFlowController {
   }
 
   async createBookingWithAttendees(req, res) {
+    console.log('=== CREATE BOOKING WITH ATTENDEES CALLED ===');
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
     try {
       const {
         course_id, course_event_id, location_id, selected_date,
@@ -619,6 +582,7 @@ class BookingFlowController {
           ]);
 
           user_id = userResult.insertId;
+          console.log('User created with ID:', user_id);
         }
 
         const [courseData] = await connection.query(`SELECT dsa_fees FROM courses WHERE id = ?`, [course_id]);
@@ -630,6 +594,7 @@ class BookingFlowController {
 
         const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
         const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
+        console.log('Creating booking with ref:', bookingRef);
 
         const [bookingResult] = await connection.query(`
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
@@ -638,9 +603,29 @@ class BookingFlowController {
         `, [course_id, course_event_id, user_id || 0, attendees_count, totalAmount, totalFees, vatRate, vat, totalAmount, lock_id, user_id || 0]);
 
         const booking_id = bookingResult.insertId;
+        console.log('Booking created with ID:', booking_id);
 
-        for (let attendee of attendees) {
-          await connection.query(`
+        console.log('Creating attendee records for', attendees.length, 'attendees');
+        for (let i = 0; i < attendees.length; i++) {
+          const attendee = attendees[i];
+          console.log(`Creating attendee ${i + 1}:`, attendee.first_name, attendee.sur_name);
+          
+          // Insert into booking_attendees
+          const [attendeeResult] = await connection.query(`
+            INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                         email, vehicle_type, license_type, license_number, theory_number,
+                                         admin_notes, notes, contact_card_id, \`primary\`, created)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
+          `, [
+            booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+            attendee.contact1, attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+            attendee.vehicle_type, attendee.license_type, attendee.license_number,
+            attendee.theory_number, i === 0 ? 1 : 0
+          ]);
+          console.log('Attendee record created with ID:', attendeeResult.insertId);
+          
+          // Insert into booking_attendees_dropdown
+          const [dropdownResult] = await connection.query(`
             INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                    email, vehicle_type, license_type, license_number, theory_number,
                                                    notes, \`primary\`, created, updated)
@@ -649,13 +634,15 @@ class BookingFlowController {
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1, attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             attendee.vehicle_type, attendee.license_type, attendee.license_number,
-            attendee.theory_number, attendee.notes || '', attendee.primary ? 1 : 0
+            attendee.theory_number, attendee.notes || '', i === 0 ? 1 : 0
           ]);
+          console.log('Dropdown record created with ID:', dropdownResult.insertId);
         }
 
         const paymentToken = `token_${booking_id}_${Date.now()}`;
 
         await connection.commit();
+        console.log('Transaction committed successfully');
 
         res.status(201).json({
           success: true,
@@ -666,6 +653,7 @@ class BookingFlowController {
         });
       } catch (error) {
         await connection.rollback();
+        console.error('Transaction rolled back due to error:', error);
         throw error;
       } finally {
         connection.release();
