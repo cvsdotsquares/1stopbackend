@@ -1,4 +1,7 @@
 // src/controllers/bookingFlow.js
+const BookingController = require('../controllers/bookings');
+const crypto = require('crypto');
+
 class BookingFlowController {
   constructor(pool) {
     this.pool = pool;
@@ -554,7 +557,7 @@ class BookingFlowController {
   async createBookingWithAttendees(req, res) {
     console.log('=== CREATE BOOKING WITH ATTENDEES CALLED ===');
     console.log('Request body:', JSON.stringify(req.body, null, 2));
-    
+
     try {
       const {
         course_id, course_event_id, location_id, selected_date,
@@ -609,7 +612,7 @@ class BookingFlowController {
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];
           console.log(`Creating attendee ${i + 1}:`, attendee.first_name, attendee.sur_name);
-          
+
           // Insert into booking_attendees
           const [attendeeResult] = await connection.query(`
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
@@ -623,7 +626,7 @@ class BookingFlowController {
             attendee.theory_number, i === 0 ? 1 : 0
           ]);
           console.log('Attendee record created with ID:', attendeeResult.insertId);
-          
+
           // Insert into booking_attendees_dropdown
           const [dropdownResult] = await connection.query(`
             INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
@@ -639,6 +642,54 @@ class BookingFlowController {
           console.log('Dropdown record created with ID:', dropdownResult.insertId);
         }
 
+        // WorldPay Integration
+        const isTest = process.env.WORLDPAY_TEST_MODE || '100'; // Default to test mode
+        const instId = process.env.WORLDPAY_INST_ID || '1382788';
+        const secret = process.env.WORLDPAY_MD5_SECRET || 'N0EIz$GtcGdH1i7tASjQHg7H5urhD'; // Must be set in production
+        const currency = 'GBP';
+        const amountStr = totalAmount.toFixed(2);
+        const cartId = bookingRef;
+
+        console.log('WorldPay Config:', { isTest, instId, hasSecret: !!secret, amount: amountStr, cartId });
+
+        // MD5 signature for WorldPay: secret:instId:amount:currency:cartId
+        const signatureString = `${secret}:${instId}:${amountStr}:${currency}:${cartId}`;
+        const signature = crypto.createHash('md5').update(signatureString).digest('hex');
+        
+        console.log('Signature String:', signatureString);
+        console.log('Generated Signature:', signature);
+
+        // URLs
+        const siteUrl = process.env.SITE_URL || 'http://localhost:3000';
+
+        const paymentData = {
+          url: isTest === '100' ? 'https://secure-test.worldpay.com/wcc/purchase' : 'https://secure.worldpay.com/wcc/purchase',
+          fields: {
+            testMode: isTest,
+            instId: instId,
+            cartId: cartId,
+            amount: amountStr,
+            currency: currency,
+            desc: '1 Stop Instruction Course Booking',
+            name: `${user_details.first_name} ${user_details.sur_name}`,
+            address1: user_details.address1 || '',
+            postcode: user_details.postcode || '',
+            email: user_details.email,
+            tel: user_details.contact1 || '',
+            country: 'GB',
+            lang: 'en',
+            // Signature must match the order used in signature string
+            signatureFields: 'instId:amount:currency:cartId',
+            signature: signature,
+            // Return URLs
+            successURL: `${siteUrl}/bookings/payment-success`,
+            cancelURL: `${siteUrl}/bookings/payment-cancel`,
+            failureURL: `${siteUrl}/bookings/payment-failure`,
+            // Callback for server-to-server notification
+            MC_callback: `${siteUrl}/api/webhook/worldpay`
+          }
+        };
+
         const paymentToken = `token_${booking_id}_${Date.now()}`;
 
         await connection.commit();
@@ -646,10 +697,14 @@ class BookingFlowController {
 
         res.status(201).json({
           success: true,
-          data: {
-            booking_id, booking_ref: bookingRef, payment_due: totalAmount,
-            total_fees: totalFees, vat, total_amount: totalAmount, payment_token: paymentToken
-          }
+          booking_id,
+          booking_ref: bookingRef,
+          payment_due: totalAmount,
+          total_fees: totalFees,
+          vat,
+          total_amount: totalAmount,
+          payment_token: paymentToken,
+          payment_data: paymentData
         });
       } catch (error) {
         await connection.rollback();
