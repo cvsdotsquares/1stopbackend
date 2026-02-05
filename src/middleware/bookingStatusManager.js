@@ -88,11 +88,8 @@ class BookingStatusManager {
   static createStatusUpdateMiddleware(pool) {
     return async (req, res, next) => {
       try {
-        // This middleware can be used to automatically update booking statuses
-        // For example, mark bookings as NO_SHOW if event date has passed and they're still confirmed
-        
-        // Only run this for certain routes to avoid performance impact
-        const shouldRunStatusUpdate = req.path.includes('/bookings') && req.method === 'GET';
+        // Run cleanup more frequently for timeout bookings
+        const shouldRunStatusUpdate = req.path.includes('/bookings') || req.path.includes('/payment');
         
         if (shouldRunStatusUpdate) {
           await this.updateExpiredBookings(pool);
@@ -108,6 +105,21 @@ class BookingStatusManager {
   }
 
   /**
+   * Start automatic cleanup job that runs every minute
+   */
+  static startCleanupJob(pool) {
+    setInterval(async () => {
+      try {
+        await this.updateExpiredBookings(pool);
+      } catch (error) {
+        console.error('Cleanup job error:', error);
+      }
+    }, 60000); // Run every minute
+    
+    console.log('Booking cleanup job started - runs every minute');
+  }
+
+  /**
    * Update expired bookings to appropriate statuses
    */
   static async updateExpiredBookings(pool) {
@@ -116,43 +128,51 @@ class BookingStatusManager {
     try {
       await connection.beginTransaction();
 
+      // Cancel pending payment bookings older than 10 minutes
+      const [timeoutBookings] = await connection.query(`
+        UPDATE bookings b
+        SET b.status = ?, b.modified = NOW()
+        WHERE b.status = ? 
+          AND b.created <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+      `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
+
+      // Release spaces from timeout cancelled bookings
+      if (timeoutBookings.affectedRows > 0) {
+        await connection.query(`
+          UPDATE course_events ce
+          JOIN bookings b ON ce.id = b.course_event_id
+          SET ce.current_locks = GREATEST(0, ce.current_locks - b.spaces)
+          WHERE b.status = ? 
+            AND b.modified >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
+        `, [this.STATUS.CANCELLED]);
+      }
+
       // Mark confirmed bookings as completed if event was yesterday or earlier
       const [completedBookings] = await connection.query(`
         UPDATE bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id
         SET b.status = ?, b.modified = NOW()
         WHERE b.status = ? 
-          AND ce.event_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
-          AND ce.event_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+          AND ced.event_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+          AND ced.event_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
       `, [this.STATUS.COMPLETED, this.STATUS.CONFIRMED]);
 
       // Mark pending payment bookings as cancelled if event is tomorrow or sooner
       const [cancelledBookings] = await connection.query(`
         UPDATE bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id
         SET b.status = ?, 
-            b.cancellation_reason = 'Auto-cancelled: Payment not received', 
-            b.cancelled_at = NOW(),
             b.modified = NOW()
         WHERE b.status = ? 
-          AND ce.event_date <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
       `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
-
-      // Release spaces from cancelled bookings
-      if (cancelledBookings.affectedRows > 0) {
-        await connection.query(`
-          UPDATE course_events ce
-          JOIN bookings b ON ce.id = b.course_event_id
-          SET ce.current_locks = GREATEST(0, ce.current_locks - b.spaces)
-          WHERE b.status = ? 
-            AND b.modified >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-        `, [this.STATUS.CANCELLED]);
-      }
 
       await connection.commit();
 
-      if (completedBookings.affectedRows > 0 || cancelledBookings.affectedRows > 0) {
-        console.log(`Status update: ${completedBookings.affectedRows} completed, ${cancelledBookings.affectedRows} cancelled`);
+      if (timeoutBookings.affectedRows > 0 || completedBookings.affectedRows > 0 || cancelledBookings.affectedRows > 0) {
+        console.log(`Status update: ${timeoutBookings.affectedRows} timeout cancelled, ${completedBookings.affectedRows} completed, ${cancelledBookings.affectedRows} event cancelled`);
       }
 
     } catch (error) {

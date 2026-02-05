@@ -730,11 +730,9 @@ class BookingController {
           UPDATE bookings 
           SET 
             status = 3,
-            cancellation_reason = ?,
-            cancelled_at = NOW(),
             modified = NOW()
           WHERE id = ?
-        `, [cancellation_reason || 'User cancelled', id]);
+        `, [id]);
 
         // Release the spaces back to the event
         if (booking.status === 0) {

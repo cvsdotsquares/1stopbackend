@@ -1,0 +1,160 @@
+public function paymentBookingComplete()
+{
+    // Disable Cake rendering completely
+    $this->autoRender = false;
+    $this->layout = false;
+
+    // Always respond fast
+    http_response_code(200);
+
+    // -----------------------------
+    // Read raw request safely
+    // -----------------------------
+    $requestData = (array)$this->request->data;
+
+    $bookingRefNumber = $requestData['cartId'] ?? '';
+    $orderKey         = $requestData['transId'] ?? '';
+    $paymentStatus    = $requestData['transStatus'] ?? '';
+    $transactionType  = $requestData['transaction_type'] ?? 'SALE';
+
+    // Minimal logging only (NO FULL PAYLOAD)
+    file_put_contents(
+        $_SERVER['DOCUMENT_ROOT'] . '/worldpay_callback.log',
+        json_encode([
+            'cartId'  => $bookingRefNumber,
+            'transId' => $orderKey,
+            'status'  => $paymentStatus,
+            'time'    => date('Y-m-d H:i:s')
+        ]) . PHP_EOL,
+        FILE_APPEND
+    );
+
+    // -----------------------------
+    // Only process successful payment
+    // -----------------------------
+    if ($paymentStatus !== 'Y' || empty($bookingRefNumber) || empty($orderKey)) {
+        exit; // DO NOT REDIRECT
+    }
+
+    // -----------------------------
+    // Idempotency check (CRITICAL)
+    // -----------------------------
+    $existingPayment = $this->BookingPayment->find('count', [
+        'conditions' => [
+            'BookingPayment.transation_id' => $orderKey
+        ]
+    ]);
+
+    if ($existingPayment > 0) {
+        exit; // Already processed
+    }
+
+    // -----------------------------
+    // Split booking references
+    // -----------------------------
+    $bookingRefs = (strpos($bookingRefNumber, '-') !== false)
+        ? explode('-', $bookingRefNumber)
+        : [$bookingRefNumber];
+
+    // -----------------------------
+    // Whitelisted & size-safe payload
+    // -----------------------------
+    $responseJson = json_encode([
+        'cartId'       => $bookingRefNumber,
+        'transId'      => $orderKey,
+        'transStatus'  => $paymentStatus,
+        'authAmount'   => $requestData['authAmount'] ?? null,
+        'authCurrency' => $requestData['authCurrency'] ?? null
+    ]);
+
+    if (strlen($responseJson) > 60000) {
+        $responseJson = substr($responseJson, 0, 60000);
+    }
+
+    $mailBidArr = [];
+
+    // -----------------------------
+    // Process each booking
+    // -----------------------------
+    foreach ($bookingRefs as $bref) {
+
+        $barr = $this->BookingAttendee->find('first', [
+            'fields' => ['booking_id', 'vehicle_type'],
+            'conditions' => ['booking_ref' => $bref]
+        ]);
+
+        if (empty($barr)) {
+            continue;
+        }
+
+        $bookingId = $barr['BookingAttendee']['booking_id'];
+        $this->Booking->id = $bookingId;
+
+        if (!$this->Booking->exists()) {
+            continue;
+        }
+
+        $mailBidArr[] = $bookingId;
+
+        $bData     = $this->Booking->read(null, $bookingId);
+        $eventData = $this->CourseEvents->read(null, $bData['Booking']['course_event_id']);
+        $amt       = $bData['Booking']['admin_payment_received'];
+
+        // Capacity check
+        if ($eventData['CourseEvents']['bookings_done'] >= $eventData['CourseEvents']['booking_limit']) {
+
+            if ($this->LockBooking->exists($bData['Booking']['lockid'])) {
+                $this->Common->removeCurLock($bData['Booking']['lockid']);
+            }
+
+            $this->Booking->updateAll(
+                [
+                    'Booking.refundable'  => 1,
+                    'Booking.payment_due' => 'Booking.payment_due-' . $amt,
+                    'Booking.status'      => 1
+                ],
+                ['Booking.id' => $bookingId]
+            );
+
+        } else {
+
+            $this->CourseEvents->updateAll(
+                [
+                    'CourseEvents.bookings_done' =>
+                        'CourseEvents.bookings_done+' . $bData['Booking']['spaces']
+                ],
+                ['CourseEvents.parent' => $eventData['CourseEvents']['parent']]
+            );
+
+            $this->Booking->updateAll(
+                [
+                    'Booking.payment_due' => 'Booking.payment_due-' . $amt,
+                    'Booking.status'      => 1
+                ],
+                ['Booking.id' => $bookingId]
+            );
+        }
+
+        // Save payment ONCE
+        $this->BookingPayment->create();
+        $this->BookingPayment->save([
+            'BookingPayment' => [
+                'booking_id'    => $bookingId,
+                'payment_type'  => $transactionType,
+                'transation_id' => $orderKey,
+                'amount'        => $amt,
+				'email_status'  => 'no',
+                'response'      => $responseJson
+            ]
+        ], false);
+    }
+
+    // -----------------------------
+    // Remove lock
+    // -----------------------------
+    if (!empty($bData['Booking']['lockid']) && $this->LockBooking->exists($bData['Booking']['lockid'])) {
+        $this->Common->removeCurLock($bData['Booking']['lockid'], false);
+    }
+    // Final termination
+    exit;
+}

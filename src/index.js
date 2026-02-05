@@ -20,6 +20,7 @@ const createPreBookingRoutes = require('./routes/preBooking');
 const bookingFlowRoutes = require('./routes/bookingFlow');
 const createHelperRoutes = require('./routes/helper');
 const createPriceCalculationRoutes = require('./routes/priceCalculation');
+const createWebhookRoutes = require('./routes/webhook');
 const PreBookingController = require('./controllers/preBooking');
 const app = express();
 
@@ -134,6 +135,7 @@ app.use('/api/booking', createPreBookingRoutes(pool));
 app.use('/api/booking', bookingFlowRoutes(pool));
 app.use('/api/helper', createHelperRoutes(pool));
 app.use('/api/booking/pricing', createPriceCalculationRoutes(pool));
+app.use('/api/webhook', createWebhookRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
@@ -239,4 +241,7 @@ app.listen(PORT, () => {
   console.log(`Health Check: http://localhost:${PORT}/health`);
   console.log(`DB Test: http://localhost:${PORT}/db-test`);
   console.log(`Auth Endpoints: http://localhost:${PORT}/api/auth/*`);
+  
+  // Start booking cleanup job
+  BookingStatusManager.startCleanupJob(pool);
 });
