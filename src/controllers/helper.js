@@ -246,6 +246,36 @@ class HelperController {
       });
     }
   }
+
+  async getCounterData(req, res) {
+    try {
+      const [counterData] = await this.pool.query(`
+        SELECT taining_centers, qualified_instructors, student_tainined, passing_rate
+        FROM training_data
+
+      `);
+      console.log(counterData);
+      if (!counterData.length) {
+        return res.status(404).json({
+          success: false,
+          message: 'Counter data not found'
+        });
+      }
+
+      const processedData = await replaceTokensInObject(this.pool, counterData[0]);
+
+      res.json({
+        success: true,
+        data: processedData
+      });
+    } catch (error) {
+      console.error('Error fetching counter data:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch counter data'
+      });
+    }
+  }
 }
 
 module.exports = HelperController;

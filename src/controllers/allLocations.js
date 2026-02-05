@@ -71,6 +71,7 @@ class AllLocationsController {
             }) : [];
 
           return {
+            locationId: location.location_id,
             locationName: location.location_name || '',
             locationPicture: location.locationPicture ? 'uploads/location_course_files/' + location.locationPicture : '',
             address: [

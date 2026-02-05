@@ -65,6 +65,10 @@ function createHelperRoutes(pool) {
     helperController.getFooterData.bind(helperController)
   );
 
+  router.get('/counter-data',
+    helperController.getCounterData.bind(helperController)
+  );
+
   return router;
 }
 
