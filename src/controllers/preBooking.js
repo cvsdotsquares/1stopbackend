@@ -308,12 +308,12 @@ class PreBookingController {
         
         console.log('All recent locks:', allLocks);
         
-        // Now find expired ones (2+ minutes for testing)
+        // Now find expired ones (10+ minutes)
         const [expiredLocks] = await connection.query(`
           SELECT id, event_id, user_id, ip_address, space_required, created,
                  TIMESTAMPDIFF(MINUTE, created, NOW()) as minutes_old
           FROM lock_bookings 
-          WHERE TIMESTAMPDIFF(MINUTE, created, NOW()) >= 2
+          WHERE TIMESTAMPDIFF(MINUTE, created, NOW()) >= 10
           AND delete_process = 0
           ${user_id ? 'AND user_id = ?' : ''}
           ${ip_address && !user_id ? 'AND ip_address = ?' : ''}
