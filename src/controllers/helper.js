@@ -265,7 +265,6 @@ class HelperController {
         FROM training_data
 
       `);
-      console.log(counterData);
       if (!counterData.length) {
         return res.status(404).json({
           success: false,
