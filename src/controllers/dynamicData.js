@@ -17,7 +17,7 @@ class DynamicDataController {
       'courses',
       'locations',
       'pages',
-      'carousels'
+      'carousels',
     ];
   }
 

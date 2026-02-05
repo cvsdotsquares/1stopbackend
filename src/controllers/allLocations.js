@@ -51,11 +51,13 @@ class AllLocationsController {
             l.longitude,
             l.direction_map,
             lcp.locationPicture,
+            lcp.id AS location_course_page_id,
+            lcp.slug,
             GROUP_CONCAT(CONCAT(c.id, ':', c.course_name)) AS course_data
           FROM locations l
           INNER JOIN location_course_pages lcp ON lcp.location_id = l.id AND lcp.is_active = 1
           LEFT JOIN courses c ON c.id = lcp.course_id
-          GROUP BY l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode, l.latitude, l.longitude, l.direction_map, lcp.locationPicture
+          GROUP BY l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode, l.latitude, l.longitude, l.direction_map, lcp.locationPicture, lcp.id, lcp.slug
         `);
 
         // Get all courses first
@@ -74,6 +76,8 @@ class AllLocationsController {
             locationId: location.location_id,
             locationName: location.location_name || '',
             locationPicture: location.locationPicture ? 'uploads/location_course_files/' + location.locationPicture : '',
+            slug: location.slug || '',
+            locationCoursePageId: location.location_course_page_id || '',
             address: [
               location.address1 || '',
               location.address2 || '',
