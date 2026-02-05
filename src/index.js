@@ -21,8 +21,37 @@ const bookingFlowRoutes = require('./routes/bookingFlow');
 const createHelperRoutes = require('./routes/helper');
 const createPriceCalculationRoutes = require('./routes/priceCalculation');
 const createWebhookRoutes = require('./routes/webhook');
+const createManualPaymentRoutes = require('./routes/manualPayment');
 const PreBookingController = require('./controllers/preBooking');
 const app = express();
+
+// MySQL pool (uses env vars)
+/* const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});*/
+
+const pool = mysql.createPool({
+    host: '172.236.21.167',
+    port: 3306,
+    user: '1stop',
+    password: 'Gbgz&En4Wg&HmFJTFf',
+    database: '1stop',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+});
+
+// IMPORTANT: Stripe webhook route MUST be registered BEFORE express.json() middleware
+// because Stripe needs raw body for signature verification
+const createStripeWebhookRoutes = require('./routes/stripeWebhook');
+app.use('/api/webhook', createStripeWebhookRoutes(pool));
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -64,30 +93,6 @@ app.use((req, res, next) => {
     next();
   }
 });
-
-// MySQL pool (uses env vars)
-/* const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});*/
-
-const pool = mysql.createPool({
-    host: '172.236.21.167',
-    port: 3306,
-    user: '1stop',
-    password: 'Gbgz&En4Wg&HmFJTFf',
-    database: '1stop',
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-});
-
 
 // Health check
 app.get('/health', (req, res) => {
@@ -136,6 +141,7 @@ app.use('/api/booking', bookingFlowRoutes(pool));
 app.use('/api/helper', createHelperRoutes(pool));
 app.use('/api/booking/pricing', createPriceCalculationRoutes(pool));
 app.use('/api/webhook', createWebhookRoutes(pool));
+app.use('/api/payment', createManualPaymentRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
