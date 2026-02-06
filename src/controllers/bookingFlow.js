@@ -556,9 +556,6 @@ class BookingFlowController {
   }
 
   async createBookingWithAttendees(req, res) {
-    console.log('=== CREATE BOOKING WITH ATTENDEES CALLED ===');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
-
     try {
       const {
         course_id, course_event_id, location_id, selected_date,
@@ -589,7 +586,7 @@ class BookingFlowController {
           console.log('User created with ID:', user_id);
         }
 
-        const [courseData] = await connection.query(`SELECT dsa_fees FROM courses WHERE id = ?`, [course_id]);
+        const [courseData] = await connection.query(`SELECT dsa_fees, course_name FROM courses WHERE id = ?`, [course_id]);
         const coursePrice = courseData[0].dsa_fees;
         const totalFees = coursePrice * attendees_count;
         const vatRate = 0.20;
@@ -607,12 +604,10 @@ class BookingFlowController {
         `, [course_id, course_event_id, user_id || 0, attendees_count, totalAmount, totalFees, vatRate, vat, totalAmount, lock_id, user_id || 0]);
 
         const booking_id = bookingResult.insertId;
-        console.log('Booking created with ID:', booking_id);
 
-        console.log('Creating attendee records for', attendees.length, 'attendees');
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];
-          console.log(`Creating attendee ${i + 1}:`, attendee.first_name, attendee.sur_name);
+
 
           // Insert into booking_attendees
           const [attendeeResult] = await connection.query(`
@@ -626,7 +621,7 @@ class BookingFlowController {
             attendee.vehicle_type, attendee.license_type, attendee.license_number,
             attendee.theory_number, i === 0 ? 1 : 0
           ]);
-          console.log('Attendee record created with ID:', attendeeResult.insertId);
+
 
           // Insert into booking_attendees_dropdown
           const [dropdownResult] = await connection.query(`
@@ -640,15 +635,12 @@ class BookingFlowController {
             attendee.vehicle_type, attendee.license_type, attendee.license_number,
             attendee.theory_number, attendee.notes || '', i === 0 ? 1 : 0
           ]);
-          console.log('Dropdown record created with ID:', dropdownResult.insertId);
         }
 
         // Stripe Integration (Primary)
         const siteUrl = process.env.SITE_URL || 'http://localhost:3001';
         
         try {
-          console.log('Creating Stripe checkout session...');
-          
           const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             line_items: [{
@@ -675,10 +667,7 @@ class BookingFlowController {
             billing_address_collection: 'required',
           });
 
-          console.log('Stripe session created:', session.id);
-
           await connection.commit();
-          console.log('Transaction committed successfully');
 
           res.status(201).json({
             success: true,
@@ -693,56 +682,62 @@ class BookingFlowController {
           });
         } catch (stripeError) {
           console.error('Stripe session creation failed, falling back to Worldpay:', stripeError);
+          console.error('Stripe Error Details:', {
+            message: stripeError.message,
+            type: stripeError.type,
+            code: stripeError.code,
+            stack: stripeError.stack
+          });
           
           // Fallback to Worldpay if Stripe fails
-          const isTest = process.env.WORLDPAY_TEST_MODE || '100';
-          const instId = process.env.WORLDPAY_INST_ID || '1382788';
-          const secret = process.env.WORLDPAY_MD5_SECRET || 'N0EIz$GtcGdH1i7tASjQHg7H5urhD';
-          const currency = 'GBP';
-          const amountStr = totalAmount.toFixed(2);
-          const cartId = bookingRef;
+          // const isTest = process.env.WORLDPAY_TEST_MODE || '100';
+          // const instId = process.env.WORLDPAY_INST_ID || '1382788';
+          // const secret = process.env.WORLDPAY_MD5_SECRET || 'N0EIz$GtcGdH1i7tASjQHg7H5urhD';
+          // const currency = 'GBP';
+          // const amountStr = totalAmount.toFixed(2);
+          // const cartId = bookingRef;
 
-          const signatureString = `${secret}:${instId}:${amountStr}:${currency}:${cartId}`;
-          const signature = crypto.createHash('md5').update(signatureString).digest('hex');
+          // const signatureString = `${secret}:${instId}:${amountStr}:${currency}:${cartId}`;
+          // const signature = crypto.createHash('md5').update(signatureString).digest('hex');
 
-          const paymentData = {
-            url: isTest === '100' ? 'https://secure-test.worldpay.com/wcc/purchase' : 'https://secure.worldpay.com/wcc/purchase',
-            fields: {
-              testMode: isTest,
-              instId: instId,
-              cartId: cartId,
-              amount: amountStr,
-              currency: currency,
-              desc: '1 Stop Instruction Course Booking',
-              name: `${user_details.first_name} ${user_details.sur_name}`,
-              address1: user_details.address1 || '',
-              postcode: user_details.postcode || '',
-              email: user_details.email,
-              tel: user_details.contact1 || '',
-              country: 'GB',
-              lang: 'en',
-              signatureFields: 'instId:amount:currency:cartId',
-              signature: signature,
-              successURL: `${siteUrl}/bookings/payment-success`,
-              cancelURL: `${siteUrl}/bookings/payment-cancel`,
-              failureURL: `${siteUrl}/bookings/payment-failure`,
-              MC_callback: `${siteUrl}/api/webhook/worldpay`
-            }
-          };
+          // const paymentData = {
+          //   url: isTest === '100' ? 'https://secure-test.worldpay.com/wcc/purchase' : 'https://secure.worldpay.com/wcc/purchase',
+          //   fields: {
+          //     testMode: isTest,
+          //     instId: instId,
+          //     cartId: cartId,
+          //     amount: amountStr,
+          //     currency: currency,
+          //     desc: '1 Stop Instruction Course Booking',
+          //     name: `${user_details.first_name} ${user_details.sur_name}`,
+          //     address1: user_details.address1 || '',
+          //     postcode: user_details.postcode || '',
+          //     email: user_details.email,
+          //     tel: user_details.contact1 || '',
+          //     country: 'GB',
+          //     lang: 'en',
+          //     signatureFields: 'instId:amount:currency:cartId',
+          //     signature: signature,
+          //     successURL: `${siteUrl}/bookings/payment-success`,
+          //     cancelURL: `${siteUrl}/bookings/payment-cancel`,
+          //     failureURL: `${siteUrl}/bookings/payment-failure`,
+          //     MC_callback: `${siteUrl}/api/webhook/worldpay`
+          //   }
+          // };
 
-          await connection.commit();
-          console.log('Transaction committed successfully with Worldpay fallback');
+          // await connection.commit();
+          // console.log('Transaction committed successfully with Worldpay fallback');
 
-          res.status(201).json({
-            success: true,
-            booking_id,
-            booking_ref: bookingRef,
-            payment_due: totalAmount,
-            total_fees: totalFees,
-            vat,
-            total_amount: totalAmount,
-            payment_data: paymentData
-          });
+          // res.status(201).json({
+          //   success: true,
+          //   booking_id,
+          //   booking_ref: bookingRef,
+          //   payment_due: totalAmount,
+          //   total_fees: totalFees,
+          //   vat,
+          //   total_amount: totalAmount,
+          //   payment_data: paymentData
+          // });
         }
       } catch (error) {
         await connection.rollback();

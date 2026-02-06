@@ -29,7 +29,7 @@ class StripeWebhookController {
     try {
       console.log(`📨 Processing webhook event: ${event.type}`);
       console.log(`📋 Event data:`, JSON.stringify(event.data?.object?.metadata || {}, null, 2));
-      
+
       switch (event.type) {
         case 'checkout.session.completed':
           console.log('✅ Handling payment success...');
@@ -57,9 +57,9 @@ class StripeWebhookController {
   async handlePaymentSuccess(session) {
     console.log('🔄 Processing successful payment for session:', session.id);
     console.log('📋 Session metadata:', session.metadata);
-    
+
     const { booking_id, booking_ref } = session.metadata || {};
-    
+
     if (!booking_id) {
       console.error('❌ No booking_id in session metadata');
       return;
@@ -72,7 +72,7 @@ class StripeWebhookController {
 
     try {
       console.log(`🔍 Checking for existing payment with transaction ID: ${session.payment_intent || session.id}`);
-      
+
       // Idempotency check - prevent duplicate processing (like original PHP)
       const [existingPayment] = await connection.query(`
         SELECT id FROM booking_payments 
@@ -86,10 +86,10 @@ class StripeWebhookController {
       }
 
       console.log('📋 Getting booking and event details...');
-      
+
       // Get booking and event details
       const [bookingDetails] = await connection.query(`
-        SELECT b.id, b.course_event_id, b.spaces, b.lockid, b.admin_payment_received,
+        SELECT b.id, b.course_event_id, b.spaces, b.lockid, b.total_amount,
                ce.bookings_done, ce.booking_limit, ce.parent
         FROM bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
@@ -104,27 +104,28 @@ class StripeWebhookController {
 
       const booking = bookingDetails[0];
       console.log('📋 Booking details:', booking);
-      const { course_event_id, spaces, lockid, admin_payment_received } = booking;
+      const { course_event_id, spaces, lockid, total_amount } = booking;
       const { bookings_done, booking_limit, parent } = booking;
 
       // Check capacity (like original PHP logic)
       if (bookings_done >= booking_limit) {
         console.log(`Event ${course_event_id} is full, marking as refundable`);
-        
+
         // Mark as refundable and confirmed
         await connection.query(`
           UPDATE bookings 
           SET refundable = 1,
               payment_due = payment_due - ?,
               status = 1,
+              admin_payment_received = 1,
               modified = NOW()
           WHERE id = ?
-        `, [admin_payment_received || 0, booking_id]);
-        
+        `, [total_amount || 0, booking_id]);
+
       } else {
         // Normal booking confirmation
         console.log(`Confirming booking ${booking_id}`);
-        
+
         // Update course events (using parent like PHP)
         await connection.query(`
           UPDATE course_events 
@@ -137,9 +138,10 @@ class StripeWebhookController {
           UPDATE bookings 
           SET payment_due = payment_due - ?,
               status = 1,
+              admin_payment_received = 1,
               modified = NOW()
           WHERE id = ?
-        `, [admin_payment_received || 0, booking_id]);
+        `, [total_amount || 0, booking_id]);
       }
 
       // Save payment record (like original PHP)
@@ -147,7 +149,7 @@ class StripeWebhookController {
         booking_id: booking_id,
         payment_type: 'SALE',
         transation_id: session.payment_intent || session.id,
-        amount: admin_payment_received || 0,
+        amount: total_amount || 0,
         transation_type: 'booking',
         response: JSON.stringify({
           session_id: session.id,
@@ -163,7 +165,7 @@ class StripeWebhookController {
         VALUES (?, ?, ?, ?, ?, ?, NOW(), 0, '', '')
       `, [
         paymentData.booking_id,
-        paymentData.payment_type, 
+        paymentData.payment_type,
         paymentData.transation_id,
         paymentData.amount,
         paymentData.transation_type,
@@ -175,7 +177,7 @@ class StripeWebhookController {
         await connection.query(`
           DELETE FROM lock_bookings WHERE id = ?
         `, [lockid]);
-        
+
         // Also update current_locks
         await connection.query(`
           UPDATE course_events 
@@ -186,7 +188,7 @@ class StripeWebhookController {
 
       await connection.commit();
       console.log(`Payment confirmed for booking ${booking_ref}`);
-      
+
     } catch (error) {
       await connection.rollback();
       console.error('Error updating booking after payment:', error);
@@ -198,9 +200,9 @@ class StripeWebhookController {
 
   async handlePaymentExpired(session) {
     console.log('Processing expired payment for session:', session.id);
-    
+
     const { booking_id } = session.metadata;
-    
+
     if (!booking_id) {
       console.error('No booking_id in session metadata');
       return;
@@ -227,7 +229,7 @@ class StripeWebhookController {
 
       if (bookingDetails.length > 0) {
         const { course_event_id, spaces } = bookingDetails[0];
-        
+
         // Release locks
         await connection.query(`
           UPDATE course_events 
@@ -239,7 +241,7 @@ class StripeWebhookController {
 
       await connection.commit();
       console.log(`Payment expired for booking ${booking_id}`);
-      
+
     } catch (error) {
       await connection.rollback();
       console.error('Error handling expired payment:', error);
@@ -251,7 +253,7 @@ class StripeWebhookController {
 
   async handlePaymentFailed(paymentIntent) {
     console.log('Processing failed payment for payment intent:', paymentIntent.id);
-    
+
     // Find booking by payment intent
     const [bookings] = await this.pool.query(`
       SELECT id FROM bookings 
@@ -264,7 +266,7 @@ class StripeWebhookController {
     }
 
     const booking = bookings[0];
-    
+
     console.log(`Payment failed for booking ${booking.id}`);
   }
 
@@ -274,7 +276,7 @@ class StripeWebhookController {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    
+
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
     }
@@ -291,7 +293,7 @@ class StripeWebhookController {
 
       // Get session from Stripe
       const session = await stripe.checkout.sessions.retrieve(session_id);
-      
+
       // Get booking from database using booking_attendees table (like PHP)
       const [bookings] = await this.pool.query(`
         SELECT b.id, b.status, b.total_amount

@@ -13,7 +13,7 @@ class WorldPayWebhookController {
 
     try {
       const requestData = req.body;
-      
+
       const bookingRefNumber = requestData.cartId || '';
       const orderKey = requestData.transId || '';
       const paymentStatus = requestData.transStatus || '';
@@ -62,8 +62,8 @@ class WorldPayWebhookController {
         }
 
         // Split booking references (handle multiple bookings)
-        const bookingRefs = bookingRefNumber.includes('-') 
-          ? bookingRefNumber.split('-') 
+        const bookingRefs = bookingRefNumber.includes('-')
+          ? bookingRefNumber.split('-')
           : [bookingRefNumber];
 
         const responseJson = JSON.stringify({
@@ -120,7 +120,7 @@ class WorldPayWebhookController {
           // Check capacity
           if (event.bookings_done >= event.booking_limit) {
             console.log(`Event full, marking as refundable: ${bookingId}`);
-            
+
             // Mark as refundable if event is full
             await connection.query(`
               UPDATE bookings 
@@ -130,7 +130,7 @@ class WorldPayWebhookController {
 
           } else {
             console.log(`Processing successful booking: ${bookingId}`);
-            
+
             // Update event capacity
             await connection.query(`
               UPDATE course_events 
@@ -159,7 +159,7 @@ class WorldPayWebhookController {
               SET delete_process = 1, modified = NOW() 
               WHERE id = ?
             `, [booking.lockid]);
-            
+
             await connection.query(`
               DELETE FROM lock_bookings WHERE delete_process = 1
             `);
