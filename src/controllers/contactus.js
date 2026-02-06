@@ -157,17 +157,14 @@ class ContactUsController {
 
           // If message was successfully sent, log it into the database
           if (mailInfo && mailInfo.messageId) {
+            const getIP = require('ipware')().get_ip;
+            const ipInfo = getIP(req);
+            const ipAddress = ipInfo.clientIp || 'unknown';
 
-            var getIP = require('ipware')().get_ip;
-            app.use(function(req, res, next) {
-                var ipInfo = getIP(req);
-                console.log(ipInfo);
-                next();
-            });
-            // await this.pool.query(`
-            //   INSERT INTO contact_us_messages (to, from, subject, email_content, email_by, status, type, ip)
-            //   VALUES (?, ?, ?, ?, ?, NOW())
-            // `, [name, email, subject, message, mailInfo.messageId]);
+            await this.pool.query(`
+              INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, ip)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [toAddress, '', bccAddress, fromAddress, subject, message, 'o', 1, 'Contact', ipAddress]);
           }
         } catch (mailErr) {
           console.error('Failed to send contact email:', mailErr);
@@ -177,8 +174,8 @@ class ContactUsController {
         console.warn('No SMTP transporter configured - skipping sending email');
       }
 
-      // Return success response including DB insert id
-      return res.json({ success: true, message: 'Contact entry received', id: result.insertId || null, mail: mailInfo ? { messageId: mailInfo.messageId } : null });
+      // Return success response
+      return res.json({ success: true, message: 'Contact entry received', mail: mailInfo ? { messageId: mailInfo.messageId } : null });
     } catch (error) {
       console.error('Error creating contact us entry:', error);
       res.status(500).json({ success: false, message: 'Internal server error' });

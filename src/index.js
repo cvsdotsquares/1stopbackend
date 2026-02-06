@@ -11,7 +11,7 @@ const createCMSPagesRoutes = require('./routes/cmspages');
 const createHomepageRoutes = require('./routes/homepage');
 const BookingStatusManager = require('./middleware/bookingStatusManager');
 const createContactUsRoutes = require('./routes/contactus');
-const searchRoutes = require('./routes/search');
+const createSearchRoutes = require('./routes/search');
 const locationCourseRoutes = require('./routes/locationcourse');
 const allLocationsRoutes = require('./routes/alllocation');
 const pageMenuRoutes = require('./routes/pagemenu');
@@ -131,7 +131,7 @@ app.use('/api/cms', createCMSRoutes(pool));
 app.use('/api/cmspages', createCMSPagesRoutes(pool));
 app.use('/api/homepage', createHomepageRoutes(pool));
 app.use('/api/contactus', createContactUsRoutes(pool));
-app.use('/api/search', searchRoutes(pool));
+app.use('/api/search', createSearchRoutes(pool));
 app.use('/api/location-course', locationCourseRoutes(pool));
 app.use('/api/all-locations', allLocationsRoutes(pool));
 app.use('/api/pagemenu', pageMenuRoutes(pool));
@@ -225,6 +225,10 @@ app.get('/api', (req, res) => {
       contactus: {
         'GET /api/contactus': 'Get contact us content from existing database tables',
         'POST /api/contactus': 'Create a new contact us entry in the database'
+      },
+      search: {
+        'GET /api/search/suggestions': 'Get auto-suggest results (query param: q)',
+        'GET /api/search': 'Full search with pagination (query params: q, type, page, limit)'
       },
       pricing: {
         'POST /api/booking/pricing/calculate': 'Calculate booking price with all business rules',
