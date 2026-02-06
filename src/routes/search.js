@@ -1,11 +1,16 @@
+// src/routes/search.js
 const express = require('express');
-const SearchController = require('../controllers/search');
+const router = express.Router();
 
 module.exports = (pool) => {
-    const router = express.Router();
-    const controller = new SearchController(pool);
+  const SearchController = require('../controllers/search');
+  const searchController = new SearchController(pool);
 
-    router.get('/', controller.search);
+  // Auto-suggest endpoint
+  router.get('/suggestions', (req, res) => searchController.getSuggestions(req, res));
 
-    return router;
+  // Full search endpoint
+  router.get('/', (req, res) => searchController.search(req, res));
+
+  return router;
 };
