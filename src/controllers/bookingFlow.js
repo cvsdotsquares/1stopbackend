@@ -592,6 +592,8 @@ class BookingFlowController {
         const vatRate = 0.20;
         const vat = totalFees * vatRate;
         const totalAmount = totalFees + vat;
+        const paymentDue = totalAmount; // Amount customer needs to pay
+        const adminPaymentReceived = totalAmount; // Amount expected from this payment
 
         const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
         const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
@@ -600,8 +602,8 @@ class BookingFlowController {
         const [bookingResult] = await connection.query(`
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by)
-          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, 0, NOW(), NOW(), 0, ?)
-        `, [course_id, course_event_id, user_id || 0, attendees_count, totalAmount, totalFees, vatRate, vat, totalAmount, lock_id, user_id || 0]);
+          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, NOW(), NOW(), 0, ?)
+        `, [course_id, course_event_id, user_id || 0, attendees_count, paymentDue, totalFees, vatRate, vat, totalAmount, adminPaymentReceived, lock_id, user_id || 0]);
 
         const booking_id = bookingResult.insertId;
 
