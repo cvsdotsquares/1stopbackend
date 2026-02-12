@@ -106,8 +106,16 @@ class StripeWebhookController {
       const { course_event_id, spaces, lockid, admin_payment_received, payment_due } = booking;
       const { bookings_done, booking_limit, parent } = booking;
 
-      // Calculate actual payment amount from Stripe session
-      const paidAmount = session.amount_total / 100; // Convert from pence to pounds
+      // Calculate actual payment amount from Stripe payment intent
+      const paidAmount = (session.amount || session.amount_total || 0) / 100; // Convert from pence to pounds
+      
+      if (!paidAmount || isNaN(paidAmount)) {
+        console.error('❌ Invalid payment amount:', session.amount, session.amount_total);
+        await connection.rollback();
+        return;
+      }
+      
+      console.log(`💰 Payment amount: £${paidAmount}`);
 
       // Check capacity (like original PHP logic)
       if (bookings_done >= booking_limit) {
