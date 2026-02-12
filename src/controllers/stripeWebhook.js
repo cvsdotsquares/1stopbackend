@@ -29,7 +29,7 @@ class StripeWebhookController {
     try {
       console.log(`📨 Processing webhook event: ${event.type}`);
       console.log(`📋 Event data:`, JSON.stringify(event.data?.object?.metadata || {}, null, 2));
-      
+
       switch (event.type) {
         case 'checkout.session.completed':
           console.log('✅ Handling payment success...');
@@ -57,9 +57,9 @@ class StripeWebhookController {
   async handlePaymentSuccess(session) {
     console.log('🔄 Processing successful payment for session:', session.id);
     console.log('📋 Session metadata:', session.metadata);
-    
+
     const { booking_id, booking_ref } = session.metadata || {};
-    
+
     if (!booking_id) {
       console.error('❌ No booking_id in session metadata');
       return;
@@ -72,10 +72,10 @@ class StripeWebhookController {
 
     try {
       console.log(`🔍 Checking for existing payment with transaction ID: ${session.payment_intent || session.id}`);
-      
+
       // Idempotency check - prevent duplicate processing (like original PHP)
       const [existingPayment] = await connection.query(`
-        SELECT id FROM booking_payments 
+        SELECT id FROM booking_payments
         WHERE transation_id = ?
       `, [session.payment_intent || session.id]);
 
@@ -86,7 +86,7 @@ class StripeWebhookController {
       }
 
       console.log('📋 Getting booking and event details...');
-      
+
       // Get booking and event details
       const [bookingDetails] = await connection.query(`
         SELECT b.id, b.course_event_id, b.spaces, b.lockid, b.admin_payment_received,
@@ -110,31 +110,31 @@ class StripeWebhookController {
       // Check capacity (like original PHP logic)
       if (bookings_done >= booking_limit) {
         console.log(`Event ${course_event_id} is full, marking as refundable`);
-        
+
         // Mark as refundable and confirmed
         await connection.query(`
-          UPDATE bookings 
+          UPDATE bookings
           SET refundable = 1,
               payment_due = payment_due - ?,
               status = 1,
               modified = NOW()
           WHERE id = ?
         `, [admin_payment_received || 0, booking_id]);
-        
+
       } else {
         // Normal booking confirmation
         console.log(`Confirming booking ${booking_id}`);
-        
+
         // Update course events (using parent like PHP)
         await connection.query(`
-          UPDATE course_events 
+          UPDATE course_events
           SET bookings_done = bookings_done + ?
           WHERE parent = ?
         `, [spaces, parent]);
 
         // Update booking status
         await connection.query(`
-          UPDATE bookings 
+          UPDATE bookings
           SET payment_due = payment_due - ?,
               status = 1,
               modified = NOW()
@@ -158,12 +158,12 @@ class StripeWebhookController {
       };
 
       await connection.query(`
-        INSERT INTO booking_payments 
+        INSERT INTO booking_payments
         (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
         VALUES (?, ?, ?, ?, ?, ?, NOW(), 0, '', '')
       `, [
         paymentData.booking_id,
-        paymentData.payment_type, 
+        paymentData.payment_type,
         paymentData.transation_id,
         paymentData.amount,
         paymentData.transation_type,
@@ -175,10 +175,10 @@ class StripeWebhookController {
         await connection.query(`
           DELETE FROM lock_bookings WHERE id = ?
         `, [lockid]);
-        
+
         // Also update current_locks
         await connection.query(`
-          UPDATE course_events 
+          UPDATE course_events
           SET current_locks = GREATEST(0, current_locks - ?)
           WHERE id = ?
         `, [spaces, course_event_id]);
@@ -186,7 +186,7 @@ class StripeWebhookController {
 
       await connection.commit();
       console.log(`Payment confirmed for booking ${booking_ref}`);
-      
+
     } catch (error) {
       await connection.rollback();
       console.error('Error updating booking after payment:', error);
@@ -198,9 +198,9 @@ class StripeWebhookController {
 
   async handlePaymentExpired(session) {
     console.log('Processing expired payment for session:', session.id);
-    
+
     const { booking_id } = session.metadata;
-    
+
     if (!booking_id) {
       console.error('No booking_id in session metadata');
       return;
@@ -212,25 +212,25 @@ class StripeWebhookController {
     try {
       // Update booking status to cancelled (status = 3)
       await connection.query(`
-        UPDATE bookings 
-        SET status = 3, 
+        UPDATE bookings
+        SET status = 3,
             modified = NOW()
         WHERE id = ? AND status = 0
       `, [booking_id]);
 
       // Get booking details to release locks
       const [bookingDetails] = await connection.query(`
-        SELECT course_event_id, spaces 
-        FROM bookings 
+        SELECT course_event_id, spaces
+        FROM bookings
         WHERE id = ?
       `, [booking_id]);
 
       if (bookingDetails.length > 0) {
         const { course_event_id, spaces } = bookingDetails[0];
-        
+
         // Release locks
         await connection.query(`
-          UPDATE course_events 
+          UPDATE course_events
           SET current_locks = GREATEST(0, current_locks - ?),
               modified = NOW()
           WHERE id = ?
@@ -239,7 +239,7 @@ class StripeWebhookController {
 
       await connection.commit();
       console.log(`Payment expired for booking ${booking_id}`);
-      
+
     } catch (error) {
       await connection.rollback();
       console.error('Error handling expired payment:', error);
@@ -251,10 +251,10 @@ class StripeWebhookController {
 
   async handlePaymentFailed(paymentIntent) {
     console.log('Processing failed payment for payment intent:', paymentIntent.id);
-    
+
     // Find booking by payment intent
     const [bookings] = await this.pool.query(`
-      SELECT id FROM bookings 
+      SELECT id FROM bookings
       WHERE id = ?
     `, [paymentIntent.metadata?.booking_id]);
 
@@ -264,7 +264,7 @@ class StripeWebhookController {
     }
 
     const booking = bookings[0];
-    
+
     console.log(`Payment failed for booking ${booking.id}`);
   }
 
@@ -274,7 +274,7 @@ class StripeWebhookController {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    
+
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
     }
@@ -291,7 +291,7 @@ class StripeWebhookController {
 
       // Get session from Stripe
       const session = await stripe.checkout.sessions.retrieve(session_id);
-      
+
       // Get booking from database using booking_attendees table (like PHP)
       const [bookings] = await this.pool.query(`
         SELECT b.id, b.status, b.total_amount

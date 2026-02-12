@@ -37,41 +37,27 @@ class PreBookingController {
     }
   }
 
-  // Get course availability
+  // Get course availability (NO LOCKS - only bookings_done)
   async getCourseAvailability(req, res) {
     try {
       const { eventId } = req.params;
 
       const [event] = await this.pool.query(`
-        SELECT booking_limit FROM course_events WHERE id = ?
+        SELECT booking_limit, bookings_done FROM course_events WHERE id = ?
       `, [eventId]);
 
       if (!event.length) {
         return res.status(404).json({ error: 'Event not found' });
       }
 
-      const [bookings] = await this.pool.query(`
-        SELECT COALESCE(SUM(spaces), 0) as bookings_done
-        FROM bookings
-        WHERE course_event_id = ? AND status IN (1, 2)
-      `, [eventId]);
-
-      const [locks] = await this.pool.query(`
-        SELECT COALESCE(SUM(space_required), 0) as current_locks
-        FROM lock_bookings
-        WHERE parent = ? AND created > DATE_SUB(NOW(), INTERVAL 15 MINUTE) AND delete_process = 0
-      `, [eventId]);
-
       const bookingLimit = event[0].booking_limit;
-      const bookingsDone = bookings[0].bookings_done;
-      const currentLocks = locks[0].current_locks;
-      const availableSpaces = Math.max(0, bookingLimit - bookingsDone - currentLocks);
+      const bookingsDone = event[0].bookings_done;
+      const availableSpaces = Math.max(0, bookingLimit - bookingsDone);
 
       res.json({
         available_spaces: availableSpaces,
         booking_limit: bookingLimit,
-        bookings_done: bookingsDone,
-        current_locks: currentLocks
+        bookings_done: bookingsDone
       });
     } catch (error) {
       console.error('Error getting course availability:', error);
@@ -134,9 +120,7 @@ class PreBookingController {
 
   // Create pre-booking with attendees
   async createPreBooking(req, res) {
-    console.log('=== CREATE PRE-BOOKING CALLED ===');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
-    
+
     try {
       let { event_id, attendees, user_id = 0, ip_address, photocard_confirmed, terms_agreed } = req.body;
 
@@ -171,53 +155,43 @@ class PreBookingController {
       try {
         // Create booking record
         const bookingRef = `PRE_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        console.log('Creating booking with ref:', bookingRef);
-        
+
         const [bookingResult] = await connection.query(`
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces, payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, created, modified)
           VALUES ((SELECT course_id FROM course_events WHERE id = ?), ?, ?, 'o', ?, 0, 0, 0, 0, 0, 0, 0, 0, NOW(), NOW())
         `, [event_id, event_id, user_id, space_count]);
 
         const bookingId = bookingResult.insertId;
-        console.log('Booking created with ID:', bookingId);
 
         // Create attendee records
-        console.log('Creating attendee records for', attendees.length, 'attendees');
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];
-          console.log(`Creating attendee ${i + 1}:`, attendee.first_name, attendee.sur_name);
 
           // Insert into booking_attendees
           const [attendeeResult] = await connection.query(`
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3, email, vehicle_type, license_type, license_number, theory_number, admin_notes, notes, \`primary\`, created)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, NOW())
           `, [bookingId, bookingRef, attendee.first_name || '', attendee.sur_name || '', attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email || '', attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '', attendee.theory_number || '', i === 0 ? 1 : 0]);
-          
-          console.log('Attendee record created with ID:', attendeeResult.insertId);
 
           // Insert into booking_attendees_dropdown
           const [dropdownResult] = await connection.query(`
             INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3, email, vehicle_type, license_type, license_number, theory_number, notes, \`primary\`, created, updated)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, NOW(), NOW())
           `, [bookingId, bookingRef, attendee.first_name || '', attendee.sur_name || '', attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email || '', attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '', attendee.theory_number || '', i === 0 ? 1 : 0]);
-          
-          console.log('Dropdown record created with ID:', dropdownResult.insertId);
+
         }
 
         // Create lock record
         const [event] = await connection.query(`SELECT parent FROM course_events WHERE id = ?`, [event_id]);
         const parentId = event[0].parent;
-        console.log('Creating lock for event:', event_id, 'parent:', parentId);
 
         const [lockResult] = await connection.query(`
           INSERT INTO lock_bookings (event_id, parent, user_id, space_required, ip_address, manual_lock, automatic_lock, payment_page_stauts, delete_process, created, modified)
           VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, NOW(), NOW())
         `, [event_id, parentId, user_id, space_count, ip_address]);
-        
-        console.log('Lock created with ID:', lockResult.insertId);
+
 
         // Update course_events
-        console.log('Updating course_events - adding locks:', space_count, 'bookings:', space_count);
         await connection.query(`
           UPDATE course_events
           SET current_locks = current_locks + ?, bookings_done = bookings_done + ?, modified = NOW()
@@ -246,18 +220,18 @@ class PreBookingController {
     }
   }
 
-  // Check availability helper
+  // Check availability helper (NO LOCKS)
   async checkAvailability(event_id, space_count) {
     const [event] = await this.pool.query(`
-      SELECT booking_limit, bookings_done, current_locks FROM course_events WHERE id = ?
+      SELECT booking_limit, bookings_done FROM course_events WHERE id = ?
     `, [event_id]);
 
     if (!event.length) {
       return { available: false, message: 'Event not found' };
     }
 
-    const { booking_limit, bookings_done, current_locks } = event[0];
-    const availableSpaces = booking_limit - bookings_done - current_locks;
+    const { booking_limit, bookings_done } = event[0];
+    const availableSpaces = booking_limit - bookings_done;
 
     if (availableSpaces < space_count) {
       return { available: false, message: 'Insufficient spaces available' };
@@ -275,7 +249,7 @@ class PreBookingController {
       if (ip_address === '::1' || ip_address === '::ffff:127.0.0.1') {
         ip_address = '127.0.0.1';
       }
-      
+
       // Use server's detected IP if not provided
       if (!ip_address || ip_address === 'localhost') {
         let detectedIp = req.clientIp || req.ip || req.connection.remoteAddress;
@@ -294,32 +268,28 @@ class PreBookingController {
         const affectedEventIds = new Set();
 
         // Find expired locks (10+ minutes old) - debug query first
-        console.log('Checking for expired locks...');
-        
+
         // First check all locks
         const [allLocks] = await connection.query(`
-          SELECT id, event_id, user_id, ip_address, space_required, created, 
+          SELECT id, event_id, user_id, ip_address, space_required, created,
                  TIMESTAMPDIFF(MINUTE, created, NOW()) as minutes_old
-          FROM lock_bookings 
+          FROM lock_bookings
           WHERE delete_process = 0
           ORDER BY created DESC
           LIMIT 10
         `);
-        
-        console.log('All recent locks:', allLocks);
-        
+
+
         // Now find expired ones (10+ minutes)
         const [expiredLocks] = await connection.query(`
           SELECT id, event_id, user_id, ip_address, space_required, created,
                  TIMESTAMPDIFF(MINUTE, created, NOW()) as minutes_old
-          FROM lock_bookings 
+          FROM lock_bookings
           WHERE TIMESTAMPDIFF(MINUTE, created, NOW()) >= 10
           AND delete_process = 0
           ${user_id ? 'AND user_id = ?' : ''}
           ${ip_address && !user_id ? 'AND ip_address = ?' : ''}
         `, user_id ? [user_id] : (ip_address ? [ip_address] : []));
-
-        console.log(`Found ${expiredLocks.length} expired locks`);
 
         // Process each expired lock
         for (const lock of expiredLocks) {
@@ -329,7 +299,7 @@ class PreBookingController {
           const [unpaidBookings] = await connection.query(`
             SELECT b.id, b.course_event_id, b.spaces
             FROM bookings b
-            WHERE b.course_event_id = ? 
+            WHERE b.course_event_id = ?
             AND (b.status = 0 OR b.admin_payment_received = 0)
           `, [lock.event_id]);
 
@@ -351,8 +321,8 @@ class PreBookingController {
 
           // Mark lock for deletion
           await connection.query(`
-            UPDATE lock_bookings 
-            SET delete_process = 1, modified = NOW() 
+            UPDATE lock_bookings
+            SET delete_process = 1, modified = NOW()
             WHERE id = ?
           `, [lock.id]);
 
@@ -378,8 +348,6 @@ class PreBookingController {
 
         await connection.commit();
         connection.release();
-
-        console.log(`[CLEANUP-PREBOOKING] Cleaned ${cleanedBookings} bookings and ${cleanedLocks} locks`);
 
         res.json({
           success: true,
@@ -516,7 +484,7 @@ class PreBookingController {
       const [expiredLocks] = await connection.query(`
         SELECT id, event_id, space_required
         FROM lock_bookings
-        WHERE created < DATE_SUB(NOW(), INTERVAL 10 MINUTE) 
+        WHERE created < DATE_SUB(NOW(), INTERVAL 10 MINUTE)
           AND delete_process = 0
       `);
 
@@ -530,7 +498,7 @@ class PreBookingController {
           const [unpaidBookings] = await connection.query(`
             SELECT id, spaces, course_event_id
             FROM bookings
-            WHERE course_event_id = ? 
+            WHERE course_event_id = ?
               AND (status = 0 OR admin_payment_received = 0)
               AND created >= DATE_SUB(?, INTERVAL 20 MINUTE)
               AND created <= DATE_ADD(?, INTERVAL 5 MINUTE)
@@ -542,7 +510,7 @@ class PreBookingController {
             // Delete attendee records
             await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
             await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
-            
+
             // Delete booking record
             await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
 
@@ -582,10 +550,8 @@ class PreBookingController {
       await connection.commit();
       connection.release();
 
-      console.log(`[CLEANUP] Cleaned ${cleanedBookings} bookings and ${cleanedLocks} locks`);
-
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: 'Expired locks cleaned up successfully',
         cleaned_bookings: cleanedBookings,
         cleaned_locks: cleanedLocks
@@ -607,9 +573,9 @@ class PreBookingController {
       const { booking_id, payment_status, transaction_id } = req.body;
 
       if (!booking_id || !payment_status) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'booking_id and payment_status required' 
+        return res.status(400).json({
+          success: false,
+          message: 'booking_id and payment_status required'
         });
       }
 
@@ -621,9 +587,9 @@ class PreBookingController {
       `, [booking_id]);
 
       if (!bookings.length) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Booking not found' 
+        return res.status(404).json({
+          success: false,
+          message: 'Booking not found'
         });
       }
 
@@ -647,8 +613,8 @@ class PreBookingController {
         await connection.commit();
         connection.release();
 
-        return res.json({ 
-          success: true, 
+        return res.json({
+          success: true,
           message: 'Payment confirmed and booking activated',
           booking_id: booking_id
         });
@@ -659,7 +625,7 @@ class PreBookingController {
         // Delete attendee records
         await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking_id]);
         await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking_id]);
-        
+
         // Delete booking record
         await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking_id]);
 
@@ -690,8 +656,8 @@ class PreBookingController {
         await connection.commit();
         connection.release();
 
-        return res.json({ 
-          success: true, 
+        return res.json({
+          success: true,
           message: 'Payment failed - booking and locks cleaned up',
           booking_id: booking_id
         });
@@ -699,9 +665,9 @@ class PreBookingController {
       } else {
         await connection.rollback();
         connection.release();
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Invalid payment_status. Use: success, failed, or cancelled' 
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid payment_status. Use: success, failed, or cancelled'
         });
       }
 

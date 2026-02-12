@@ -53,7 +53,7 @@ class BookingController {
 
         // 2. Verify event exists and has availability
         const [eventCheck] = await connection.query(`
-          SELECT 
+          SELECT
             ce.id,
             ce.event_date,
             ce.booking_limit,
@@ -131,14 +131,14 @@ class BookingController {
 
         // 7. Update event locks (temporary hold)
         await connection.query(`
-          UPDATE course_events 
+          UPDATE course_events
           SET current_locks = current_locks + ?, modified = NOW()
           WHERE id = ?
         `, [spaces, course_event_id]);
 
         // 8. Get complete booking data
         const [newBooking] = await connection.query(`
-          SELECT 
+          SELECT
             b.id,
             b.user_id,
             b.course_id,
@@ -159,7 +159,7 @@ class BookingController {
             ce.event_date,
             l.location_name,
             l.address as location_address,
-            CASE 
+            CASE
               WHEN b.status = 0 THEN 'Pending Payment'
               WHEN b.status = 1 THEN 'Confirmed'
               WHEN b.status = 2 THEN 'Completed'
@@ -226,7 +226,7 @@ class BookingController {
 
       // Get course events with availability
       const [availability] = await this.pool.query(`
-        SELECT 
+        SELECT
           ced.event_date as date,
           ced.event_start_time,
           ced.event_end_time,
@@ -238,7 +238,7 @@ class BookingController {
           (ce.booking_limit - ce.bookings_done - ce.current_locks) as available_spaces
         FROM course_events ce
         JOIN course_event_dates ced ON ce.id = ced.course_event_id
-        WHERE ce.course_id = ? 
+        WHERE ce.course_id = ?
           AND ce.location_id = ?
           AND ce.status = '1'
           AND ced.event_date >= ?
@@ -301,7 +301,7 @@ class BookingController {
 
       // Check if event has availability
       const [eventCheck] = await this.pool.query(`
-        SELECT 
+        SELECT
           ce.booking_limit,
           ce.bookings_done,
           ce.current_locks,
@@ -337,7 +337,7 @@ class BookingController {
 
       const [lockResult] = await this.pool.query(`
         INSERT INTO lock_bookings (
-          event_id, space_required, user_id, ip_address, 
+          event_id, space_required, user_id, ip_address,
           created, modified
         ) VALUES (?, ?, ?, ?, NOW(), NOW())
       `, [
@@ -349,7 +349,7 @@ class BookingController {
 
       // Update current locks
       await this.pool.query(`
-        UPDATE course_events 
+        UPDATE course_events
         SET current_locks = current_locks + ?
         WHERE id = ?
       `, [spaces_required, course_event_id]);
@@ -385,7 +385,7 @@ class BookingController {
       } = req.query;
 
       const offset = (page - 1) * limit;
-      
+
       // Build query conditions
       let whereClause = 'WHERE b.user_id = ?';
       let queryParams = [user_id];
@@ -402,7 +402,7 @@ class BookingController {
 
       // Get bookings with pagination
       const [bookings] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
           b.course_id,
           b.course_event_id,
@@ -427,7 +427,7 @@ class BookingController {
           l.address as location_address,
           l.post_code,
           l.phone as location_phone,
-          CASE 
+          CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
             WHEN b.status = 2 THEN 'Completed'
@@ -435,7 +435,7 @@ class BookingController {
             WHEN b.status = 4 THEN 'No Show'
             ELSE 'Unknown'
           END as status_text,
-          CASE 
+          CASE
             WHEN ce.event_date > CURDATE() THEN 'upcoming'
             WHEN ce.event_date = CURDATE() THEN 'today'
             ELSE 'past'
@@ -491,7 +491,7 @@ class BookingController {
       const user_id = req.user.id;
 
       const [bookings] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
           b.user_id,
           b.course_id,
@@ -523,7 +523,7 @@ class BookingController {
           u.sur_name,
           u.email,
           u.mobile,
-          CASE 
+          CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
             WHEN b.status = 2 THEN 'Completed'
@@ -531,7 +531,7 @@ class BookingController {
             WHEN b.status = 4 THEN 'No Show'
             ELSE 'Unknown'
           END as status_text,
-          CASE 
+          CASE
             WHEN ce.event_date > CURDATE() THEN 'upcoming'
             WHEN ce.event_date = CURDATE() THEN 'today'
             ELSE 'past'
@@ -628,8 +628,8 @@ class BookingController {
 
       // Update booking
       await this.pool.query(`
-        UPDATE bookings 
-        SET 
+        UPDATE bookings
+        SET
           customer_notes = ?,
           emergency_contact_name = ?,
           emergency_contact_phone = ?,
@@ -646,7 +646,7 @@ class BookingController {
 
       // Get updated booking
       const [updatedBooking] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
           b.customer_notes,
           b.emergency_contact_name,
@@ -689,7 +689,7 @@ class BookingController {
       try {
         // Get booking details
         const [bookingCheck] = await connection.query(`
-          SELECT 
+          SELECT
             b.id,
             b.status,
             b.spaces,
@@ -727,8 +727,8 @@ class BookingController {
 
         // Update booking status to cancelled
         await connection.query(`
-          UPDATE bookings 
-          SET 
+          UPDATE bookings
+          SET
             status = 3,
             modified = NOW()
           WHERE id = ?
@@ -738,14 +738,14 @@ class BookingController {
         if (booking.status === 0) {
           // If it was pending, release from locks
           await connection.query(`
-            UPDATE course_events 
+            UPDATE course_events
             SET current_locks = GREATEST(0, current_locks - ?)
             WHERE id = ?
           `, [booking.spaces, booking.course_event_id]);
         } else if (booking.status === 1) {
           // If it was confirmed, release from bookings_done
           await connection.query(`
-            UPDATE course_events 
+            UPDATE course_events
             SET bookings_done = GREATEST(0, bookings_done - ?)
             WHERE id = ?
           `, [booking.spaces, booking.course_event_id]);
@@ -783,7 +783,7 @@ class BookingController {
       const user_id = req.user.id;
 
       const [stats] = await this.pool.query(`
-        SELECT 
+        SELECT
           COUNT(*) as total_bookings,
           COUNT(CASE WHEN status = 0 THEN 1 END) as pending_bookings,
           COUNT(CASE WHEN status = 1 THEN 1 END) as confirmed_bookings,
@@ -802,7 +802,7 @@ class BookingController {
         SELECT COUNT(*) as upcoming_bookings
         FROM bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
-        WHERE b.user_id = ? 
+        WHERE b.user_id = ?
           AND b.status IN (0, 1)
           AND ce.event_date >= CURDATE()
       `, [user_id]);
@@ -842,7 +842,7 @@ class BookingController {
       } = req.query;
 
       const offset = (page - 1) * limit;
-      
+
       // Build query conditions
       let whereClause = 'WHERE 1=1';
       let queryParams = [];
@@ -880,7 +880,7 @@ class BookingController {
 
       // Get bookings with pagination
       const [bookings] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
           b.user_id,
           b.course_id,
@@ -899,7 +899,7 @@ class BookingController {
           u.sur_name,
           u.email,
           u.mobile,
-          CASE 
+          CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
             WHEN b.status = 2 THEN 'Completed'

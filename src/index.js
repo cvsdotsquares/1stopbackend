@@ -22,7 +22,10 @@ const createHelperRoutes = require('./routes/helper');
 const createPriceCalculationRoutes = require('./routes/priceCalculation');
 const createWebhookRoutes = require('./routes/webhook');
 const createManualPaymentRoutes = require('./routes/manualPayment');
+const createDashboardRoutes = require('./routes/dashboard');
+const createUserRoutes = require('./routes/user');
 const PreBookingController = require('./controllers/preBooking');
+const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -138,10 +141,13 @@ app.use('/api/pagemenu', pageMenuRoutes(pool));
 app.use('/api/get-data', dynamicDataRoutes(pool));
 app.use('/api/booking', createPreBookingRoutes(pool));
 app.use('/api/booking', bookingFlowRoutes(pool));
+app.use('/api/booking-flow', bookingFlowRoutes(pool));
 app.use('/api/helper', createHelperRoutes(pool));
 app.use('/api/booking/pricing', createPriceCalculationRoutes(pool));
 app.use('/api/webhook', createWebhookRoutes(pool));
 app.use('/api/payment', createManualPaymentRoutes(pool));
+app.use('/api/dashboard', createDashboardRoutes(pool));
+app.use('/api/user', createUserRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
@@ -234,6 +240,13 @@ app.get('/api', (req, res) => {
         'POST /api/booking/pricing/calculate': 'Calculate booking price with all business rules',
         'GET /api/booking/pricing/validate/:course_event_id': 'Validate course event for pricing',
         'GET /api/booking/pricing/options/:course_event_id': 'Get pricing options for course event'
+      },
+      dashboard: {
+        'GET /api/dashboard': 'Get user dashboard data (requires token)'
+      },
+      user: {
+        'GET /api/user/profile': 'Get user profile (requires token)',
+        'PUT /api/user/profile': 'Update user profile (requires token)'
       }
     },
     authentication: {
@@ -254,4 +267,8 @@ app.listen(PORT, () => {
   
   // Start booking cleanup job
   BookingStatusManager.startCleanupJob(pool);
+  
+  // Start unpaid bookings cleanup cron
+  const cleanupCron = new BookingCleanupCron(pool);
+  cleanupCron.start();
 });

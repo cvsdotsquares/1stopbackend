@@ -172,6 +172,60 @@ function createAuthRoutes(pool) {
       .withMessage('New password must contain at least one lowercase letter, one uppercase letter, and one number')
   ];
 
+  const emailValidation = [
+    body('email')
+      .trim()
+      .isEmail()
+      .normalizeEmail()
+      .withMessage('Please provide a valid email address')
+  ];
+
+  const sendOTPValidation = [
+    body('email')
+      .trim()
+      .isEmail()
+      .normalizeEmail()
+      .withMessage('Please provide a valid email address'),
+    body('purpose')
+      .optional()
+      .isIn(['email_verification', 'password_reset'])
+      .withMessage('Purpose must be either email_verification or password_reset')
+  ];
+
+  const otpValidation = [
+    body('email')
+      .trim()
+      .isEmail()
+      .normalizeEmail()
+      .withMessage('Please provide a valid email address'),
+    body('otp')
+      .isLength({ min: 6, max: 6 })
+      .isNumeric()
+      .withMessage('OTP must be a 6-digit number')
+  ];
+
+  const setPasswordValidation = [
+    body('email')
+      .trim()
+      .isEmail()
+      .normalizeEmail()
+      .withMessage('Please provide a valid email address'),
+    body('password')
+      .isLength({ min: 8 })
+      .withMessage('Password must be at least 8 characters long')
+      .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+      .withMessage('Password must contain at least one lowercase letter, one uppercase letter, and one number')
+  ];
+
+  // New login flow routes
+  router.post('/check-email', emailValidation, authController.checkEmail.bind(authController));
+  router.post('/send-otp', sendOTPValidation, authController.sendVerificationOTP.bind(authController));
+  router.post('/verify-otp', otpValidation, authController.verifyOTP.bind(authController));
+  router.post('/set-password', setPasswordValidation, authController.setNewPassword.bind(authController));
+
+  // Forgot password (uses same flow as reset password)
+  router.post('/forgot-password', emailValidation, authController.sendVerificationOTP.bind(authController));
+
   // Public routes
   router.post('/register', registerValidation, authController.register.bind(authController));
   router.post('/login', loginValidation, authController.login.bind(authController));

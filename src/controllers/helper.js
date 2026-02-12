@@ -6,6 +6,42 @@ class HelperController {
     this.pool = pool;
   }
 
+  async checkBlacklisted(req, res) {
+    try {
+      const { license_number } = req.body;
+
+      if (!license_number || license_number.trim() === '') {
+        return res.status(400).json({
+          success: false,
+          message: 'License number is required'
+        });
+      }
+
+      const [result] = await this.pool.query(`
+        SELECT * FROM booking_attendees_dropdown
+        WHERE id != '' AND is_blacklisted = 1 AND license_number = ?
+      `, [license_number.trim()]);
+
+      if (result.length > 0) {
+        return res.json({
+          success: true,
+          is_blacklisted: true,
+        });
+      }
+
+      res.json({
+        success: true,
+        is_blacklisted: false,
+      });
+    } catch (error) {
+      console.error('Error checking blacklisted license:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to check license number'
+      });
+    }
+  }
+
   async suggestPostalCodes(req, res) {
     try {
       const { query } = req.body;

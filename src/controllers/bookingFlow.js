@@ -2,6 +2,7 @@
 const BookingController = require('../controllers/bookings');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { sendBookingConfirmation } = require('../utils/emailService');
 
 class BookingFlowController {
   constructor(pool) {
@@ -64,7 +65,7 @@ class BookingFlowController {
         });
       }
 
-      // Query matching PHP course_avails exactly - without DISTINCT
+      // Query without current_locks
       const [events] = await this.pool.query(`
         SELECT
           ced.course_event_id,
@@ -73,7 +74,6 @@ class BookingFlowController {
           ced.event_end_time,
           ce.booking_limit,
           ce.bookings_done,
-          ce.current_locks,
           ce.event_type,
           c.course_name,
           COALESCE(f.freeze_count, 0) as freeze_count
@@ -89,8 +89,9 @@ class BookingFlowController {
           AND ce.location_id = ?
           AND c.status = '1'
           AND ce.status = '1'
+          AND ce.bookings_done < ce.booking_limit
           AND ced.event_date > CURDATE()
-          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 6 WEEK)
+          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
         ORDER BY ced.event_date ASC
       `, [course_id, location_id]);
 
@@ -102,8 +103,8 @@ class BookingFlowController {
       }
 
       const availability = events.map(event => {
-        const availableSpaces = event.booking_limit - event.bookings_done - event.current_locks;
-        const isFullyBooked = (event.bookings_done + event.current_locks) >= event.booking_limit;
+        const availableSpaces = event.booking_limit - event.bookings_done;
+        const isFullyBooked = event.bookings_done >= event.booking_limit;
         const isFrozen = event.freeze_count > 0;
 
         return {
@@ -112,7 +113,6 @@ class BookingFlowController {
           available_spaces: Math.max(0, availableSpaces),
           booking_limit: event.booking_limit,
           bookings_done: event.bookings_done,
-          current_locks: event.current_locks,
           event_start_time: event.event_start_time,
           event_end_time: event.event_end_time,
           course_event_id: event.course_event_id,
@@ -141,7 +141,6 @@ class BookingFlowController {
     try {
       const cbtCourseId = 1; // CBT course ID
 
-      // Query to find the next available date for CBT course across all locations
       const [availability] = await this.pool.query(`
         SELECT
           ced.course_event_id,
@@ -150,7 +149,6 @@ class BookingFlowController {
           ced.event_end_time,
           ce.booking_limit,
           ce.bookings_done,
-          ce.current_locks,
           ce.location_id,
           ce.course_id,
           c.course_name,
@@ -178,7 +176,7 @@ class BookingFlowController {
           AND c.status = '1'
           AND ce.status = '1'
           AND DATE(ced.event_date) > DATE(NOW())
-          AND DATE(ced.event_date) <= DATE_ADD(DATE(NOW()), INTERVAL 6 WEEK)
+          AND DATE(ced.event_date) <= DATE_ADD(DATE(NOW()), INTERVAL 3 MONTH)
         ORDER BY ced.event_date ASC, l.location_name ASC
         LIMIT 1
       `, [cbtCourseId]);
@@ -191,8 +189,8 @@ class BookingFlowController {
       }
 
       const event = availability[0];
-      const availableSpaces = event.booking_limit - event.bookings_done - event.current_locks;
-      const isFullyBooked = (event.bookings_done + event.current_locks) >= event.booking_limit;
+      const availableSpaces = event.booking_limit - event.bookings_done;
+      const isFullyBooked = event.bookings_done >= event.booking_limit;
       const isFrozen = event.freeze_count > 0;
 
       res.json({
@@ -555,64 +553,225 @@ class BookingFlowController {
     }
   }
 
+  // Decrypt AES encrypted password from frontend (CryptoJS format)
+  decryptPassword(encryptedPassword) {
+    if (!encryptedPassword) return null;
+
+    try {
+      const CryptoJS = require('crypto-js');
+      const secretKey = process.env.AES_SECRET_KEY || 'booking-secret-key-2025';
+
+      const decrypted = CryptoJS.AES.decrypt(encryptedPassword, secretKey);
+      const plainPassword = decrypted.toString(CryptoJS.enc.Utf8);
+
+      if (!plainPassword) {
+        throw new Error('Decryption failed');
+      }
+
+      return plainPassword;
+    } catch (error) {
+      console.error('Error decrypting password:', error);
+      return null;
+    }
+  }
+
+  // CakePHP 2.10 password hashing for compatibility
+  cakephp210Password(password) {
+    const salt = 'DYhG93b0qyJuIp4kjlN8ltP9lj0wvniR2G0FgaC9mi';
+    return crypto.createHash('sha1').update(salt + password).digest('hex');
+  }
+
+  // Generate random password
+  generateRandomPassword(length = 12) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%';
+    let password = '';
+    for (let i = 0; i < length; i++) {
+      password += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return password;
+  }
+
   async createBookingWithAttendees(req, res) {
-    console.log('=== CREATE BOOKING WITH ATTENDEES CALLED ===');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
 
     try {
       const {
         course_id, course_event_id, location_id, selected_date,
-        attendees_count, user_details, attendees,
-        create_account = false, password = '', lock_id = 0
-
+        attendees, photocard_confirmed, terms_agreed, promo_code
       } = req.body;
+
+      // Validation
+      if (!course_id || !course_event_id || !attendees || !Array.isArray(attendees) || attendees.length === 0) {
+        return res.status(400).json({ success: false, message: 'Missing required fields' });
+      }
+
+      if (!photocard_confirmed) {
+        return res.status(400).json({ success: false, message: 'Please confirm that the person attending can present their photocard driving licence on the day of the course' });
+      }
+
+      if (!terms_agreed) {
+        return res.status(400).json({ success: false, message: 'Please agree to the Terms & Conditions and Privacy Policy' });
+      }
 
       const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        let user_id = null;
+        const attendees_count = attendees.length;
+        const userIds = [];
+        const generatedPasswords = [];
 
-        if (create_account && password) {
-          const bcrypt = require('bcrypt');
-          const hashedPassword = await bcrypt.hash(password, 10);
+        // Create user account for each attendee
+        for (const attendee of attendees) {
+          // Check if user exists
+          const [existingUser] = await connection.query(
+            `SELECT id FROM users WHERE email = ?`,
+            [attendee.email]
+          );
 
-          const [userResult] = await connection.query(`
-            INSERT INTO users (first_name, sur_name, email, password, contact1, created, modified)
-            VALUES (?, ?, ?, ?, ?, NOW(), NOW())
-          `, [
-            user_details.first_name, user_details.sur_name, user_details.email,
-            hashedPassword, user_details.contact1
-          ]);
+          let userId;
+          if (existingUser.length > 0) {
+            userId = existingUser[0].id;
+          } else {
+            // Decrypt password if provided (encrypted by frontend)
+            let plainPassword;
+            let passwordType = 'random';
+            if (attendee.password) {
+              plainPassword = this.decryptPassword(attendee.password);
+              if (!plainPassword) {
+                throw new Error(`Invalid encrypted password for ${attendee.email}`);
+              }
+              passwordType = 'user_chosen';
+            } else {
+              plainPassword = this.generateRandomPassword();
+            }
 
-          user_id = userResult.insertId;
-          console.log('User created with ID:', user_id);
+            const hashedPassword = this.cakephp210Password(plainPassword);
+
+            const [userResult] = await connection.query(`
+              INSERT INTO users (first_name, sur_name, email, password, password_type, contact1, contact2, contact3, status, created, modified)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            `, [
+              attendee.first_name, attendee.sur_name, attendee.email,
+              hashedPassword, passwordType, attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', passwordType === 'user_chosen' ? 1 : 0
+            ]);
+
+            userId = userResult.insertId;
+            generatedPasswords.push({ email: attendee.email, password: plainPassword, generated: !attendee.password });
+          }
+          userIds.push(userId);
         }
 
-        const [courseData] = await connection.query(`SELECT dsa_fees FROM courses WHERE id = ?`, [course_id]);
-        const coursePrice = courseData[0].dsa_fees;
-        const totalFees = coursePrice * attendees_count;
+        // Check availability with row lock to prevent race conditions
+        const [event] = await connection.query(`
+          SELECT booking_limit, bookings_done FROM course_events WHERE id = ? FOR UPDATE
+        `, [course_event_id]);
+
+        if (!event.length) {
+          throw new Error('Event not found');
+        }
+
+        const availableSpaces = event[0].booking_limit - event[0].bookings_done;
+        if (availableSpaces < attendees_count) {
+          await connection.rollback();
+          connection.release();
+          return res.status(400).json({
+            success: false,
+            message: `Sorry, this course is now fully booked. Only ${availableSpaces} space(s) available, but you requested ${attendees_count}.`,
+            available_spaces: availableSpaces
+          });
+        }
+
+        const [courseData] = await connection.query(`
+          SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
+                 ce.school_deposit_price, ce.own_deposit_price, ce.school_total_price, ce.own_total_price,
+                 ce.is_deposit, c.deposit_days, f.vat as franchise_vat
+          FROM courses c
+          JOIN course_events ce ON c.id = ce.course_id
+          JOIN franchise f ON ce.franchise_id = f.id
+          WHERE c.id = ? AND ce.id = ?
+        `, [course_id, course_event_id]);
+
+        if (!courseData.length) {
+          throw new Error('Course not found');
+        }
+
+        // Calculate price for each attendee based on vehicle type
+        let totalFees = 0;
+        for (const attendee of attendees) {
+          const vehicleType = attendee.vehicle_type || 0;
+          let attendeePrice = 0;
+
+          // Priority 1: One-off pricing
+          if (courseData[0].school_one_off_price > 0 || courseData[0].own_one_off_price > 0) {
+            attendeePrice = vehicleType === 3 ? courseData[0].own_one_off_price : courseData[0].school_one_off_price;
+          }
+          // Priority 2: Deposit + Total pricing
+          else if (courseData[0].school_deposit_price > 0 || courseData[0].own_deposit_price > 0) {
+            attendeePrice = vehicleType === 3 ? courseData[0].own_total_price : courseData[0].school_total_price;
+          }
+          // Fallback: DSA fees
+          else {
+            attendeePrice = courseData[0].dsa_fees;
+          }
+
+          totalFees += attendeePrice;
+        }
+
+        // Apply promo code discount if provided
+        let promoDiscount = 0;
+        let promoCodeId = null;
+        if (promo_code) {
+          const [promos] = await connection.query(`
+            SELECT id, p_c_amount, p_c_discount_type
+            FROM promos
+            WHERE promo_code = ? AND status = 1 AND isDeleted = 0
+          `, [promo_code]);
+
+          if (promos.length > 0) {
+            const promo = promos[0];
+            promoCodeId = promo.id;
+
+            if (promo.p_c_discount_type === 'pounds_off') {
+              promoDiscount = attendees_count * promo.p_c_amount;
+            } else if (promo.p_c_discount_type === 'percent_off') {
+              promoDiscount = (totalFees * promo.p_c_amount) / 100;
+            }
+          }
+        }
+
+        const discountedFees = Math.max(0, totalFees - promoDiscount);
+
+        // Calculate VAT (DSA fees are VAT exempt)
         const vatRate = 0.20;
-        const vat = totalFees * vatRate;
-        const totalAmount = totalFees + vat;
+        let vat = 0;
+
+        if (courseData[0].franchise_vat === 1) {
+          const dsaFees = courseData[0].dsa_fees * attendees_count;
+          const vatableAmount = discountedFees > dsaFees ? (discountedFees - dsaFees) : 0;
+          const vatMultiplier = (100 + (vatRate * 100)) / 100;
+          vat = vatableAmount - (vatableAmount / vatMultiplier);
+          vat = Math.round(vat * 100) / 100;
+        }
+
+        const totalAmount = discountedFees + vat;
 
         const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
         const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
-        console.log('Creating booking with ref:', bookingRef);
+
+        // Use first attendee's user_id as primary booking user
+        const primaryUserId = userIds[0];
 
         const [bookingResult] = await connection.query(`
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
-                               payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by)
-          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, 0, NOW(), NOW(), 0, ?)
-        `, [course_id, course_event_id, user_id || 0, attendees_count, totalAmount, totalFees, vatRate, vat, totalAmount, lock_id, user_id || 0]);
+                               payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
+          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
+        `, [course_id, course_event_id, primaryUserId, attendees_count, totalAmount, discountedFees, vatRate, vat, totalAmount, primaryUserId, primaryUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
 
         const booking_id = bookingResult.insertId;
-        console.log('Booking created with ID:', booking_id);
 
-        console.log('Creating attendee records for', attendees.length, 'attendees');
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];
-          console.log(`Creating attendee ${i + 1}:`, attendee.first_name, attendee.sur_name);
+          const attendeeUserId = userIds[i];
 
           // Insert into booking_attendees
           const [attendeeResult] = await connection.query(`
@@ -622,11 +781,10 @@ class BookingFlowController {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
-            attendee.contact1, attendee.contact2 || '', attendee.contact3 || '', attendee.email,
-            attendee.vehicle_type, attendee.license_type, attendee.license_number,
-            attendee.theory_number, i === 0 ? 1 : 0
+            attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+            attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
+            attendee.theory_number || '', i === 0 ? 1 : 0
           ]);
-          console.log('Attendee record created with ID:', attendeeResult.insertId);
 
           // Insert into booking_attendees_dropdown
           const [dropdownResult] = await connection.query(`
@@ -636,113 +794,86 @@ class BookingFlowController {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
-            attendee.contact1, attendee.contact2 || '', attendee.contact3 || '', attendee.email,
-            attendee.vehicle_type, attendee.license_type, attendee.license_number,
-            attendee.theory_number, attendee.notes || '', i === 0 ? 1 : 0
+            attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+            String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
+            attendee.theory_number || '', attendee.notes || '', i === 0 ? 1 : 0
           ]);
-          console.log('Dropdown record created with ID:', dropdownResult.insertId);
         }
 
-        // Stripe Integration (Primary)
+        // Stripe Integration
         const siteUrl = process.env.SITE_URL || 'http://localhost:3001';
-        
+        const primaryAttendee = attendees[0];
+
         try {
-          console.log('Creating Stripe checkout session...');
-          
-          const session = await stripe.checkout.sessions.create({
-            payment_method_types: ['card'],
-            line_items: [{
-              price_data: {
-                currency: 'gbp',
-                product_data: {
-                  name: '1 Stop Instruction Course Booking',
-                  description: `Course: ${courseData[0]?.course_name || 'Course'} - ${attendees_count} attendee(s)`,
-                },
-                unit_amount: Math.round(totalAmount * 100), // Convert to pence
-              },
-              quantity: 1,
-            }],
-            mode: 'payment',
-            success_url: `${siteUrl}/bookings/payment-success?session_id={CHECKOUT_SESSION_ID}&booking_ref=${bookingRef}`,
-            cancel_url: `${siteUrl}/bookings/payment-cancel?booking_ref=${bookingRef}`,
+
+          const paymentIntent = await stripe.paymentIntents.create({
+            amount: Math.round(totalAmount * 100),
+            currency: 'gbp',
+            automatic_payment_methods: { enabled: true },
             metadata: {
               booking_id: booking_id.toString(),
               booking_ref: bookingRef,
               course_id: course_id.toString(),
-              user_id: (user_id || 0).toString(),
+              course_event_id: course_event_id.toString(),
+              user_id: primaryUserId.toString(),
+              attendees_count: attendees_count.toString()
             },
-            customer_email: user_details.email,
-            billing_address_collection: 'required',
+            description: `Course: ${courseData[0]?.course_name || 'Course'} - ${attendees_count} attendee(s)`,
+            receipt_email: primaryAttendee.email
           });
 
-          console.log('Stripe session created:', session.id);
-
           await connection.commit();
-          console.log('Transaction committed successfully');
+
+          // Send confirmation email
+          try {
+            const [locationData] = await this.pool.query(`
+              SELECT location_name, address1, address2, postcode FROM locations WHERE id = ?
+            `, [location_id]);
+            
+            const [eventDates] = await this.pool.query(`
+              SELECT event_date, event_start_time FROM course_event_dates WHERE course_event_id = ? LIMIT 1
+            `, [course_event_id]);
+
+            await sendBookingConfirmation({
+              course_name: courseData[0]?.course_name || 'Course',
+              booking_ref: bookingRef,
+              attendees: attendees,
+              location: {
+                name: locationData[0]?.location_name || '',
+                address: `${locationData[0]?.address1 || ''}, ${locationData[0]?.postcode || ''}`
+              },
+              event_dates: eventDates.map(d => ({
+                date: d.event_date,
+                start_time: d.event_start_time
+              })),
+              payment: {
+                total_amount: totalAmount.toFixed(2),
+                paid: totalAmount.toFixed(2),
+                balance: '0.00'
+              },
+              ip: req.clientIp || req.ip || 'unknown'
+            });
+          } catch (emailError) {
+            console.error('Email send failed:', emailError);
+          }
 
           res.status(201).json({
             success: true,
             booking_id,
             booking_ref: bookingRef,
             payment_due: totalAmount,
-            total_fees: totalFees,
+            total_fees: discountedFees,
+            promo_discount: promoDiscount,
             vat,
             total_amount: totalAmount,
-            stripe_session_url: session.url,
-            stripe_session_id: session.id
+            client_secret: paymentIntent.client_secret,
+            payment_intent_id: paymentIntent.id,
+            user_accounts: generatedPasswords
           });
         } catch (stripeError) {
-          console.error('Stripe session creation failed, falling back to Worldpay:', stripeError);
-          
-          // Fallback to Worldpay if Stripe fails
-          const isTest = process.env.WORLDPAY_TEST_MODE || '100';
-          const instId = process.env.WORLDPAY_INST_ID || '1382788';
-          const secret = process.env.WORLDPAY_MD5_SECRET || 'N0EIz$GtcGdH1i7tASjQHg7H5urhD';
-          const currency = 'GBP';
-          const amountStr = totalAmount.toFixed(2);
-          const cartId = bookingRef;
-
-          const signatureString = `${secret}:${instId}:${amountStr}:${currency}:${cartId}`;
-          const signature = crypto.createHash('md5').update(signatureString).digest('hex');
-
-          const paymentData = {
-            url: isTest === '100' ? 'https://secure-test.worldpay.com/wcc/purchase' : 'https://secure.worldpay.com/wcc/purchase',
-            fields: {
-              testMode: isTest,
-              instId: instId,
-              cartId: cartId,
-              amount: amountStr,
-              currency: currency,
-              desc: '1 Stop Instruction Course Booking',
-              name: `${user_details.first_name} ${user_details.sur_name}`,
-              address1: user_details.address1 || '',
-              postcode: user_details.postcode || '',
-              email: user_details.email,
-              tel: user_details.contact1 || '',
-              country: 'GB',
-              lang: 'en',
-              signatureFields: 'instId:amount:currency:cartId',
-              signature: signature,
-              successURL: `${siteUrl}/bookings/payment-success`,
-              cancelURL: `${siteUrl}/bookings/payment-cancel`,
-              failureURL: `${siteUrl}/bookings/payment-failure`,
-              MC_callback: `${siteUrl}/api/webhook/worldpay`
-            }
-          };
-
-          await connection.commit();
-          console.log('Transaction committed successfully with Worldpay fallback');
-
-          res.status(201).json({
-            success: true,
-            booking_id,
-            booking_ref: bookingRef,
-            payment_due: totalAmount,
-            total_fees: totalFees,
-            vat,
-            total_amount: totalAmount,
-            payment_data: paymentData
-          });
+          console.error('Stripe PaymentIntent creation failed:', stripeError);
+          await connection.rollback();
+          throw new Error('Payment gateway error');
         }
       } catch (error) {
         await connection.rollback();

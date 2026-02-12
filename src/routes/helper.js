@@ -42,7 +42,21 @@ function createHelperRoutes(pool) {
       .withMessage('Content is required')
   ];
 
+  const licenseValidation = [
+    body('license_number')
+      .isString()
+      .notEmpty()
+      .withMessage('License number is required')
+      .trim()
+  ];
+
   // Routes
+  router.post('/check-blacklisted',
+    licenseValidation,
+    handleValidationErrors,
+    helperController.checkBlacklisted.bind(helperController)
+  );
+
   router.post('/suggest-postal-codes', 
     postalCodeSuggestionValidation, 
     handleValidationErrors, 

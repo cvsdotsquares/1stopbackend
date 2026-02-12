@@ -86,5 +86,12 @@ module.exports = (pool) => {
    */
   router.post('/create-with-attendees', bookingFlowController.createBookingWithAttendees.bind(bookingFlowController));
 
+  /**
+   * @route POST /api/booking-flow/create-booking-with-attendees
+   * @desc Create booking with attendees (alternative path)
+   * @access Public
+   */
+  router.post('/create-booking-with-attendees', bookingFlowController.createBookingWithAttendees.bind(bookingFlowController));
+
   return router;
 };
