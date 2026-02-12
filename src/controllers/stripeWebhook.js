@@ -31,18 +31,11 @@ class StripeWebhookController {
       console.log(`📋 Event data:`, JSON.stringify(event.data?.object?.metadata || {}, null, 2));
 
       switch (event.type) {
-        case 'checkout.session.completed':
-          console.log('✅ Handling payment success...');
-          await this.handlePaymentSuccess(event.data.object);
-          break;
-        case 'checkout.session.expired':
-          console.log('⏰ Handling payment expired...');
-          await this.handlePaymentExpired(event.data.object);
-          break;
         case 'payment_intent.created':
           console.log('ℹ️ Payment intent created (no action needed)');
           break;
         case 'payment_intent.succeeded':
+          await this.handlePaymentSuccess(event.data.object);
           console.log('✅ Payment intent succeeded (handled via checkout.session.completed)');
           break;
         case 'payment_intent.payment_failed':
@@ -293,7 +286,7 @@ class StripeWebhookController {
     try {
       const { payment_intent, ref } = req.query;
       console.log('Booking ref:', ref, 'Payment intent:', payment_intent);
-      
+
       if (!payment_intent || !ref) {
         return res.status(400).json({
           success: false,
