@@ -39,6 +39,12 @@ class StripeWebhookController {
           console.log('⏰ Handling payment expired...');
           await this.handlePaymentExpired(event.data.object);
           break;
+        case 'payment_intent.created':
+          console.log('ℹ️ Payment intent created (no action needed)');
+          break;
+        case 'payment_intent.succeeded':
+          console.log('✅ Payment intent succeeded (handled via checkout.session.completed)');
+          break;
         case 'payment_intent.payment_failed':
           console.log('❌ Handling payment failed...');
           await this.handlePaymentFailed(event.data.object);
@@ -89,7 +95,7 @@ class StripeWebhookController {
 
       // Get booking and event details
       const [bookingDetails] = await connection.query(`
-        SELECT b.id, b.course_event_id, b.spaces, b.lockid, b.admin_payment_received,
+        SELECT b.id, b.course_event_id, b.spaces, b.lockid, b.admin_payment_received, b.payment_due,
                ce.bookings_done, ce.booking_limit, ce.parent
         FROM bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
@@ -104,8 +110,11 @@ class StripeWebhookController {
 
       const booking = bookingDetails[0];
       console.log('📋 Booking details:', booking);
-      const { course_event_id, spaces, lockid, admin_payment_received } = booking;
+      const { course_event_id, spaces, lockid, admin_payment_received, payment_due } = booking;
       const { bookings_done, booking_limit, parent } = booking;
+
+      // Calculate actual payment amount from Stripe session
+      const paidAmount = session.amount_total / 100; // Convert from pence to pounds
 
       // Check capacity (like original PHP logic)
       if (bookings_done >= booking_limit) {
@@ -115,11 +124,12 @@ class StripeWebhookController {
         await connection.query(`
           UPDATE bookings
           SET refundable = 1,
-              payment_due = payment_due - ?,
+              payment_due = 0,
+              admin_payment_received = ?,
               status = 1,
               modified = NOW()
           WHERE id = ?
-        `, [admin_payment_received || 0, booking_id]);
+        `, [paidAmount, booking_id]);
 
       } else {
         // Normal booking confirmation
@@ -135,11 +145,12 @@ class StripeWebhookController {
         // Update booking status
         await connection.query(`
           UPDATE bookings
-          SET payment_due = payment_due - ?,
+          SET payment_due = 0,
+              admin_payment_received = ?,
               status = 1,
               modified = NOW()
           WHERE id = ?
-        `, [admin_payment_received || 0, booking_id]);
+        `, [paidAmount, booking_id]);
       }
 
       // Save payment record (like original PHP)
@@ -147,7 +158,7 @@ class StripeWebhookController {
         booking_id: booking_id,
         payment_type: 'SALE',
         transation_id: session.payment_intent || session.id,
-        amount: admin_payment_received || 0,
+        amount: paidAmount,
         transation_type: 'booking',
         response: JSON.stringify({
           session_id: session.id,
@@ -278,28 +289,29 @@ class StripeWebhookController {
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
     }
-
+    console.log('Verifying payment with query:', req.query);
     try {
-      const { session_id, booking_ref } = req.query;
-
-      if (!session_id || !booking_ref) {
+      const { payment_intent, ref } = req.query;
+      console.log('Booking ref:', ref, 'Payment intent:', payment_intent);
+      
+      if (!payment_intent || !ref) {
         return res.status(400).json({
           success: false,
-          error: 'Missing session_id or booking_ref'
+          error: 'Missing payment_intent or ref'
         });
       }
 
-      // Get session from Stripe
-      const session = await stripe.checkout.sessions.retrieve(session_id);
+      // Get payment intent from Stripe
+      const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent);
 
-      // Get booking from database using booking_attendees table (like PHP)
+      // Get booking from database using booking_attendees table
       const [bookings] = await this.pool.query(`
-        SELECT b.id, b.status, b.total_amount
+        SELECT b.id, b.status, b.total_amount, b.payment_due, b.admin_payment_received
         FROM bookings b
         JOIN booking_attendees ba ON b.id = ba.booking_id
         WHERE ba.booking_ref = ?
         LIMIT 1
-      `, [booking_ref]);
+      `, [ref]);
 
       if (bookings.length === 0) {
         return res.status(404).json({
@@ -314,11 +326,11 @@ class StripeWebhookController {
         success: true,
         data: {
           booking_id: booking.id,
-          booking_ref,
-          payment_status: session.payment_status,
+          booking_ref: ref,
+          payment_status: paymentIntent.status,
           booking_status: booking.status,
-          amount_paid: session.amount_total / 100,
-          session_status: session.status
+          amount_paid: paymentIntent.amount_received / 100,
+          payment_due: booking.payment_due
         }
       });
 
