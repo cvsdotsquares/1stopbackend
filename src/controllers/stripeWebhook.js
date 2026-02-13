@@ -57,6 +57,11 @@ class StripeWebhookController {
     console.log('🔄 Processing successful payment for session:', session.id);
     console.log('📋 Session metadata:', session.metadata);
 
+    // Check if gift voucher
+    if (session.metadata?.type === 'gift_voucher') {
+      return this.handleGiftVoucherPayment(session);
+    }
+
     const { booking_id, booking_ref } = session.metadata || {};
 
     if (!booking_id) {
@@ -108,13 +113,13 @@ class StripeWebhookController {
 
       // Calculate actual payment amount from Stripe payment intent
       const paidAmount = (session.amount || session.amount_total || 0) / 100; // Convert from pence to pounds
-      
+
       if (!paidAmount || isNaN(paidAmount)) {
         console.error('❌ Invalid payment amount:', session.amount, session.amount_total);
         await connection.rollback();
         return;
       }
-      
+
       console.log(`💰 Payment amount: £${paidAmount}`);
 
       // Re-check capacity with row lock to prevent race condition
@@ -317,10 +322,8 @@ class StripeWebhookController {
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
     }
-    console.log('Verifying payment with query:', req.query);
     try {
       const { payment_intent, ref } = req.query;
-      console.log('Booking ref:', ref, 'Payment intent:', payment_intent);
 
       if (!payment_intent || !ref) {
         return res.status(400).json({
@@ -368,6 +371,83 @@ class StripeWebhookController {
         success: false,
         error: 'Failed to verify payment'
       });
+    }
+  }
+
+  async handleGiftVoucherPayment(session) {
+    console.log('🎁 Processing gift voucher payment:', session.id);
+
+    const { bid, voucher_ref } = session.metadata;
+
+    if (!bid) {
+      console.error('❌ No bid in session metadata');
+      return;
+    }
+
+    const connection = await this.pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      const [vouchers] = await connection.query(
+        `SELECT * FROM gift_voucher_copieds WHERE bid = ?`,
+        [bid]
+      );
+
+      if (vouchers.length === 0) {
+        console.error(`❌ Gift voucher ${bid} not found`);
+        await connection.rollback();
+        return;
+      }
+
+      const vData = vouchers[0];
+      const paidAmount = (session.amount || session.amount_total || 0) / 100;
+
+      await connection.query(
+        `INSERT INTO gift_vouchers
+         (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
+          voucher_free_text, voucher_value, purchased_by, voucher_contact,
+          voucher_email, voucher_payement_type, template_id,
+          redeem_note, franchise_to_paid, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
+        [vData.voucher_date, vData.voucher_ref, vData.bid, vData.user_id,
+         vData.subject, vData.voucher_person, vData.voucher_free_text,
+         vData.voucher_value, vData.purchased_by, vData.voucher_contact,
+         vData.voucher_email, vData.template_id, vData.franchise_to_paid]
+      );
+
+      await connection.query(
+        `INSERT INTO booking_payments
+         (transation_id, response, booking_id, payment_type, amount,
+          created, transation_type, transation_extra_info, custom_payment_booking_ref)
+         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?)`,
+        [
+          session.payment_intent || session.id,
+          JSON.stringify({
+            session_id: session.id,
+            payment_status: session.payment_status,
+            amount_total: session.amount_total,
+            currency: session.currency
+          }),
+          vData.bid,
+          paidAmount,
+          JSON.stringify({
+            payee_name: vData.voucher_person,
+            payment_description: `Gift Voucher For ${vData.subject}`,
+            franchise: vData.franchise_to_paid
+          }),
+          vData.voucher_ref
+        ]
+      );
+
+      await connection.commit();
+      console.log(`✅ Gift voucher ${voucher_ref} payment confirmed`);
+
+    } catch (error) {
+      await connection.rollback();
+      console.error('❌ Error processing gift voucher payment:', error);
+      throw error;
+    } finally {
+      connection.release();
     }
   }
 }
