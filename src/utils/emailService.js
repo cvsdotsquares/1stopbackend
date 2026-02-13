@@ -137,3 +137,90 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
 
   return { success: true, status: emailStatus };
 };
+
+exports.sendGiftVoucherEmail = async (voucherData, pool) => {
+  const { voucher_ref, voucher_person, voucher_email, subject, voucher_value, voucher_free_text, purchased_by } = voucherData;
+
+  const mailOptions = {
+    from: process.env.SMTP_USER,
+    to: voucher_email,
+    bcc: 'bookings@1stopinstruction.com',
+    subject: `1 Stop Instruction Gift Voucher - Ref: ${voucher_ref}`,
+    html: `<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <title>Gift Voucher - 1stopinstruction.com</title>
+</head>
+<body style="margin:0; padding:0;">
+  <div align="center">
+    <table width="800" border="0" align="center" style="background: #f5f5f5; border: 1px solid #e0e0e6; padding: 5px;">
+      <tr>
+        <td><img src="https://1stopinstruction.com/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
+      </tr>
+      <tr>
+        <td style="background: #ffffff; padding: 20px;">
+          <h2 style="color: #333; font-family: Arial, sans-serif;">Gift Voucher</h2>
+          <p style="font-size:10pt;font-family:Arial,sans-serif">Dear ${voucher_person},</p>
+          <p style="font-size:10pt;font-family:Arial,sans-serif">You have received a gift voucher from <strong>${purchased_by}</strong> for 1 Stop Instruction training.</p>
+          
+          <table width="100%" style="margin: 20px 0; border: 2px solid #333; padding: 15px; background: #f9f9f9;">
+            <tr>
+              <td style="font-size:11pt;font-family:Arial,sans-serif">
+                <p><strong>Voucher Reference:</strong> ${voucher_ref}</p>
+                <p><strong>Voucher Value:</strong> £${voucher_value}</p>
+                <p><strong>Course:</strong> ${subject}</p>
+                ${voucher_free_text ? `<p><strong>Message:</strong> ${voucher_free_text}</p>` : ''}
+              </td>
+            </tr>
+          </table>
+          
+          <p style="font-size:10pt;font-family:Arial,sans-serif">To redeem this voucher, please contact us with your voucher reference number.</p>
+          <p style="font-size:10pt;font-family:Arial,sans-serif">Contact: <a href="mailto:info@1stopinstruction.com">info@1stopinstruction.com</a></p>
+          
+          <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 30px;">Kind Regards,<br><strong>1 Stop Instruction Team</strong></p>
+        </td>
+      </tr>
+      <tr>
+        <td style="text-align:center;background:#e6e6e8;padding:10px;">
+          <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
+          <img src="https://1stopinstruction.com/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
+        </td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>`
+  };
+
+  let emailStatus = 0;
+  try {
+    await transporter.sendMail(mailOptions);
+    emailStatus = 1;
+  } catch (error) {
+    console.error('Error sending gift voucher email:', error);
+    emailStatus = 0;
+  } finally {
+    if (pool) {
+      try {
+        await pool.query(`
+          INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, created)
+          VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
+        `, [
+          voucher_email,
+          'bookings@1stopinstruction.com',
+          process.env.SMTP_USER,
+          mailOptions.subject,
+          mailOptions.html,
+          emailStatus,
+          'Gift Voucher',
+          voucher_ref
+        ]);
+      } catch (logError) {
+        console.error('Error logging email to database:', logError);
+      }
+    }
+  }
+
+  return { success: emailStatus === 1, status: emailStatus };
+};

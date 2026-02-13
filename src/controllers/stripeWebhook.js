@@ -1,5 +1,6 @@
 // src/controllers/stripeWebhook.js
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { sendGiftVoucherEmail } = require('../utils/emailService');
 
 class StripeWebhookController {
   constructor(pool) {
@@ -408,7 +409,7 @@ class StripeWebhookController {
       const paidAmount = paymentIntent.amount_received / 100;
 
       await connection.query(
-        `INSERT INTO gift_vouchers
+        `INSERT INTO gift_voucher
          (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
           voucher_free_text, voucher_value, purchased_by, voucher_contact,
           voucher_email, voucher_payement_type, template_id,
@@ -441,6 +442,14 @@ class StripeWebhookController {
 
       await connection.commit();
       console.log(`✅ Gift voucher ${voucher_ref} payment confirmed`);
+
+      // Send email
+      try {
+        await sendGiftVoucherEmail(vData, this.pool);
+        console.log(`📧 Gift voucher email sent to ${vData.voucher_email}`);
+      } catch (emailError) {
+        console.error('❌ Error sending gift voucher email:', emailError);
+      }
 
     } catch (error) {
       await connection.rollback();
@@ -480,7 +489,7 @@ class StripeWebhookController {
       const paidAmount = (session.amount || session.amount_total || 0) / 100;
 
       await connection.query(
-        `INSERT INTO gift_vouchers
+        `INSERT INTO gift_voucher
          (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
           voucher_free_text, voucher_value, purchased_by, voucher_contact,
           voucher_email, voucher_payement_type, template_id,

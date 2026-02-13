@@ -119,7 +119,7 @@ class GiftVoucherController {
       const session = await stripe.checkout.sessions.retrieve(session_id);
 
       const [vouchers] = await this.pool.query(
-        `SELECT * FROM gift_vouchers WHERE voucher_ref = ?`,
+        `SELECT * FROM gift_voucher WHERE voucher_ref = ?`,
         [ref]
       );
 
