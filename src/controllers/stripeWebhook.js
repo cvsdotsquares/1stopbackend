@@ -35,8 +35,13 @@ class StripeWebhookController {
           console.log('ℹ️ Payment intent created (no action needed)');
           break;
         case 'payment_intent.succeeded':
-          await this.handlePaymentSuccess(event.data.object);
-          console.log('✅ Payment intent succeeded (handled via checkout.session.completed)');
+          const paymentIntent = event.data.object;
+          if (paymentIntent.metadata?.type === 'gift_voucher') {
+            await this.handleGiftVoucherPaymentIntent(paymentIntent);
+          } else {
+            await this.handlePaymentSuccess(paymentIntent);
+          }
+          console.log('✅ Payment intent succeeded');
           break;
         case 'payment_intent.payment_failed':
           console.log('❌ Handling payment failed...');
@@ -371,6 +376,78 @@ class StripeWebhookController {
         success: false,
         error: 'Failed to verify payment'
       });
+    }
+  }
+
+  async handleGiftVoucherPaymentIntent(paymentIntent) {
+    console.log('🎁 Processing gift voucher payment intent:', paymentIntent.id);
+
+    const { bid, voucher_ref } = paymentIntent.metadata;
+
+    if (!bid) {
+      console.error('❌ No bid in metadata');
+      return;
+    }
+
+    const connection = await this.pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      const [vouchers] = await connection.query(
+        `SELECT * FROM gift_voucher_copieds WHERE bid = ?`,
+        [bid]
+      );
+
+      if (vouchers.length === 0) {
+        console.error(`❌ Gift voucher ${bid} not found`);
+        await connection.rollback();
+        return;
+      }
+
+      const vData = vouchers[0];
+      const paidAmount = paymentIntent.amount_received / 100;
+
+      await connection.query(
+        `INSERT INTO gift_vouchers
+         (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
+          voucher_free_text, voucher_value, purchased_by, voucher_contact,
+          voucher_email, voucher_payement_type, template_id,
+          redeem_note, franchise_to_paid, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
+        [vData.voucher_date, vData.voucher_ref, vData.bid, vData.user_id,
+         vData.subject, vData.voucher_person, vData.voucher_free_text,
+         vData.voucher_value, vData.purchased_by, vData.voucher_contact,
+         vData.voucher_email, vData.template_id, vData.franchise_to_paid]
+      );
+
+      await connection.query(
+        `INSERT INTO booking_payments
+         (transation_id, response, booking_id, payment_type, amount,
+          created, transation_type, transation_extra_info, custom_payment_booking_ref)
+         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?)`,
+        [
+          paymentIntent.id,
+          JSON.stringify(paymentIntent),
+          vData.bid,
+          paidAmount,
+          JSON.stringify({
+            payee_name: vData.voucher_person,
+            payment_description: `Gift Voucher For ${vData.subject}`,
+            franchise: vData.franchise_to_paid
+          }),
+          vData.voucher_ref
+        ]
+      );
+
+      await connection.commit();
+      console.log(`✅ Gift voucher ${voucher_ref} payment confirmed`);
+
+    } catch (error) {
+      await connection.rollback();
+      console.error('❌ Error processing gift voucher payment:', error);
+      throw error;
+    } finally {
+      connection.release();
     }
   }
 
