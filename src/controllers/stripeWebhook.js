@@ -117,8 +117,25 @@ class StripeWebhookController {
       
       console.log(`💰 Payment amount: £${paidAmount}`);
 
-      // Check capacity (like original PHP logic)
-      if (bookings_done >= booking_limit) {
+      // Re-check capacity with row lock to prevent race condition
+      const [currentCapacity] = await connection.query(`
+        SELECT bookings_done, booking_limit, current_locks
+        FROM course_events
+        WHERE parent = ?
+        FOR UPDATE
+      `, [parent]);
+
+      if (currentCapacity.length === 0) {
+        console.error('❌ Course event not found');
+        await connection.rollback();
+        return;
+      }
+
+      const availableSpaces = currentCapacity[0].booking_limit - currentCapacity[0].bookings_done;
+      console.log(`🔒 Available spaces: ${availableSpaces}, Requested: ${spaces}`);
+
+      // Check capacity
+      if (availableSpaces < spaces) {
         console.log(`Event ${course_event_id} is full, marking as refundable`);
 
         // Mark as refundable and confirmed
@@ -131,6 +148,16 @@ class StripeWebhookController {
               modified = NOW()
           WHERE id = ?
         `, [paidAmount, booking_id]);
+
+        // Release lock without adding to bookings_done
+        if (lockid) {
+          await connection.query(`DELETE FROM lock_bookings WHERE id = ?`, [lockid]);
+          await connection.query(`
+            UPDATE course_events
+            SET current_locks = GREATEST(0, current_locks - ?)
+            WHERE id = ?
+          `, [spaces, course_event_id]);
+        }
 
       } else {
         // Normal booking confirmation

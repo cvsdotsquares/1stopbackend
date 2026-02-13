@@ -243,6 +243,7 @@ class BookingController {
           AND ce.status = '1'
           AND ced.event_date >= ?
           AND ced.event_date <= ?
+          AND ced.event_date != '1111-11-11'
           AND ced.freeze != 1
         ORDER BY ced.event_date ASC
       `, [course_id, location_id, startDate, endDate.toISOString().split('T')[0]]);

@@ -27,7 +27,7 @@ exports.sendOTPEmail = async (email, firstName, otp) => {
   return transporter.sendMail(mailOptions);
 };
 
-exports.sendBookingConfirmation = async (bookingData) => {
+exports.sendBookingConfirmation = async (bookingData, pool) => {
   const { course_name, booking_ref, attendees, location, event_dates, payment, ip } = bookingData;
   
   const attendeeEmails = attendees.map(a => a.email).join(', ');
@@ -101,5 +101,39 @@ exports.sendBookingConfirmation = async (bookingData) => {
 </html>`
   };
 
-  return transporter.sendMail(mailOptions);
+  let emailStatus = 0;
+  try {
+    await transporter.sendMail(mailOptions);
+    emailStatus = 1;
+  } catch (error) {
+    console.error('Error sending booking confirmation email:', error);
+    emailStatus = 0;
+  } finally {
+    if (pool) {
+      try {
+        await pool.query(`
+          INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, ip, created)
+          VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
+        `, [
+          attendeeEmails,
+          'bookings@1stopinstruction.com',
+          process.env.SMTP_USER,
+          mailOptions.subject,
+          mailOptions.html,
+          emailStatus,
+          'Booking Mail',
+          booking_ref,
+          ip || ''
+        ]);
+      } catch (logError) {
+        console.error('Error logging email to database:', logError);
+      }
+    }
+  }
+
+  if (emailStatus === 0) {
+    throw new Error('Failed to send booking confirmation email');
+  }
+
+  return { success: true, status: emailStatus };
 };
