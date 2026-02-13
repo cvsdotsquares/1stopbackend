@@ -424,8 +424,8 @@ class StripeWebhookController {
       await connection.query(
         `INSERT INTO booking_payments
          (transation_id, response, booking_id, payment_type, amount,
-          created, transation_type, transation_extra_info, custom_payment_booking_ref)
-         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?)`,
+          created, transation_type, transation_extra_info, custom_payment_booking_ref, isDelete)
+         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?, 0)`,
         [
           paymentIntent.id,
           JSON.stringify(paymentIntent),
@@ -504,8 +504,8 @@ class StripeWebhookController {
       await connection.query(
         `INSERT INTO booking_payments
          (transation_id, response, booking_id, payment_type, amount,
-          created, transation_type, transation_extra_info, custom_payment_booking_ref)
-         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?)`,
+          created, transation_type, transation_extra_info, custom_payment_booking_ref, isDelete)
+         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?, 0)`,
         [
           session.payment_intent || session.id,
           JSON.stringify({
