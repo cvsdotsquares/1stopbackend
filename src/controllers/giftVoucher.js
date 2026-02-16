@@ -30,13 +30,15 @@ class GiftVoucherController {
       await connection.beginTransaction();
 
       try {
-        // Get next booking ID from actual max ID
-        const [maxId] = await connection.query(
-          `SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM bookings`
+        // Get next booking ID from AUTO_INCREMENT (PHP method)
+        const [autoInc] = await connection.query(
+          `SELECT AUTO_INCREMENT as ai FROM information_schema.TABLES 
+           WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'bookings'`,
+          [process.env.DB_NAME || '1stop']
         );
-        const bid = maxId[0].next_id;
+        const bid = autoInc[0].ai;
 
-        // Sync AUTO_INCREMENT to be safe
+        // Increment AUTO_INCREMENT (reserve the ID without creating booking)
         await connection.query(`ALTER TABLE bookings AUTO_INCREMENT = ?`, [bid + 1]);
 
         // Generate voucher reference

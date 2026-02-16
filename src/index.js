@@ -25,6 +25,7 @@ const createManualPaymentRoutes = require('./routes/manualPayment');
 const createDashboardRoutes = require('./routes/dashboard');
 const createUserRoutes = require('./routes/user');
 const createGiftVoucherRoutes = require('./routes/giftVoucher');
+const createDebugVoucherRoutes = require('./routes/debugVoucher');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const app = express();
@@ -150,6 +151,7 @@ app.use('/api/payment', createManualPaymentRoutes(pool));
 app.use('/api/dashboard', createDashboardRoutes(pool));
 app.use('/api/user', createUserRoutes(pool));
 app.use('/api/vouchers', createGiftVoucherRoutes(pool));
+app.use('/api/vouchers', createDebugVoucherRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {

@@ -68,14 +68,14 @@ class StripeWebhookController {
       return this.handleGiftVoucherPayment(session);
     }
 
-    const { booking_id, booking_ref } = session.metadata || {};
+    const { temp_ref, booking_data } = session.metadata || {};
 
-    if (!booking_id) {
-      console.error('❌ No booking_id in session metadata');
+    if (!temp_ref || !booking_data) {
+      console.error('❌ No temp_ref or booking_data in session metadata');
       return;
     }
 
-    console.log(`🎯 Processing booking ${booking_id} (${booking_ref})`);
+    console.log(`🎯 Processing temporary booking ${temp_ref}`);
 
     const connection = await this.pool.getConnection();
     await connection.beginTransaction();
@@ -83,7 +83,7 @@ class StripeWebhookController {
     try {
       console.log(`🔍 Checking for existing payment with transaction ID: ${session.payment_intent || session.id}`);
 
-      // Idempotency check - prevent duplicate processing (like original PHP)
+      // Idempotency check - prevent duplicate processing
       const [existingPayment] = await connection.query(`
         SELECT id FROM booking_payments
         WHERE transation_id = ?
@@ -95,42 +95,76 @@ class StripeWebhookController {
         return;
       }
 
-      console.log('📋 Getting booking and event details...');
+      // Parse booking data from metadata
+      const bookingInfo = JSON.parse(booking_data);
+      const { course_id, course_event_id, user_id, spaces, total_fees, vatrate, vat, total_amount, promo_code_id, attendees } = bookingInfo;
 
-      // Get booking and event details
-      const [bookingDetails] = await connection.query(`
-        SELECT b.id, b.course_event_id, b.spaces, b.lockid, b.admin_payment_received, b.payment_due,
-               ce.bookings_done, ce.booking_limit, ce.parent
-        FROM bookings b
-        JOIN course_events ce ON b.course_event_id = ce.id
-        WHERE b.id = ?
-      `, [booking_id]);
+      console.log('📋 Creating actual booking record...');
 
-      if (bookingDetails.length === 0) {
-        console.error(`❌ Booking ${booking_id} not found`);
+      // Generate actual booking reference
+      const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
+      const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
+
+      // Create actual booking record
+      const [bookingResult] = await connection.query(`
+        INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
+                             payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
+        VALUES (?, ?, ?, 'o', ?, 0, ?, ?, ?, ?, ?, 1, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
+      `, [course_id, course_event_id, user_id, spaces, total_fees, vatrate, vat, total_amount, (session.amount_received || session.amount || 0) / 100, user_id, user_id, promo_code_id ? 1 : 0, promo_code_id]);
+
+      const booking_id = bookingResult.insertId;
+      console.log(`✅ Booking created with ID: ${booking_id}, Ref: ${bookingRef}`);
+
+      // Create attendee records
+      for (let i = 0; i < attendees.length; i++) {
+        const attendee = attendees[i];
+
+        await connection.query(`
+          INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                       email, vehicle_type, license_type, license_number, theory_number,
+                                       admin_notes, notes, contact_card_id, \`primary\`, created)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
+        `, [
+          booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+          attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+          attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
+          attendee.theory_number || '', attendee.is_primary
+        ]);
+
+        await connection.query(`
+          INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                                 email, vehicle_type, license_type, license_number, theory_number,
+                                                 notes, \`primary\`, created, updated)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, NOW(), NOW())
+        `, [
+          booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+          attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+          String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
+          attendee.theory_number || '', attendee.is_primary
+        ]);
+      }
+
+      console.log('📋 Getting event details...');
+
+      // Get event details
+      const [eventDetails] = await connection.query(`
+        SELECT bookings_done, booking_limit, parent FROM course_events WHERE id = ?
+      `, [course_event_id]);
+
+      if (eventDetails.length === 0) {
+        console.error(`❌ Event ${course_event_id} not found`);
         await connection.rollback();
         return;
       }
 
-      const booking = bookingDetails[0];
-      console.log('📋 Booking details:', booking);
-      const { course_event_id, spaces, lockid, admin_payment_received, payment_due } = booking;
-      const { bookings_done, booking_limit, parent } = booking;
-
-      // Calculate actual payment amount from Stripe payment intent
-      const paidAmount = (session.amount || session.amount_total || 0) / 100; // Convert from pence to pounds
-
-      if (!paidAmount || isNaN(paidAmount)) {
-        console.error('❌ Invalid payment amount:', session.amount, session.amount_total);
-        await connection.rollback();
-        return;
-      }
+      const { bookings_done, booking_limit, parent } = eventDetails[0];
+      const paidAmount = (session.amount_received || session.amount || 0) / 100;
 
       console.log(`💰 Payment amount: £${paidAmount}`);
 
-      // Re-check capacity with row lock to prevent race condition
+      // Re-check capacity with row lock
       const [currentCapacity] = await connection.query(`
-        SELECT bookings_done, booking_limit, current_locks
+        SELECT bookings_done, booking_limit
         FROM course_events
         WHERE parent = ?
         FOR UPDATE
@@ -149,50 +183,23 @@ class StripeWebhookController {
       if (availableSpaces < spaces) {
         console.log(`Event ${course_event_id} is full, marking as refundable`);
 
-        // Mark as refundable and confirmed
         await connection.query(`
           UPDATE bookings
-          SET refundable = 1,
-              payment_due = 0,
-              admin_payment_received = ?,
-              status = 1,
-              modified = NOW()
+          SET refundable = 1, modified = NOW()
           WHERE id = ?
-        `, [paidAmount, booking_id]);
-
-        // Release lock without adding to bookings_done
-        if (lockid) {
-          await connection.query(`DELETE FROM lock_bookings WHERE id = ?`, [lockid]);
-          await connection.query(`
-            UPDATE course_events
-            SET current_locks = GREATEST(0, current_locks - ?)
-            WHERE id = ?
-          `, [spaces, course_event_id]);
-        }
-
+        `, [booking_id]);
       } else {
-        // Normal booking confirmation
+        // Update bookings_done
         console.log(`Confirming booking ${booking_id}`);
 
-        // Update course events (using parent like PHP)
         await connection.query(`
           UPDATE course_events
           SET bookings_done = bookings_done + ?
           WHERE parent = ?
         `, [spaces, parent]);
-
-        // Update booking status
-        await connection.query(`
-          UPDATE bookings
-          SET payment_due = 0,
-              admin_payment_received = ?,
-              status = 1,
-              modified = NOW()
-          WHERE id = ?
-        `, [paidAmount, booking_id]);
       }
 
-      // Save payment record (like original PHP)
+      // Save payment record
       const paymentData = {
         booking_id: booking_id,
         payment_type: 'SALE',
@@ -220,26 +227,12 @@ class StripeWebhookController {
         paymentData.response
       ]);
 
-      // Remove lock if exists
-      if (lockid) {
-        await connection.query(`
-          DELETE FROM lock_bookings WHERE id = ?
-        `, [lockid]);
-
-        // Also update current_locks
-        await connection.query(`
-          UPDATE course_events
-          SET current_locks = GREATEST(0, current_locks - ?)
-          WHERE id = ?
-        `, [spaces, course_event_id]);
-      }
-
       await connection.commit();
-      console.log(`Payment confirmed for booking ${booking_ref}`);
+      console.log(`✅ Payment confirmed for booking ${bookingRef}`);
 
     } catch (error) {
       await connection.rollback();
-      console.error('Error updating booking after payment:', error);
+      console.error('Error creating booking after payment:', error);
       throw error;
     } finally {
       connection.release();
@@ -329,45 +322,54 @@ class StripeWebhookController {
       return res.sendStatus(200);
     }
     try {
-      const { payment_intent, ref } = req.query;
+      const { payment_intent, temp_ref } = req.query;
 
-      if (!payment_intent || !ref) {
+      if (!payment_intent) {
         return res.status(400).json({
           success: false,
-          error: 'Missing payment_intent or ref'
+          error: 'Missing payment_intent'
         });
       }
 
       // Get payment intent from Stripe
       const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent);
 
-      // Get booking from database using booking_attendees table
-      const [bookings] = await this.pool.query(`
-        SELECT b.id, b.status, b.total_amount, b.payment_due, b.admin_payment_received
-        FROM bookings b
-        JOIN booking_attendees ba ON b.id = ba.booking_id
-        WHERE ba.booking_ref = ?
-        LIMIT 1
-      `, [ref]);
+      // If payment succeeded, try to find the created booking
+      if (paymentIntent.status === 'succeeded') {
+        const [bookings] = await this.pool.query(`
+          SELECT b.id, b.status, b.total_amount, b.payment_due, b.admin_payment_received,
+                 ba.booking_ref
+          FROM bookings b
+          JOIN booking_attendees ba ON b.id = ba.booking_id
+          WHERE ba.\`primary\` = 1
+          AND b.created >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+          ORDER BY b.created DESC
+          LIMIT 1
+        `);
 
-      if (bookings.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Booking not found'
-        });
+        if (bookings.length > 0) {
+          const booking = bookings[0];
+          return res.json({
+            success: true,
+            data: {
+              booking_id: booking.id,
+              booking_ref: booking.booking_ref,
+              payment_status: paymentIntent.status,
+              booking_status: booking.status,
+              amount_paid: paymentIntent.amount_received / 100,
+              payment_due: booking.payment_due
+            }
+          });
+        }
       }
 
-      const booking = bookings[0];
-
+      // Payment not yet processed or failed
       res.json({
         success: true,
         data: {
-          booking_id: booking.id,
-          booking_ref: ref,
           payment_status: paymentIntent.status,
-          booking_status: booking.status,
-          amount_paid: paymentIntent.amount_received / 100,
-          payment_due: booking.payment_due
+          temp_ref: temp_ref || null,
+          message: paymentIntent.status === 'succeeded' ? 'Payment processing...' : 'Payment pending'
         }
       });
 
@@ -394,6 +396,18 @@ class StripeWebhookController {
     await connection.beginTransaction();
 
     try {
+      // Idempotency check - prevent duplicate processing
+      const [existingPayment] = await connection.query(
+        `SELECT id FROM booking_payments WHERE transation_id = ?`,
+        [paymentIntent.id]
+      );
+
+      if (existingPayment.length > 0) {
+        console.log(`⚠️ Gift voucher ${voucher_ref} already processed`);
+        await connection.rollback();
+        return;
+      }
+
       const [vouchers] = await connection.query(
         `SELECT * FROM gift_voucher_copieds WHERE bid = ?`,
         [bid]
@@ -408,17 +422,28 @@ class StripeWebhookController {
       const vData = vouchers[0];
       const paidAmount = (paymentIntent.amount_received || paymentIntent.amount) / 100;
 
-      await connection.query(
+      // Generate unique voucher_ref using bid (each bid is unique)
+      const uniqueVoucherRef = `1SGV${vData.bid} - OGV`;
+      const voucherDate = new Date().toLocaleDateString('en-GB');
+
+      // Insert into gift_voucher with unique reference
+      const [insertResult] = await connection.query(
         `INSERT INTO gift_voucher
          (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
           voucher_free_text, voucher_value, purchased_by, voucher_contact,
           voucher_email, voucher_payement_type, template_id,
           redeem_note, franchise_to_paid, created)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
-        [vData.voucher_date, vData.voucher_ref, vData.bid, vData.user_id,
+        [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id,
          vData.subject, vData.voucher_person, vData.voucher_free_text,
          vData.voucher_value, vData.purchased_by, vData.voucher_contact,
          vData.voucher_email, vData.template_id, vData.franchise_to_paid]
+      );
+
+      // Fetch the actual inserted voucher data for email
+      const [actualVoucher] = await connection.query(
+        `SELECT * FROM gift_voucher WHERE id = ?`,
+        [insertResult.insertId]
       );
 
       await connection.query(
@@ -436,17 +461,17 @@ class StripeWebhookController {
             payment_description: `Gift Voucher For ${vData.subject}`,
             franchise: vData.franchise_to_paid
           }),
-          vData.voucher_ref
+          uniqueVoucherRef
         ]
       );
 
       await connection.commit();
-      console.log(`✅ Gift voucher ${voucher_ref} payment confirmed`);
+      console.log(`✅ Gift voucher ${actualVoucher[0].voucher_ref} payment confirmed`);
 
-      // Send email
+      // Send email with actual voucher data
       try {
-        await sendGiftVoucherEmail(vData, this.pool);
-        console.log(`📧 Gift voucher email sent to ${vData.voucher_email}`);
+        await sendGiftVoucherEmail(actualVoucher[0], this.pool);
+        console.log(`📧 Gift voucher email sent to ${actualVoucher[0].voucher_email}`);
       } catch (emailError) {
         console.error('❌ Error sending gift voucher email:', emailError);
       }
@@ -488,17 +513,28 @@ class StripeWebhookController {
       const vData = vouchers[0];
       const paidAmount = (session.amount || session.amount_total || 0) / 100;
 
-      await connection.query(
+      // Generate unique voucher_ref using bid (each bid is unique)
+      const uniqueVoucherRef = `1SGV${vData.bid} - OGV`;
+      const voucherDate = new Date().toLocaleDateString('en-GB');
+
+      // Insert into gift_voucher with unique reference
+      const [insertResult] = await connection.query(
         `INSERT INTO gift_voucher
          (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
           voucher_free_text, voucher_value, purchased_by, voucher_contact,
           voucher_email, voucher_payement_type, template_id,
           redeem_note, franchise_to_paid, created)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
-        [vData.voucher_date, vData.voucher_ref, vData.bid, vData.user_id,
+        [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id,
          vData.subject, vData.voucher_person, vData.voucher_free_text,
          vData.voucher_value, vData.purchased_by, vData.voucher_contact,
          vData.voucher_email, vData.template_id, vData.franchise_to_paid]
+      );
+
+      // Fetch the actual inserted voucher data for email
+      const [actualVoucher] = await connection.query(
+        `SELECT * FROM gift_voucher WHERE id = ?`,
+        [insertResult.insertId]
       );
 
       await connection.query(
@@ -521,12 +557,20 @@ class StripeWebhookController {
             payment_description: `Gift Voucher For ${vData.subject}`,
             franchise: vData.franchise_to_paid
           }),
-          vData.voucher_ref
+          uniqueVoucherRef
         ]
       );
 
       await connection.commit();
-      console.log(`✅ Gift voucher ${voucher_ref} payment confirmed`);
+      console.log(`✅ Gift voucher ${actualVoucher[0].voucher_ref} payment confirmed`);
+
+      // Send email with actual voucher data
+      try {
+        await sendGiftVoucherEmail(actualVoucher[0], this.pool);
+        console.log(`📧 Gift voucher email sent to ${actualVoucher[0].voucher_email}`);
+      } catch (emailError) {
+        console.error('❌ Error sending gift voucher email:', emailError);
+      }
 
     } catch (error) {
       await connection.rollback();
