@@ -286,7 +286,7 @@ class BookingFlowController {
       } : {
         vat_rate: 0.20,
         credit_card_surcharge: 0.025,
-        booking_bcc: "bookings@1stopinstruction.com"
+        booking_bcc: "bookings.testds@yopmail.com"
       };
 
       res.json({ success: true, data: settingsData });
@@ -591,6 +591,16 @@ class BookingFlowController {
     return password;
   }
 
+  // Generate professional booking reference: 1ST-BK-240315-A7K9
+  generateBookingReference() {
+    const date = new Date();
+    const yy = date.getFullYear().toString().slice(-2);
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const uniqueCode = crypto.randomBytes(2).toString('hex').toUpperCase();
+    return `1ST-BK-${yy}${mm}${dd}-${uniqueCode}`;
+  }
+
   async createBookingWithAttendees(req, res) {
 
     try {
@@ -755,8 +765,8 @@ class BookingFlowController {
 
         const totalAmount = discountedFees + vat;
 
-        // Generate temporary booking reference
-        const tempRef = `TEMP_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        // Generate professional booking reference
+        const tempRef = this.generateBookingReference();
         const primaryUserId = userIds[0];
 
         // Store temporary booking data (no actual booking record created)
@@ -773,7 +783,8 @@ class BookingFlowController {
           attendees: attendees.map((att, i) => ({
             ...att,
             user_id: userIds[i],
-            is_primary: i === 0 ? 1 : 0
+            is_primary_user: att.is_primary_user || (i === 0 ? 1 : 0),
+            date_of_birth: att.date_of_birth || null
           }))
         };
 

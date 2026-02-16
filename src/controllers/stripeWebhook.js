@@ -118,17 +118,18 @@ class StripeWebhookController {
       // Create attendee records
       for (let i = 0; i < attendees.length; i++) {
         const attendee = attendees[i];
+        const isPrimary = attendees.length === 1 ? 1 : (attendee.is_primary_user ? 1 : 0);
 
         await connection.query(`
-          INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+          INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, date_of_birth, contact1, contact2, contact3,
                                        email, vehicle_type, license_type, license_number, theory_number,
                                        admin_notes, notes, contact_card_id, \`primary\`, created)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
         `, [
-          booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+          booking_id, bookingRef, attendee.first_name, attendee.sur_name, attendee.date_of_birth || null,
           attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
           attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
-          attendee.theory_number || '', attendee.is_primary
+          attendee.theory_number || '', isPrimary
         ]);
 
         await connection.query(`
@@ -140,7 +141,7 @@ class StripeWebhookController {
           booking_id, bookingRef, attendee.first_name, attendee.sur_name,
           attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
           String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
-          attendee.theory_number || '', attendee.is_primary
+          attendee.theory_number || '', isPrimary
         ]);
       }
 
@@ -162,7 +163,7 @@ class StripeWebhookController {
 
       console.log(`💰 Payment amount: £${paidAmount}`);
 
-      // Re-check capacity with row lock
+      // Re-check capacity with row lock BEFORE creating booking
       const [currentCapacity] = await connection.query(`
         SELECT bookings_done, booking_limit
         FROM course_events
@@ -179,25 +180,45 @@ class StripeWebhookController {
       const availableSpaces = currentCapacity[0].booking_limit - currentCapacity[0].bookings_done;
       console.log(`🔒 Available spaces: ${availableSpaces}, Requested: ${spaces}`);
 
-      // Check capacity
+      // Check capacity - if full, rollback and trigger refund
       if (availableSpaces < spaces) {
-        console.log(`Event ${course_event_id} is full, marking as refundable`);
+        console.log(`❌ Event ${course_event_id} is full. Cancelling booking and initiating refund.`);
 
-        await connection.query(`
-          UPDATE bookings
-          SET refundable = 1, modified = NOW()
-          WHERE id = ?
-        `, [booking_id]);
-      } else {
-        // Update bookings_done
-        console.log(`Confirming booking ${booking_id}`);
+        // Delete the booking record
+        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking_id]);
+        await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking_id]);
+        await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking_id]);
 
+        // Record failed payment with refund flag
         await connection.query(`
-          UPDATE course_events
-          SET bookings_done = bookings_done + ?
-          WHERE parent = ?
-        `, [spaces, parent]);
+          INSERT INTO booking_payments
+          (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
+          VALUES (0, 'REFUND_PENDING', ?, ?, 'booking_failed', ?, NOW(), 0, 'CAPACITY_EXCEEDED', '')
+        `, [
+          session.payment_intent || session.id,
+          paidAmount,
+          JSON.stringify({ reason: 'Course fully booked', spaces_requested: spaces, available: availableSpaces })
+        ]);
+
+        await connection.commit();
+        
+        // Trigger Stripe refund
+        try {
+          await stripe.refunds.create({ payment_intent: session.payment_intent || session.id });
+          console.log(`✅ Refund initiated for payment ${session.payment_intent || session.id}`);
+        } catch (refundError) {
+          console.error('❌ Refund failed:', refundError);
+        }
+        return;
       }
+
+      // Capacity available - confirm booking
+      console.log(`✅ Confirming booking ${booking_id}`);
+      await connection.query(`
+        UPDATE course_events
+        SET bookings_done = bookings_done + ?
+        WHERE parent = ?
+      `, [spaces, parent]);
 
       // Save payment record
       const paymentData = {
@@ -336,6 +357,24 @@ class StripeWebhookController {
 
       // If payment succeeded, try to find the created booking
       if (paymentIntent.status === 'succeeded') {
+        // Check if refund was issued due to capacity
+        const [refundCheck] = await this.pool.query(`
+          SELECT * FROM booking_payments 
+          WHERE transation_id = ? AND payment_type = 'REFUND_PENDING'
+        `, [payment_intent]);
+
+        if (refundCheck.length > 0) {
+          return res.json({
+            success: false,
+            error: 'BOOKING_FAILED',
+            message: 'Sorry, the course became fully booked. Your payment has been refunded.',
+            data: {
+              payment_status: 'refunded',
+              refund_reason: 'Course capacity exceeded'
+            }
+          });
+        }
+
         const [bookings] = await this.pool.query(`
           SELECT b.id, b.status, b.total_amount, b.payment_due, b.admin_payment_received,
                  ba.booking_ref

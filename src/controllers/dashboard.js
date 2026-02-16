@@ -22,7 +22,7 @@ class DashboardController {
       `, [userId]);
 
       const [stats] = await this.pool.query(`
-        SELECT 
+        SELECT
           COUNT(*) as total_bookings,
           SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) as completed_bookings,
           SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as pending_bookings,
@@ -46,7 +46,7 @@ class DashboardController {
       `, [userId]);
 
       const [giftVouchers] = await this.pool.query(`
-        SELECT 
+        SELECT
           gv.id,
           gv.voucher_ref,
           gv.voucher_value,
@@ -56,11 +56,11 @@ class DashboardController {
           gv.voucher_email,
           gv.created as purchased_on,
           DATE_ADD(gv.created, INTERVAL 12 MONTH) as valid_till,
-          CASE 
+          CASE
             WHEN gv.user_id = ? THEN 'purchased'
             ELSE 'received'
           END as voucher_type,
-          CASE 
+          CASE
             WHEN gv.redeem_note != '' THEN 'redeemed'
             WHEN DATE_ADD(gv.created, INTERVAL 12 MONTH) < NOW() THEN 'expired'
             ELSE 'active'

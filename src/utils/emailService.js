@@ -36,7 +36,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const mailOptions = {
     from: process.env.SMTP_USER,
     to: attendeeEmails,
-    bcc: 'bookings@1stopinstruction.com',
+    bcc: 'bookings.testds@yopmail.com',
     subject: `${course_name} Booking confirmation`,
     html: `<!DOCTYPE html>
 <html>
@@ -116,7 +116,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           attendeeEmails,
-          'bookings@1stopinstruction.com',
+          'bookings.testds@yopmail.com',
           process.env.SMTP_USER,
           mailOptions.subject,
           mailOptions.html,
@@ -144,7 +144,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
   const mailOptions = {
     from: process.env.SMTP_USER,
     to: voucher_email,
-    bcc: 'bookings@1stopinstruction.com',
+    bcc: 'bookings.testds@yopmail.com',
     subject: `1 Stop Instruction Gift Voucher - Ref: ${voucher_ref}`,
     html: `<!DOCTYPE html>
 <html>
@@ -208,7 +208,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           voucher_email,
-          'bookings@1stopinstruction.com',
+          'bookings.testds@yopmail.com',
           process.env.SMTP_USER,
           mailOptions.subject,
           mailOptions.html,
