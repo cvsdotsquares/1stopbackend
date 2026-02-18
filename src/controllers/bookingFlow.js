@@ -286,7 +286,7 @@ class BookingFlowController {
       } : {
         vat_rate: 0.20,
         credit_card_surcharge: 0.025,
-        booking_bcc: "bookings.testds@yopmail.com"
+        booking_bcc: "bookings@1stopinstruction.com"
       };
 
       res.json({ success: true, data: settingsData });
@@ -591,16 +591,6 @@ class BookingFlowController {
     return password;
   }
 
-  // Generate professional booking reference: 1ST-BK-240315-A7K9
-  generateBookingReference() {
-    const date = new Date();
-    const yy = date.getFullYear().toString().slice(-2);
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const uniqueCode = crypto.randomBytes(2).toString('hex').toUpperCase();
-    return `1ST-BK-${yy}${mm}${dd}-${uniqueCode}`;
-  }
-
   async createBookingWithAttendees(req, res) {
 
     try {
@@ -691,8 +681,6 @@ class BookingFlowController {
           });
         }
 
-
-
         const [courseData] = await connection.query(`
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
                  ce.school_deposit_price, ce.own_deposit_price, ce.school_total_price, ce.own_total_price,
@@ -767,29 +755,50 @@ class BookingFlowController {
 
         const totalAmount = discountedFees + vat;
 
-        const primaryUserId = userIds[0];
-        
-        // Generate temp booking reference for tracking (will be replaced with actual BK number)
-        const tempRef = `TEMP-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
+        const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
 
-        // Store booking data for webhook processing
-        const tempBookingData = {
-          course_id,
-          course_event_id,
-          user_id: primaryUserId,
-          spaces: attendees_count,
-          total_fees: discountedFees,
-          vatrate: vatRate,
-          vat,
-          total_amount: totalAmount,
-          promo_code_id: promoCodeId || 0,
-          attendees: attendees.map((att, i) => ({
-            ...att,
-            user_id: userIds[i],
-            is_primary_user: att.is_primary_user || (i === 0 ? 1 : 0),
-            date_of_birth: att.date_of_birth || null
-          }))
-        };
+        // Use first attendee's user_id as primary booking user
+        const primaryUserId = userIds[0];
+
+        const [bookingResult] = await connection.query(`
+          INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
+                               payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
+          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
+        `, [course_id, course_event_id, primaryUserId, attendees_count, totalAmount, discountedFees, vatRate, vat, totalAmount, primaryUserId, primaryUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
+
+        const booking_id = bookingResult.insertId;
+
+        for (let i = 0; i < attendees.length; i++) {
+          const attendee = attendees[i];
+          const attendeeUserId = userIds[i];
+
+          // Insert into booking_attendees
+          const [attendeeResult] = await connection.query(`
+            INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                         email, vehicle_type, license_type, license_number, theory_number,
+                                         admin_notes, notes, contact_card_id, \`primary\`, created)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
+          `, [
+            booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+            attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+            attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
+            attendee.theory_number || '', i === 0 ? 1 : 0
+          ]);
+
+          // Insert into booking_attendees_dropdown
+          const [dropdownResult] = await connection.query(`
+            INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                                   email, vehicle_type, license_type, license_number, theory_number,
+                                                   notes, \`primary\`, created, updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+          `, [
+            booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+            attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+            String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
+            attendee.theory_number || '', attendee.notes || '', i === 0 ? 1 : 0
+          ]);
+        }
 
         // Stripe Integration
         const siteUrl = process.env.SITE_URL || 'http://localhost:3001';
@@ -802,8 +811,8 @@ class BookingFlowController {
             currency: 'gbp',
             automatic_payment_methods: { enabled: true },
             metadata: {
-              temp_ref: tempRef,
-              booking_data: JSON.stringify(tempBookingData),
+              booking_id: booking_id.toString(),
+              booking_ref: bookingRef,
               course_id: course_id.toString(),
               course_event_id: course_event_id.toString(),
               user_id: primaryUserId.toString(),
@@ -815,9 +824,44 @@ class BookingFlowController {
 
           await connection.commit();
 
+          // Send confirmation email
+          try {
+            const [locationData] = await this.pool.query(`
+              SELECT location_name, address1, address2, postcode FROM locations WHERE id = ?
+            `, [location_id]);
+
+            const [eventDates] = await this.pool.query(`
+              SELECT event_date, event_start_time FROM course_event_dates WHERE course_event_id = ? LIMIT 1
+            `, [course_event_id]);
+
+            await sendBookingConfirmation({
+              course_name: courseData[0]?.course_name || 'Course',
+              booking_ref: bookingRef,
+              attendees: attendees,
+              location: {
+                name: locationData[0]?.location_name || '',
+                address: `${locationData[0]?.address1 || ''}, ${locationData[0]?.postcode || ''}`
+              },
+              event_dates: eventDates.map(d => ({
+                date: d.event_date,
+                start_time: d.event_start_time
+              })),
+              payment: {
+                total_amount: totalAmount.toFixed(2),
+                paid: totalAmount.toFixed(2),
+                balance: '0.00'
+              },
+              ip: req.clientIp || req.ip || 'unknown'
+            });
+          } catch (emailError) {
+            console.error('Email send failed:', emailError);
+          }
+
           res.status(201).json({
             success: true,
-            temp_ref: tempRef,
+            booking_id,
+            booking_ref: bookingRef,
+            payment_due: totalAmount,
             total_fees: discountedFees,
             promo_discount: promoDiscount,
             vat,
