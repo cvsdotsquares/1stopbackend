@@ -68,14 +68,14 @@ class StripeWebhookController {
       return this.handleGiftVoucherPayment(session);
     }
 
-    const { booking_data } = session.metadata || {};
+    const { temp_ref, booking_data } = session.metadata || {};
 
     if (!booking_data) {
       console.error('❌ No booking_data in session metadata');
       return;
     }
 
-    console.log(`🎯 Processing booking payment`);
+    console.log(`🎯 Processing booking payment for temp ref: ${temp_ref}`);
 
     const connection = await this.pool.getConnection();
     await connection.beginTransaction();
@@ -376,15 +376,15 @@ class StripeWebhookController {
         }
 
         const [bookings] = await this.pool.query(`
-          SELECT b.id, b.status, b.total_amount, b.payment_due, b.admin_payment_received,
+          SELECT b.id, b.status, b.total_amount, b.admin_payment_received,
                  ba.booking_ref
-          FROM bookings b
+          FROM booking_payments bp
+          JOIN bookings b ON bp.booking_id = b.id
           JOIN booking_attendees ba ON b.id = ba.booking_id
-          WHERE ba.\`primary\` = 1
-          AND b.created >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
-          ORDER BY b.created DESC
+          WHERE bp.transation_id = ?
+          AND ba.\`primary\` = 1
           LIMIT 1
-        `);
+        `, [payment_intent]);
 
         if (bookings.length > 0) {
           const booking = bookings[0];
@@ -395,11 +395,19 @@ class StripeWebhookController {
               booking_ref: booking.booking_ref,
               payment_status: paymentIntent.status,
               booking_status: booking.status,
-              amount_paid: paymentIntent.amount_received / 100,
-              payment_due: booking.payment_due
+              amount_paid: paymentIntent.amount_received / 100
             }
           });
         }
+
+        // Still processing
+        return res.json({
+          success: true,
+          data: {
+            payment_status: 'processing',
+            message: 'Payment received. Booking is being processed...'
+          }
+        });
       }
 
       // Payment not yet processed or failed

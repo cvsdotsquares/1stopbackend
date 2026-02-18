@@ -768,6 +768,9 @@ class BookingFlowController {
         const totalAmount = discountedFees + vat;
 
         const primaryUserId = userIds[0];
+        
+        // Generate temp booking reference for tracking (will be replaced with actual BK number)
+        const tempRef = `TEMP-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
         // Store booking data for webhook processing
         const tempBookingData = {
@@ -799,6 +802,7 @@ class BookingFlowController {
             currency: 'gbp',
             automatic_payment_methods: { enabled: true },
             metadata: {
+              temp_ref: tempRef,
               booking_data: JSON.stringify(tempBookingData),
               course_id: course_id.toString(),
               course_event_id: course_event_id.toString(),
@@ -813,6 +817,7 @@ class BookingFlowController {
 
           res.status(201).json({
             success: true,
+            temp_ref: tempRef,
             total_fees: discountedFees,
             promo_discount: promoDiscount,
             vat,
