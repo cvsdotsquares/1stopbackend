@@ -146,9 +146,9 @@ class StripeWebhookController {
 
       console.log('📋 Getting event details...');
 
-      // Get event details
+      // Get event details and lock the row
       const [eventDetails] = await connection.query(`
-        SELECT bookings_done, booking_limit, parent FROM course_events WHERE id = ?
+        SELECT bookings_done, booking_limit FROM course_events WHERE id = ? FOR UPDATE
       `, [course_event_id]);
 
       if (eventDetails.length === 0) {
@@ -157,26 +157,12 @@ class StripeWebhookController {
         return;
       }
 
-      const { bookings_done, booking_limit, parent } = eventDetails[0];
+      const { bookings_done, booking_limit } = eventDetails[0];
       const paidAmount = (session.amount_received || session.amount || 0) / 100;
 
       console.log(`💰 Payment amount: £${paidAmount}`);
 
-      // Re-check capacity with row lock on parent record
-      const [currentCapacity] = await connection.query(`
-        SELECT bookings_done, booking_limit
-        FROM course_events
-        WHERE parent = ?
-        FOR UPDATE
-      `, [parent]);
-
-      if (currentCapacity.length === 0) {
-        console.error('❌ Course event not found');
-        await connection.rollback();
-        return;
-      }
-
-      const availableSpaces = currentCapacity[0].booking_limit - currentCapacity[0].bookings_done;
+      const availableSpaces = booking_limit - bookings_done;
       console.log(`🔒 Available spaces: ${availableSpaces}, Requested: ${spaces}`);
 
       // Check capacity
@@ -189,14 +175,14 @@ class StripeWebhookController {
           WHERE id = ?
         `, [booking_id]);
       } else {
-        // Update bookings_done on parent record
-        console.log(`Confirming booking ${booking_id}, updating parent ${parent}`);
+        // Update bookings_done
+        console.log(`Confirming booking ${booking_id}, updating event ${course_event_id}`);
 
         await connection.query(`
           UPDATE course_events
           SET bookings_done = bookings_done + ?, modified = NOW()
-          WHERE parent = ?
-        `, [spaces, parent]);
+          WHERE id = ?
+        `, [spaces, course_event_id]);
       }
 
       // Save payment record
