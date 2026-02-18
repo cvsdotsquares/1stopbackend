@@ -161,13 +161,14 @@ class StripeWebhookController {
       const paidAmount = (session.amount_received || session.amount || 0) / 100;
 
       console.log(`💰 Payment amount: £${paidAmount}`);
+      console.log(`📊 Current bookings_done: ${bookings_done}, booking_limit: ${booking_limit}`);
 
       const availableSpaces = booking_limit - bookings_done;
       console.log(`🔒 Available spaces: ${availableSpaces}, Requested: ${spaces}`);
 
       // Check capacity
       if (availableSpaces < spaces) {
-        console.log(`Event ${course_event_id} is full, marking as refundable`);
+        console.log(`❌ Event ${course_event_id} is full, marking as refundable`);
 
         await connection.query(`
           UPDATE bookings
@@ -176,13 +177,15 @@ class StripeWebhookController {
         `, [booking_id]);
       } else {
         // Update bookings_done
-        console.log(`Confirming booking ${booking_id}, updating event ${course_event_id}`);
+        console.log(`✅ Confirming booking ${booking_id}, incrementing bookings_done by ${spaces}`);
 
-        await connection.query(`
+        const [updateResult] = await connection.query(`
           UPDATE course_events
           SET bookings_done = bookings_done + ?, modified = NOW()
           WHERE id = ?
         `, [spaces, course_event_id]);
+
+        console.log(`✅ Update result - affected rows: ${updateResult.affectedRows}`);
       }
 
       // Save payment record
