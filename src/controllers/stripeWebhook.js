@@ -194,9 +194,9 @@ class StripeWebhookController {
 
         await connection.query(`
           UPDATE course_events
-          SET bookings_done = bookings_done + ?
-          WHERE parent = ?
-        `, [spaces, parent]);
+          SET bookings_done = bookings_done + ?, modified = NOW()
+          WHERE id = ?
+        `, [spaces, course_event_id]);
       }
 
       // Save payment record
