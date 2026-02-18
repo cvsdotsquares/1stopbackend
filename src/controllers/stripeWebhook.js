@@ -68,14 +68,14 @@ class StripeWebhookController {
       return this.handleGiftVoucherPayment(session);
     }
 
-    const { temp_ref, booking_data } = session.metadata || {};
+    const { booking_data } = session.metadata || {};
 
-    if (!temp_ref || !booking_data) {
-      console.error('❌ No temp_ref or booking_data in session metadata');
+    if (!booking_data) {
+      console.error('❌ No booking_data in session metadata');
       return;
     }
 
-    console.log(`🎯 Processing temporary booking ${temp_ref}`);
+    console.log(`🎯 Processing booking payment`);
 
     const connection = await this.pool.getConnection();
     await connection.beginTransaction();
@@ -212,7 +212,7 @@ class StripeWebhookController {
         return;
       }
 
-      // Capacity available - confirm booking
+      // Reserve slots
       console.log(`✅ Confirming booking ${booking_id}`);
       await connection.query(`
         UPDATE course_events

@@ -691,6 +691,8 @@ class BookingFlowController {
           });
         }
 
+
+
         const [courseData] = await connection.query(`
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
                  ce.school_deposit_price, ce.own_deposit_price, ce.school_total_price, ce.own_total_price,
@@ -765,11 +767,9 @@ class BookingFlowController {
 
         const totalAmount = discountedFees + vat;
 
-        // Generate professional booking reference
-        const tempRef = this.generateBookingReference();
         const primaryUserId = userIds[0];
 
-        // Store temporary booking data (no actual booking record created)
+        // Store booking data for webhook processing
         const tempBookingData = {
           course_id,
           course_event_id,
@@ -799,7 +799,6 @@ class BookingFlowController {
             currency: 'gbp',
             automatic_payment_methods: { enabled: true },
             metadata: {
-              temp_ref: tempRef,
               booking_data: JSON.stringify(tempBookingData),
               course_id: course_id.toString(),
               course_event_id: course_event_id.toString(),
@@ -814,8 +813,6 @@ class BookingFlowController {
 
           res.status(201).json({
             success: true,
-            temp_ref: tempRef,
-            payment_due: totalAmount,
             total_fees: discountedFees,
             promo_discount: promoDiscount,
             vat,
