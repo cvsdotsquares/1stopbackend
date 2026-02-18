@@ -78,14 +78,15 @@ class AuthController {
       // Create user
       const [result] = await this.pool.execute(
         `INSERT INTO users (
-          first_name, sur_name, email, password, add1, add2, add3,
+          first_name, sur_name, email, password, password_type, add1, add2, add3,
           postcode, contact1, contact2, contact3, reg_type, status, created
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())`,
         [
           first_name,
           sur_name,
           email,
           hashedPassword,
+          'user_chosen',
           add1 || null,
           add2 || null,
           add3 || null,
