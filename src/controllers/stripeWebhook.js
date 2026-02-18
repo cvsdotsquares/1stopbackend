@@ -68,164 +68,79 @@ class StripeWebhookController {
       return this.handleGiftVoucherPayment(session);
     }
 
-    const { temp_ref, booking_data } = session.metadata || {};
+    const { booking_id, course_event_id, spaces, attendees_count } = session.metadata || {};
 
-    if (!temp_ref || !booking_data) {
-      console.error('❌ No temp_ref or booking_data in session metadata');
+    // New flow: booking already created by bookingFlow.js
+    if (booking_id && course_event_id && (spaces || attendees_count)) {
+      const bookingSpaces = parseInt(spaces || attendees_count);
+      console.log(`💼 Processing payment for existing booking ${booking_id}`);
+
+      const connection = await this.pool.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // Idempotency check
+        const [existingPayment] = await connection.query(`
+          SELECT id FROM booking_payments WHERE transation_id = ?
+        `, [session.payment_intent || session.id]);
+
+        if (existingPayment.length > 0) {
+          console.log(`⚠️ Payment already processed`);
+          await connection.commit();
+          return;
+        }
+
+        const paidAmount = (session.amount_received || session.amount || 0) / 100;
+
+        // Lock and update bookings_done
+        const [eventDetails] = await connection.query(`
+          SELECT bookings_done, booking_limit FROM course_events WHERE id = ? FOR UPDATE
+        `, [course_event_id]);
+
+        if (eventDetails.length > 0) {
+          const availableSpaces = eventDetails[0].booking_limit - eventDetails[0].bookings_done;
+          console.log(`📊 bookings_done: ${eventDetails[0].bookings_done}, available: ${availableSpaces}, requested: ${bookingSpaces}`);
+
+          if (availableSpaces >= bookingSpaces) {
+            await connection.query(`
+              UPDATE course_events
+              SET bookings_done = bookings_done + ?, modified = NOW()
+              WHERE id = ?
+            `, [bookingSpaces, course_event_id]);
+            console.log(`✅ Incremented bookings_done by ${bookingSpaces}`);
+          } else {
+            console.log(`⚠️ Not enough space. Available: ${availableSpaces}, Requested: ${bookingSpaces}`);
+          }
+        }
+
+        // Update booking status
+        await connection.query(`
+          UPDATE bookings
+          SET admin_payment_received = ?, status = 1, modified = NOW()
+          WHERE id = ?
+        `, [paidAmount, booking_id]);
+
+        // Save payment record
+        await connection.query(`
+          INSERT INTO booking_payments
+          (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
+          VALUES (?, 'SALE', ?, ?, 'booking', ?, NOW(), 0, '', '')
+        `, [booking_id, session.payment_intent || session.id, paidAmount, JSON.stringify({ session_id: session.id, payment_status: session.payment_status })]);
+
+        await connection.commit();
+        console.log(`✅ Payment confirmed for booking ${booking_id}`);
+      } catch (error) {
+        await connection.rollback();
+        console.error('Error:', error);
+        throw error;
+      } finally {
+        connection.release();
+      }
       return;
     }
 
-    console.log(`🎯 Processing temporary booking ${temp_ref}`);
-
-    const connection = await this.pool.getConnection();
-    await connection.beginTransaction();
-
-    try {
-      console.log(`🔍 Checking for existing payment with transaction ID: ${session.payment_intent || session.id}`);
-
-      // Idempotency check - prevent duplicate processing
-      const [existingPayment] = await connection.query(`
-        SELECT id FROM booking_payments
-        WHERE transation_id = ?
-      `, [session.payment_intent || session.id]);
-
-      if (existingPayment.length > 0) {
-        console.log(`⚠️ Payment already processed for session ${session.id}`);
-        await connection.commit();
-        return;
-      }
-
-      // Parse booking data from metadata
-      const bookingInfo = JSON.parse(booking_data);
-      const { course_id, course_event_id, user_id, spaces, total_fees, vatrate, vat, total_amount, promo_code_id, attendees } = bookingInfo;
-
-      console.log('📋 Creating actual booking record...');
-
-      // Generate actual booking reference
-      const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
-      const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
-
-      // Create actual booking record
-      const [bookingResult] = await connection.query(`
-        INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
-                             payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
-        VALUES (?, ?, ?, 'o', ?, 0, ?, ?, ?, ?, ?, 1, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
-      `, [course_id, course_event_id, user_id, spaces, total_fees, vatrate, vat, total_amount, (session.amount_received || session.amount || 0) / 100, user_id, user_id, promo_code_id ? 1 : 0, promo_code_id]);
-
-      const booking_id = bookingResult.insertId;
-      console.log(`✅ Booking created with ID: ${booking_id}, Ref: ${bookingRef}`);
-
-      // Create attendee records
-      for (let i = 0; i < attendees.length; i++) {
-        const attendee = attendees[i];
-
-        await connection.query(`
-          INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
-                                       email, vehicle_type, license_type, license_number, theory_number,
-                                       admin_notes, notes, contact_card_id, \`primary\`, created)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
-        `, [
-          booking_id, bookingRef, attendee.first_name, attendee.sur_name,
-          attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
-          attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
-          attendee.theory_number || '', attendee.is_primary
-        ]);
-
-        await connection.query(`
-          INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
-                                                 email, vehicle_type, license_type, license_number, theory_number,
-                                                 notes, \`primary\`, created, updated)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, NOW(), NOW())
-        `, [
-          booking_id, bookingRef, attendee.first_name, attendee.sur_name,
-          attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
-          String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
-          attendee.theory_number || '', attendee.is_primary
-        ]);
-      }
-
-      console.log('📋 Getting event details...');
-
-      // Get event details and lock the row
-      const [eventDetails] = await connection.query(`
-        SELECT bookings_done, booking_limit FROM course_events WHERE id = ? FOR UPDATE
-      `, [course_event_id]);
-
-      if (eventDetails.length === 0) {
-        console.error(`❌ Event ${course_event_id} not found`);
-        await connection.rollback();
-        return;
-      }
-
-      const { bookings_done, booking_limit } = eventDetails[0];
-      const paidAmount = (session.amount_received || session.amount || 0) / 100;
-
-      console.log(`💰 Payment amount: £${paidAmount}`);
-      console.log(`📊 Current bookings_done: ${bookings_done}, booking_limit: ${booking_limit}`);
-
-      const availableSpaces = booking_limit - bookings_done;
-      console.log(`🔒 Available spaces: ${availableSpaces}, Requested: ${spaces}`);
-
-      // Check capacity
-      if (availableSpaces < spaces) {
-        console.log(`❌ Event ${course_event_id} is full, marking as refundable`);
-
-        await connection.query(`
-          UPDATE bookings
-          SET refundable = 1, modified = NOW()
-          WHERE id = ?
-        `, [booking_id]);
-      } else {
-        // Update bookings_done
-        console.log(`✅ Confirming booking ${booking_id}, incrementing bookings_done by ${spaces}`);
-
-        const [updateResult] = await connection.query(`
-          UPDATE course_events
-          SET bookings_done = bookings_done + ?, modified = NOW()
-          WHERE id = ?
-        `, [spaces, course_event_id]);
-
-        console.log(`✅ Update result - affected rows: ${updateResult.affectedRows}`);
-      }
-
-      // Save payment record
-      const paymentData = {
-        booking_id: booking_id,
-        payment_type: 'SALE',
-        transation_id: session.payment_intent || session.id,
-        amount: paidAmount,
-        transation_type: 'booking',
-        response: JSON.stringify({
-          session_id: session.id,
-          payment_status: session.payment_status,
-          amount_total: session.amount_total,
-          currency: session.currency
-        })
-      };
-
-      await connection.query(`
-        INSERT INTO booking_payments
-        (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
-        VALUES (?, ?, ?, ?, ?, ?, NOW(), 0, '', '')
-      `, [
-        paymentData.booking_id,
-        paymentData.payment_type,
-        paymentData.transation_id,
-        paymentData.amount,
-        paymentData.transation_type,
-        paymentData.response
-      ]);
-
-      await connection.commit();
-      console.log(`✅ Payment confirmed for booking ${bookingRef}`);
-
-    } catch (error) {
-      await connection.rollback();
-      console.error('Error creating booking after payment:', error);
-      throw error;
-    } finally {
-      connection.release();
-    }
+    // Old flow with temp_ref and booking_data
+    console.error('❌ No booking_id in metadata');
   }
 
   async handlePaymentExpired(session) {
