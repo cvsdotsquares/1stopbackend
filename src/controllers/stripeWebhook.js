@@ -162,7 +162,7 @@ class StripeWebhookController {
 
       console.log(`💰 Payment amount: £${paidAmount}`);
 
-      // Re-check capacity with row lock
+      // Re-check capacity with row lock on parent record
       const [currentCapacity] = await connection.query(`
         SELECT bookings_done, booking_limit
         FROM course_events
@@ -189,14 +189,14 @@ class StripeWebhookController {
           WHERE id = ?
         `, [booking_id]);
       } else {
-        // Update bookings_done
-        console.log(`Confirming booking ${booking_id}`);
+        // Update bookings_done on parent record
+        console.log(`Confirming booking ${booking_id}, updating parent ${parent}`);
 
         await connection.query(`
           UPDATE course_events
           SET bookings_done = bookings_done + ?, modified = NOW()
-          WHERE id = ?
-        `, [spaces, course_event_id]);
+          WHERE parent = ?
+        `, [spaces, parent]);
       }
 
       // Save payment record
