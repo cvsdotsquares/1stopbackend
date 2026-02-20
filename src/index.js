@@ -28,6 +28,9 @@ const createGiftVoucherRoutes = require('./routes/giftVoucher');
 const createDebugVoucherRoutes = require('./routes/debugVoucher');
 const createCheckAvailabilityRoutes = require('./routes/checkAvailability');
 const createConfirmBookingRoutes = require('./routes/confirmBooking');
+const createGetcourseRoutes = require('./routes/getcourse');
+const createHoldSpaceRoutes = require('./routes/holdSpace');
+const createRemoveSpaceRoutes = require('./routes/removeSpace');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const app = express();
@@ -156,6 +159,9 @@ app.use('/api/vouchers', createGiftVoucherRoutes(pool));
 app.use('/api/vouchers', createDebugVoucherRoutes(pool));
 app.use('/api/booking', createCheckAvailabilityRoutes(pool));
 app.use('/api/booking', createConfirmBookingRoutes(pool));
+app.use('/restapi/booking', createGetcourseRoutes(pool));
+app.use('/restapi/booking', createHoldSpaceRoutes(pool));
+app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
