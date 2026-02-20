@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { validationResult } = require('express-validator');
 const { generateToken, generateRefreshToken } = require('../middleware/auth');
-const { sendOTPEmail } = require('../utils/emailService');
+const { sendOTPEmail, sendRegistrationEmail, sendPasswordUpdateEmail } = require('../utils/emailService');
 const { decryptPassword } = require('../utils/encryption');
 
 class AuthController {
@@ -109,6 +109,15 @@ class AuthController {
       // Generate tokens
       const token = generateToken(newUser[0]);
       const refreshToken = generateRefreshToken(newUser[0]);
+
+      // Send registration email (async, don't wait)
+      sendRegistrationEmail({
+        email: newUser[0].email,
+        first_name: newUser[0].first_name,
+        sur_name: newUser[0].sur_name
+      }, this.pool).catch(err => {
+        console.error('Failed to send registration email:', err);
+      });
 
       res.status(201).json({
         success: true,
@@ -309,7 +318,7 @@ class AuthController {
       }
 
       const [users] = await this.pool.query(
-        'SELECT id, is_email_verified, password_type FROM users WHERE email = ?',
+        'SELECT id, first_name, sur_name, email, is_email_verified, password_type FROM users WHERE email = ?',
         [email]
       );
 
@@ -318,6 +327,7 @@ class AuthController {
       }
 
       const user = users[0];
+      const wasRandomPassword = user.password_type === 'random';
 
       if (!user.is_email_verified) {
         return res.status(403).json({ success: false, message: 'Email not verified' });
@@ -329,6 +339,17 @@ class AuthController {
         'UPDATE users SET password = ?, password_type = ?, status = 1, modified = NOW() WHERE id = ?',
         [hashedPassword, 'user_chosen', user.id]
       );
+
+      // Send password update email if changed from random to user_chosen
+      if (wasRandomPassword) {
+        sendPasswordUpdateEmail({
+          email: user.email,
+          first_name: user.first_name,
+          sur_name: user.sur_name
+        }, this.pool).catch(err => {
+          console.error('Failed to send password update email:', err);
+        });
+      }
 
       res.json({
         success: true,
@@ -376,7 +397,7 @@ class AuthController {
       const [users] = await this.pool.query(
         `SELECT id, first_name, sur_name, email, password, password_type, add1, add2, add3,
          postcode, contact1, contact2, contact3, reg_type, status, created
-         FROM users WHERE email = ? AND status = 1`,
+         FROM users WHERE email = ?`,
         [email]
       );
 
@@ -388,6 +409,13 @@ class AuthController {
       }
 
       const user = users[0];
+
+      if (user.status !== 1) {
+        return res.status(403).json({
+          success: false,
+          message: 'Account is inactive. Please contact support.'
+        });
+      }
 
       if (user.password_type === 'random') {
         return res.status(403).json({

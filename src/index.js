@@ -26,6 +26,8 @@ const createDashboardRoutes = require('./routes/dashboard');
 const createUserRoutes = require('./routes/user');
 const createGiftVoucherRoutes = require('./routes/giftVoucher');
 const createDebugVoucherRoutes = require('./routes/debugVoucher');
+const createCheckAvailabilityRoutes = require('./routes/checkAvailability');
+const createConfirmBookingRoutes = require('./routes/confirmBooking');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const app = express();
@@ -152,6 +154,8 @@ app.use('/api/dashboard', createDashboardRoutes(pool));
 app.use('/api/user', createUserRoutes(pool));
 app.use('/api/vouchers', createGiftVoucherRoutes(pool));
 app.use('/api/vouchers', createDebugVoucherRoutes(pool));
+app.use('/api/booking', createCheckAvailabilityRoutes(pool));
+app.use('/api/booking', createConfirmBookingRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {

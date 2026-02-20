@@ -403,7 +403,7 @@ class BookingController {
 
       // Get bookings with pagination
       const [bookings] = await this.pool.query(`
-        SELECT
+        SELECT DISTINCT
           b.id,
           b.course_id,
           b.course_event_id,
@@ -445,17 +445,19 @@ class BookingController {
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
         JOIN locations l ON ce.location_id = l.id
-        ${whereClause}
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        ${whereClause} AND (b.user_id = ? OR ba.email = ?)
         ORDER BY ${sortField === 'event_date' ? 'ce.event_date' : 'b.' + sortField} ${sortOrder}
         LIMIT ? OFFSET ?
-      `, [...queryParams, parseInt(limit), offset]);
+      `, [...queryParams, user_id, req.user.email, parseInt(limit), offset]);
 
       // Get total count for pagination
       const [countResult] = await this.pool.query(`
-        SELECT COUNT(*) as total
+        SELECT COUNT(DISTINCT b.id) as total
         FROM bookings b
-        ${whereClause}
-      `, queryParams);
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        ${whereClause} AND (b.user_id = ? OR ba.email = ?)
+      `, [...queryParams, user_id, req.user.email]);
 
       const total = countResult[0].total;
       const totalPages = Math.ceil(total / limit);

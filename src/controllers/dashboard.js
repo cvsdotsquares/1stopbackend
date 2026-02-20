@@ -9,41 +9,58 @@ class DashboardController {
       const userId = req.user.id;
 
       const [bookings] = await this.pool.query(`
-        SELECT b.id, b.total_amount, b.status, b.created,
-               c.course_name, MIN(ced.event_date) as event_date
+        SELECT DISTINCT b.id, b.total_amount, b.status, b.created,
+               c.course_name, MIN(ced.event_date) as event_date,
+               l.location_name, l.address1, l.address2, l.postcode,
+               bp.transation_id as transaction_id
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
         JOIN course_event_dates ced ON ce.id = ced.course_event_id
-        WHERE b.user_id = ?
-        GROUP BY b.id, b.total_amount, b.status, b.created, c.course_name
+        JOIN locations l ON ce.location_id = l.id
+        LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        WHERE (b.user_id = ? OR ba.email = ?)
+        GROUP BY b.id, b.total_amount, b.status, b.created, c.course_name, l.location_name, l.address1, l.address2, l.postcode, bp.transation_id
         ORDER BY b.created DESC
         LIMIT 5
-      `, [userId]);
+      `, [userId, req.user.email]);
 
-      const [stats] = await this.pool.query(`
+      const [statsResult] = await this.pool.query(`
         SELECT
-          COUNT(*) as total_bookings,
-          SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) as completed_bookings,
-          SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as pending_bookings,
-          SUM(total_amount) as total_spent
-        FROM bookings
-        WHERE user_id = ?
-      `, [userId]);
+          COUNT(DISTINCT b.id) as total_bookings,
+          COUNT(DISTINCT CASE WHEN b.status = 2 THEN b.id END) as completed_bookings,
+          COUNT(DISTINCT CASE WHEN b.status = 1 THEN b.id END) as pending_bookings,
+          COALESCE(SUM(DISTINCT b.total_amount), 0) as total_spent
+        FROM bookings b
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        WHERE b.user_id = ? OR ba.email = ?
+      `, [userId, req.user.email]);
+
+      const stats = statsResult[0] || {
+        total_bookings: 0,
+        completed_bookings: 0,
+        pending_bookings: 0,
+        total_spent: 0
+      };
+
+      // Add confirmed bookings count
+      stats.confirmed_bookings = stats.pending_bookings;
 
       const [upcomingCourses] = await this.pool.query(`
-        SELECT c.course_name, MIN(ced.event_date) as event_date, b.id as booking_id,
+        SELECT DISTINCT c.course_name, MIN(ced.event_date) as event_date, b.id as booking_id,
                l.location_name, l.address1, l.address2, l.postcode
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
         JOIN course_event_dates ced ON ce.id = ced.course_event_id
         JOIN locations l ON ce.location_id = l.id
-        WHERE b.user_id = ? AND ced.event_date >= CURDATE() AND b.status IN (0, 1)
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        WHERE (b.user_id = ? OR ba.email = ?) AND ced.event_date >= CURDATE() AND b.status IN (0, 1)
         GROUP BY b.id, c.course_name, l.location_name, l.address1, l.address2, l.postcode
         ORDER BY event_date ASC
         LIMIT 3
-      `, [userId]);
+      `, [userId, req.user.email]);
 
       const [giftVouchers] = await this.pool.query(`
         SELECT
@@ -78,7 +95,7 @@ class DashboardController {
             name: `${req.user.first_name} ${req.user.sur_name}`,
             email: req.user.email
           },
-          stats: stats[0],
+          stats: stats,
           recent_bookings: bookings,
           upcoming_courses: upcomingCourses,
           gift_vouchers: giftVouchers

@@ -147,15 +147,14 @@ class BookingStatusManager {
         `, [this.STATUS.CANCELLED]);
       }
 
-      // Mark confirmed bookings as completed if event was yesterday or earlier
+      // Mark confirmed bookings as completed if event date has passed
       const [completedBookings] = await connection.query(`
         UPDATE bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
         JOIN course_event_dates ced ON ce.id = ced.course_event_id
         SET b.status = ?, b.modified = NOW()
         WHERE b.status = ? 
-          AND ced.event_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
-          AND ced.event_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+          AND ced.event_date < CURDATE()
       `, [this.STATUS.COMPLETED, this.STATUS.CONFIRMED]);
 
       // Mark pending payment bookings as cancelled if event is tomorrow or sooner

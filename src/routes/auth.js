@@ -234,6 +234,25 @@ function createAuthRoutes(pool) {
     });
   });
 
+  // Debug route to check user status
+  router.post('/check-status', async (req, res) => {
+    try {
+      const { email } = req.body;
+      const [users] = await pool.query(
+        'SELECT id, email, status, password_type, is_email_verified FROM users WHERE email = ?',
+        [email]
+      );
+      
+      if (users.length === 0) {
+        return res.json({ success: false, message: 'User not found' });
+      }
+      
+      res.json({ success: true, data: users[0] });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   return router;
 }
 
