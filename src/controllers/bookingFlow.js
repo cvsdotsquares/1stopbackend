@@ -470,7 +470,15 @@ class BookingFlowController {
 
   async validatePromoCode(req, res) {
     try {
-      const { promo_code, course_id, location_id, attendees_count = 1 } = req.body;
+      const { 
+        promo_code, 
+        course_id, 
+        franchise_id,
+        location_id, 
+        attendees_count = 1,
+        booking_date,
+        selected_date
+      } = req.body;
 
       if (!promo_code) {
         return res.status(400).json({
@@ -481,9 +489,15 @@ class BookingFlowController {
 
       const [promos] = await this.pool.query(`
         SELECT id, promo_code, promo_description, p_c_amount, p_c_discount_type,
-               p_c_course, p_c_course_id, p_c_location, p_c_location_id,
-               p_c_min_booking, p_c_expiry, p_c_expiry_date, p_c_active_between,
-               p_c_active_from_date, p_c_active_to_date, status
+               p_c_course, p_c_course_id, 
+               p_c_franchise, p_c_franchise_id,
+               p_c_location, p_c_location_id,
+               p_c_min_booking, p_c_for,
+               p_c_days, p_c_day,
+               p_c_expiry, p_c_expiry_date, 
+               p_c_active_between, p_c_active_from_date, p_c_active_to_date,
+               p_c_dates_between, p_c_from_date, p_c_to_date,
+               status, isDeleted
         FROM promos
         WHERE promo_code = ? AND status = 1 AND isDeleted = 0
       `, [promo_code]);
@@ -498,22 +512,76 @@ class BookingFlowController {
       const promo = promos[0];
       const currentDate = new Date().toISOString().split('T')[0];
 
-      if (promo.p_c_expiry === 1 && promo.p_c_expiry_date < currentDate) {
-        return res.json({
-          success: true,
-          data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code has expired' }
-        });
-      }
-
-      if (promo.p_c_active_between === 0) {
-        if (currentDate < promo.p_c_active_from_date || currentDate > promo.p_c_active_to_date) {
+      // Validate expiry date
+      if (promo.p_c_expiry === 1 && promo.p_c_expiry_date) {
+        const expiryDate = new Date(promo.p_c_expiry_date).toISOString().split('T')[0];
+        if (currentDate > expiryDate) {
           return res.json({
             success: true,
-            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is not active' }
+            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code has expired' }
           });
         }
       }
 
+      // Validate active date range (activation window)
+      if (promo.p_c_active_between === 0) {
+        const activeFrom = promo.p_c_active_from_date ? new Date(promo.p_c_active_from_date).toISOString().split('T')[0] : null;
+        const activeTo = promo.p_c_active_to_date ? new Date(promo.p_c_active_to_date).toISOString().split('T')[0] : null;
+        
+        if (activeFrom && currentDate < activeFrom) {
+          return res.json({
+            success: true,
+            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is not yet active' }
+          });
+        }
+        
+        if (activeTo && currentDate > activeTo) {
+          return res.json({
+            success: true,
+            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code activation period has ended' }
+          });
+        }
+      }
+
+      // Validate booking date range (applicable event dates)
+      if (promo.p_c_dates_between === 0) {
+        const eventDate = booking_date || selected_date;
+        if (eventDate) {
+          const dateFrom = promo.p_c_from_date ? new Date(promo.p_c_from_date).toISOString().split('T')[0] : null;
+          const dateTo = promo.p_c_to_date ? new Date(promo.p_c_to_date).toISOString().split('T')[0] : null;
+          
+          if (dateFrom && eventDate < dateFrom) {
+            return res.json({
+              success: true,
+              data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code not valid for this booking date' }
+            });
+          }
+          
+          if (dateTo && eventDate > dateTo) {
+            return res.json({
+              success: true,
+              data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code not valid for this booking date' }
+            });
+          }
+        }
+      }
+
+      // Validate day of week
+      if (promo.p_c_days === 0 && promo.p_c_day) {
+        const eventDate = booking_date || selected_date;
+        if (eventDate) {
+          const dayOfWeek = new Date(eventDate).toLocaleDateString('en-US', { weekday: 'long' });
+          const allowedDays = promo.p_c_day.split(',').map(d => d.trim().toLowerCase());
+          if (!allowedDays.includes(dayOfWeek.toLowerCase())) {
+            return res.json({
+              success: true,
+              data: { valid: false, discount_amount: 0, discount_type: null, description: `Promo code only valid on ${promo.p_c_day}` }
+            });
+          }
+        }
+      }
+
+      // Validate course restriction
       if (promo.p_c_course === 0 && course_id && promo.p_c_course_id != course_id) {
         return res.json({
           success: true,
@@ -521,6 +589,15 @@ class BookingFlowController {
         });
       }
 
+      // Validate franchise restriction
+      if (promo.p_c_franchise === 0 && franchise_id && promo.p_c_franchise_id != franchise_id) {
+        return res.json({
+          success: true,
+          data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code not valid for this franchise' }
+        });
+      }
+
+      // Validate location restriction
       if (promo.p_c_location === 0 && location_id && promo.p_c_location_id != location_id) {
         return res.json({
           success: true,
@@ -528,20 +605,30 @@ class BookingFlowController {
         });
       }
 
-      if (attendees_count < promo.p_c_min_booking) {
+      // Validate minimum booking requirement
+      if (promo.p_c_min_booking && attendees_count < promo.p_c_min_booking) {
         return res.json({
           success: true,
-          data: { valid: false, discount_amount: 0, discount_type: null, description: `Minimum ${promo.p_c_min_booking} bookings required` }
+          data: { valid: false, discount_amount: 0, discount_type: null, description: `Minimum ${promo.p_c_min_booking} booking(s) required` }
         });
       }
 
+      // All validations passed
       res.json({
         success: true,
         data: {
           valid: true,
           discount_amount: parseFloat(promo.p_c_amount),
           discount_type: promo.p_c_discount_type,
-          description: promo.promo_description
+          description: promo.promo_description,
+          promo_code_id: promo.id,
+          restrictions: {
+            course_specific: promo.p_c_course === 0,
+            franchise_specific: promo.p_c_franchise === 0,
+            location_specific: promo.p_c_location === 0,
+            min_bookings: promo.p_c_min_booking,
+            day_restrictions: promo.p_c_days === 0 ? promo.p_c_day : null
+          }
         }
       });
     } catch (error) {
