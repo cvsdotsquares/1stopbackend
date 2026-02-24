@@ -12,14 +12,15 @@ class BookingCleanupCron {
     try {
       console.log('[CLEANUP CRON] Starting cleanup of unpaid bookings...');
 
-      // Find unpaid bookings older than 1 day
+      // Find unpaid bookings older than 30 minutes (configurable)
+      const timeoutMinutes = process.env.BOOKING_TIMEOUT_MINUTES || 30;
       const [unpaidBookings] = await connection.query(`
         SELECT id, spaces, course_event_id
         FROM bookings
         WHERE status = 0
           AND admin_payment_received = 0
-          AND created < DATE_SUB(NOW(), INTERVAL 1 DAY)
-      `);
+          AND created < DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      `, [timeoutMinutes]);
 
       if (unpaidBookings.length === 0) {
         console.log('[CLEANUP CRON] No unpaid bookings to clean up');
@@ -32,6 +33,16 @@ class BookingCleanupCron {
         await connection.beginTransaction();
 
         try {
+          // Release current_locks for this booking
+          if (booking.course_event_id && booking.spaces) {
+            await connection.query(`
+              UPDATE course_events
+              SET current_locks = GREATEST(0, current_locks - ?)
+              WHERE id = ?
+            `, [booking.spaces, booking.course_event_id]);
+            console.log(`[CLEANUP CRON] Released ${booking.spaces} locks from event ${booking.course_event_id}`);
+          }
+
           // Delete attendee records
           await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
           await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
@@ -56,13 +67,13 @@ class BookingCleanupCron {
   }
 
   start() {
-    // Run every day at 2 AM
-    cron.schedule('0 2 * * *', () => {
+    // Run every 15 minutes to catch abandoned bookings quickly
+    cron.schedule('*/15 * * * *', () => {
       console.log('[CLEANUP CRON] Running scheduled cleanup...');
       this.cleanupUnpaidBookings();
     });
 
-    console.log('[CLEANUP CRON] Scheduled to run daily at 2 AM');
+    console.log('[CLEANUP CRON] Scheduled to run every 15 minutes');
   }
 }
 

@@ -65,7 +65,7 @@ class BookingFlowController {
         });
       }
 
-      // Query without current_locks
+      // Include current_locks in availability calculation
       const [events] = await this.pool.query(`
         SELECT
           ced.course_event_id,
@@ -74,6 +74,7 @@ class BookingFlowController {
           ced.event_end_time,
           ce.booking_limit,
           ce.bookings_done,
+          ce.current_locks,
           ce.event_type,
           c.course_name,
           COALESCE(f.freeze_count, 0) as freeze_count
@@ -89,7 +90,7 @@ class BookingFlowController {
           AND ce.location_id = ?
           AND c.status = '1'
           AND ce.status = '1'
-          AND ce.bookings_done < ce.booking_limit
+          AND (ce.bookings_done + COALESCE(ce.current_locks, 0)) < ce.booking_limit
           AND ced.event_date > CURDATE()
           AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
         ORDER BY ced.event_date ASC
@@ -103,8 +104,8 @@ class BookingFlowController {
       }
 
       const availability = events.map(event => {
-        const availableSpaces = event.booking_limit - event.bookings_done;
-        const isFullyBooked = event.bookings_done >= event.booking_limit;
+        const availableSpaces = event.booking_limit - event.bookings_done - (event.current_locks || 0);
+        const isFullyBooked = (event.bookings_done + (event.current_locks || 0)) >= event.booking_limit;
         const isFrozen = event.freeze_count > 0;
 
         return {
@@ -149,6 +150,7 @@ class BookingFlowController {
           ced.event_end_time,
           ce.booking_limit,
           ce.bookings_done,
+          ce.current_locks,
           ce.location_id,
           ce.course_id,
           c.course_name,
@@ -189,8 +191,8 @@ class BookingFlowController {
       }
 
       const event = availability[0];
-      const availableSpaces = event.booking_limit - event.bookings_done;
-      const isFullyBooked = event.bookings_done >= event.booking_limit;
+      const availableSpaces = event.booking_limit - event.bookings_done - (event.current_locks || 0);
+      const isFullyBooked = (event.bookings_done + (event.current_locks || 0)) >= event.booking_limit;
       const isFrozen = event.freeze_count > 0;
 
       res.json({
@@ -470,11 +472,11 @@ class BookingFlowController {
 
   async validatePromoCode(req, res) {
     try {
-      const { 
-        promo_code, 
-        course_id, 
+      const {
+        promo_code,
+        course_id,
         franchise_id,
-        location_id, 
+        location_id,
         attendees_count = 1,
         booking_date,
         selected_date
@@ -489,12 +491,12 @@ class BookingFlowController {
 
       const [promos] = await this.pool.query(`
         SELECT id, promo_code, promo_description, p_c_amount, p_c_discount_type,
-               p_c_course, p_c_course_id, 
+               p_c_course, p_c_course_id,
                p_c_franchise, p_c_franchise_id,
                p_c_location, p_c_location_id,
                p_c_min_booking, p_c_for,
                p_c_days, p_c_day,
-               p_c_expiry, p_c_expiry_date, 
+               p_c_expiry, p_c_expiry_date,
                p_c_active_between, p_c_active_from_date, p_c_active_to_date,
                p_c_dates_between, p_c_from_date, p_c_to_date,
                status, isDeleted
@@ -527,14 +529,14 @@ class BookingFlowController {
       if (promo.p_c_active_between === 0) {
         const activeFrom = promo.p_c_active_from_date ? new Date(promo.p_c_active_from_date).toISOString().split('T')[0] : null;
         const activeTo = promo.p_c_active_to_date ? new Date(promo.p_c_active_to_date).toISOString().split('T')[0] : null;
-        
+
         if (activeFrom && currentDate < activeFrom) {
           return res.json({
             success: true,
             data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is not yet active' }
           });
         }
-        
+
         if (activeTo && currentDate > activeTo) {
           return res.json({
             success: true,
@@ -549,14 +551,14 @@ class BookingFlowController {
         if (eventDate) {
           const dateFrom = promo.p_c_from_date ? new Date(promo.p_c_from_date).toISOString().split('T')[0] : null;
           const dateTo = promo.p_c_to_date ? new Date(promo.p_c_to_date).toISOString().split('T')[0] : null;
-          
+
           if (dateFrom && eventDate < dateFrom) {
             return res.json({
               success: true,
               data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code not valid for this booking date' }
             });
           }
-          
+
           if (dateTo && eventDate > dateTo) {
             return res.json({
               success: true,
@@ -750,14 +752,15 @@ class BookingFlowController {
 
         // Check availability with row lock to prevent race conditions
         const [event] = await connection.query(`
-          SELECT booking_limit, bookings_done FROM course_events WHERE id = ? FOR UPDATE
+          SELECT booking_limit, bookings_done, current_locks FROM course_events WHERE id = ? FOR UPDATE
         `, [course_event_id]);
 
         if (!event.length) {
           throw new Error('Event not found');
         }
 
-        const availableSpaces = event[0].booking_limit - event[0].bookings_done;
+        const currentLocks = event[0].current_locks || 0;
+        const availableSpaces = event[0].booking_limit - event[0].bookings_done - currentLocks;
         if (availableSpaces < attendees_count) {
           await connection.rollback();
           connection.release();
@@ -767,6 +770,14 @@ class BookingFlowController {
             available_spaces: availableSpaces
           });
         }
+
+        // Increment current_locks to temporarily reserve the spaces (prevents race conditions)
+        // bookings_done will be incremented when payment is confirmed via webhook
+        await connection.query(`
+          UPDATE course_events
+          SET current_locks = current_locks + ?
+          WHERE id = ?
+        `, [attendees_count, course_event_id]);
 
         const [courseData] = await connection.query(`
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
@@ -842,12 +853,10 @@ class BookingFlowController {
 
         const totalAmount = discountedFees + vat;
 
-        const [maxBooking] = await connection.query(`SELECT MAX(id) as max_id FROM bookings`);
-        const bookingRef = `BK${String((maxBooking[0].max_id || 0) + 1).padStart(6, '0')}`;
-
         // Use first attendee's user_id as primary booking user
         const primaryUserId = userIds[0];
 
+        // Insert booking first to get auto-generated ID, then update with booking_ref
         const [bookingResult] = await connection.query(`
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
@@ -855,6 +864,9 @@ class BookingFlowController {
         `, [course_id, course_event_id, primaryUserId, attendees_count, totalAmount, discountedFees, vatRate, vat, totalAmount, primaryUserId, primaryUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
 
         const booking_id = bookingResult.insertId;
+        const bookingRef = `BK${String(booking_id).padStart(6, '0')}`;
+
+        // Note: booking_ref is stored in booking_attendees tables, not in bookings table
 
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];

@@ -70,7 +70,7 @@ app.use(express.urlencoded({ extended: true }));
 // IP address extraction middleware (must be before CORS)
 app.use((req, res, next) => {
   // Get real IP from various headers (for proxies, load balancers)
-  req.clientIp = 
+  req.clientIp =
     req.headers['cf-connecting-ip'] || // Cloudflare
     req.headers['x-forwarded-for']?.split(',')[0].trim() || // Proxy chains
     req.headers['x-forwarded-for'] || // Standard proxy header
@@ -83,7 +83,7 @@ app.use((req, res, next) => {
   if (req.clientIp === '::1' || req.clientIp === '::ffff:127.0.0.1') {
     req.clientIp = '127.0.0.1';
   }
-  
+
   // Clean IPv6 mapped IPv4 addresses (::ffff:192.168.1.1 → 192.168.1.1)
   if (req.clientIp.includes('::ffff:')) {
     req.clientIp = req.clientIp.replace('::ffff:', '');
@@ -278,10 +278,10 @@ app.listen(PORT, () => {
   console.log(`Health Check: http://localhost:${PORT}/health`);
   console.log(`DB Test: http://localhost:${PORT}/db-test`);
   console.log(`Auth Endpoints: http://localhost:${PORT}/api/auth/*`);
-  
+
   // Start booking cleanup job
   BookingStatusManager.startCleanupJob(pool);
-  
+
   // Start unpaid bookings cleanup cron
   const cleanupCron = new BookingCleanupCron(pool);
   cleanupCron.start();

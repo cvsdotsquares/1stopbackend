@@ -92,25 +92,25 @@ class StripeWebhookController {
 
         const paidAmount = (session.amount_received || session.amount || 0) / 100;
 
-        // Lock and update bookings_done
+        // Lock event and move from current_locks to bookings_done
         const [eventDetails] = await connection.query(`
-          SELECT bookings_done, booking_limit FROM course_events WHERE id = ? FOR UPDATE
+          SELECT bookings_done, current_locks, booking_limit FROM course_events WHERE id = ? FOR UPDATE
         `, [course_event_id]);
 
         if (eventDetails.length > 0) {
-          const availableSpaces = eventDetails[0].booking_limit - eventDetails[0].bookings_done;
-          console.log(`📊 bookings_done: ${eventDetails[0].bookings_done}, available: ${availableSpaces}, requested: ${bookingSpaces}`);
+          const currentLocks = eventDetails[0].current_locks || 0;
+          const bookingsDone = eventDetails[0].bookings_done || 0;
+          console.log(`📊 bookings_done: ${bookingsDone}, current_locks: ${currentLocks}, confirming: ${bookingSpaces}`);
 
-          if (availableSpaces >= bookingSpaces) {
-            await connection.query(`
-              UPDATE course_events
-              SET bookings_done = bookings_done + ?, modified = NOW()
-              WHERE id = ?
-            `, [bookingSpaces, course_event_id]);
-            console.log(`✅ Incremented bookings_done by ${bookingSpaces}`);
-          } else {
-            console.log(`⚠️ Not enough space. Available: ${availableSpaces}, Requested: ${bookingSpaces}`);
-          }
+          // Move spaces from current_locks to bookings_done
+          await connection.query(`
+            UPDATE course_events
+            SET bookings_done = bookings_done + ?,
+                current_locks = GREATEST(0, current_locks - ?),
+                modified = NOW()
+            WHERE id = ?
+          `, [bookingSpaces, bookingSpaces, course_event_id]);
+          console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
         }
 
         // Update booking status

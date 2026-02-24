@@ -128,8 +128,9 @@ const checkAvailability = (pool) => async (req, res) => {
       return res.status(400).json(response);
     }
   } catch (error) {
-    logRequest(500, 'Database error', { error: error.message });
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error('Error in checkAvailability:', error);
+    logRequest(500, 'Database error', { error: error.message, stack: error.stack });
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 };
 
