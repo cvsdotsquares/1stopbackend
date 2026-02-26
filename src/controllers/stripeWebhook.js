@@ -342,19 +342,36 @@ class StripeWebhookController {
 
       // Insert into gift_voucher with unique reference
       console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
-      const [insertResult] = await connection.query(
-        `INSERT INTO gift_voucher
-         (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
-          voucher_free_text, voucher_value, purchased_by, voucher_contact,
-          voucher_email, voucher_payement_type, template_id,
-          redeem_note, franchise_to_paid, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
-        [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id,
-         vData.subject, vData.voucher_person, vData.voucher_free_text,
-         vData.voucher_value, vData.purchased_by, vData.voucher_contact,
-         vData.voucher_email, vData.template_id, vData.franchise_to_paid]
-      );
-      console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
+      console.log(`📊 Voucher data:`, JSON.stringify({
+        bid: vData.bid,
+        voucher_ref: uniqueVoucherRef,
+        user_id: vData.user_id,
+        voucher_value: vData.voucher_value,
+        voucher_person: vData.voucher_person,
+        voucher_email: vData.voucher_email
+      }, null, 2));
+
+      let insertResult;
+      try {
+        [insertResult] = await connection.query(
+          `INSERT INTO gift_voucher
+           (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
+            voucher_free_text, voucher_value, purchased_by, voucher_contact,
+            voucher_email, voucher_payement_type, template_id,
+            redeem_note, franchise_to_paid, created)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
+          [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id || 0,
+           vData.subject || '', vData.voucher_person, vData.voucher_free_text || '',
+           vData.voucher_value, vData.purchased_by, vData.voucher_contact || '',
+           vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1]
+        );
+        console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
+      } catch (insertError) {
+        console.error(`❌ CRITICAL: Failed to insert into gift_voucher table:`, insertError);
+        console.error(`SQL Error Code: ${insertError.code}, SQLState: ${insertError.sqlState}`);
+        console.error(`Error Message: ${insertError.message}`);
+        throw insertError;
+      }
 
 
       // Fetch the actual inserted voucher data for email
@@ -382,6 +399,13 @@ class StripeWebhookController {
         ]
       );
 
+      // Delete the placeholder booking row that was created to reserve the ID
+      await connection.query(
+        `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
+        [vData.bid]
+      );
+      console.log(`🗑️ Deleted placeholder booking row for bid ${vData.bid}`);
+
       await connection.commit();
       console.log(`✅ Gift voucher ${actualVoucher[0].voucher_ref} payment confirmed`);
 
@@ -395,7 +419,14 @@ class StripeWebhookController {
 
     } catch (error) {
       await connection.rollback();
-      console.error('❌ Error processing gift voucher payment:', error);
+      console.error('❌ Error processing gift voucher payment intent:', error);
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        sqlState: error.sqlState,
+        sql: error.sql,
+        bid: bid
+      });
       throw error;
     } finally {
       connection.release();
@@ -448,19 +479,36 @@ class StripeWebhookController {
 
       // Insert into gift_voucher with unique reference
       console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
-      const [insertResult] = await connection.query(
-        `INSERT INTO gift_voucher
-         (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
-          voucher_free_text, voucher_value, purchased_by, voucher_contact,
-          voucher_email, voucher_payement_type, template_id,
-          redeem_note, franchise_to_paid, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
-        [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id,
-         vData.subject, vData.voucher_person, vData.voucher_free_text,
-         vData.voucher_value, vData.purchased_by, vData.voucher_contact,
-         vData.voucher_email, vData.template_id, vData.franchise_to_paid]
-      );
-      console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
+      console.log(`📊 Voucher data:`, JSON.stringify({
+        bid: vData.bid,
+        voucher_ref: uniqueVoucherRef,
+        user_id: vData.user_id,
+        voucher_value: vData.voucher_value,
+        voucher_person: vData.voucher_person,
+        voucher_email: vData.voucher_email
+      }, null, 2));
+
+      let insertResult;
+      try {
+        [insertResult] = await connection.query(
+          `INSERT INTO gift_voucher
+           (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
+            voucher_free_text, voucher_value, purchased_by, voucher_contact,
+            voucher_email, voucher_payement_type, template_id,
+            redeem_note, franchise_to_paid, created)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
+          [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id || 0,
+           vData.subject || '', vData.voucher_person, vData.voucher_free_text || '',
+           vData.voucher_value, vData.purchased_by, vData.voucher_contact || '',
+           vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1]
+        );
+        console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
+      } catch (insertError) {
+        console.error(`❌ CRITICAL: Failed to insert into gift_voucher table:`, insertError);
+        console.error(`SQL Error Code: ${insertError.code}, SQLState: ${insertError.sqlState}`);
+        console.error(`Error Message: ${insertError.message}`);
+        throw insertError;
+      }
 
 
       // Fetch the actual inserted voucher data for email
@@ -493,6 +541,13 @@ class StripeWebhookController {
         ]
       );
 
+      // Delete the placeholder booking row that was created to reserve the ID
+      await connection.query(
+        `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
+        [vData.bid]
+      );
+      console.log(`🗑️ Deleted placeholder booking row for bid ${vData.bid}`);
+
       await connection.commit();
       console.log(`✅ Gift voucher ${actualVoucher[0].voucher_ref} payment confirmed`);
 
@@ -506,7 +561,14 @@ class StripeWebhookController {
 
     } catch (error) {
       await connection.rollback();
-      console.error('❌ Error processing gift voucher payment:', error);
+      console.error('❌ Error processing gift voucher payment (checkout session):', error);
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        sqlState: error.sqlState,
+        sql: error.sql,
+        bid: bid
+      });
       throw error;
     } finally {
       connection.release();
