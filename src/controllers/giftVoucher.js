@@ -27,34 +27,40 @@ class GiftVoucherController {
       }
 
       const connection = await this.pool.getConnection();
-      await connection.beginTransaction();
 
       try {
-        // Get next booking ID from AUTO_INCREMENT (PHP method)
-        const [autoInc] = await connection.query(
-          `SELECT AUTO_INCREMENT as ai FROM information_schema.TABLES 
-           WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'bookings'`,
-          [process.env.DB_NAME || '1stop']
-        );
-        const bid = autoInc[0].ai;
+        await connection.beginTransaction();
 
-        // Increment AUTO_INCREMENT (reserve the ID without creating booking)
-        await connection.query(`ALTER TABLE bookings AUTO_INCREMENT = ?`, [bid + 1]);
+        // SOLUTION: Actually insert a placeholder row in bookings table to claim the ID
+        // This permanently reserves the booking ID for this gift voucher
+        const [bookingInsert] = await connection.query(
+          `INSERT INTO bookings
+           (course_id, course_event_id, user_id, type_of_book, spaces, payment_due,
+            total_fees, vatrate, vat, total_amount, admin_payment_received, status,
+            lockid, edit_payment_type, edited_booking_id, created_by, booking_made_by, created, modified)
+           VALUES (0, 0, ?, 'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, '', 0, 0, 'gift_voucher', NOW(), NOW())`,
+          [user_id || 0]
+        );
+
+        const bid = bookingInsert.insertId;
+        console.log(`🎫 Reserved booking ID ${bid} for gift voucher`);
 
         // Generate voucher reference
         const voucher_ref = `1SGV${bid} - OGV`;
         const voucher_date = new Date().toLocaleDateString('en-GB');
 
         // Insert into gift_voucher_copieds
-        await connection.query(
-          `INSERT INTO gift_voucher_copieds 
-           (bid, voucher_ref, voucher_date, subject, voucher_person, voucher_free_text, 
-            voucher_value, purchased_by, voucher_contact, voucher_email, 
+        const [insertResult] = await connection.query(
+          `INSERT INTO gift_voucher_copieds
+           (bid, voucher_ref, voucher_date, subject, voucher_person, voucher_free_text,
+            voucher_value, purchased_by, voucher_contact, voucher_email,
             voucher_payement_type, template_id, created, franchise_to_paid, user_id, redeem_note)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', 1, NOW(), 1, ?, '')`,
           [bid, voucher_ref, voucher_date, subject || '', recipient_name, field_text || '',
            voucher_value, purchased_by, contact_number, email_address, user_id]
         );
+
+        console.log(`✅ Inserted into gift_voucher_copieds with bid ${bid}, row ID: ${insertResult.insertId}`);
 
         // Calculate total with VAT
         const vat = voucher_value * 0.2;
@@ -76,7 +82,9 @@ class GiftVoucherController {
           receipt_email: email_address
         });
 
+        // Commit the transaction
         await connection.commit();
+        console.log(`✅ Gift voucher creation completed successfully for bid ${bid}`);
 
         res.json({
           success: true,
@@ -91,16 +99,23 @@ class GiftVoucherController {
 
       } catch (error) {
         await connection.rollback();
+        console.error(`❌ Error creating gift voucher:`, error);
+        console.error('Error details:', {
+          message: error.message,
+          code: error.code,
+          stack: error.stack
+        });
         throw error;
       } finally {
         connection.release();
       }
 
     } catch (error) {
-      console.error('Error creating gift voucher:', error);
+      console.error('❌ CRITICAL: Error creating gift voucher:', error);
       res.status(500).json({
         success: false,
-        error: 'Failed to create gift voucher'
+        error: 'Failed to create gift voucher',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
   }
