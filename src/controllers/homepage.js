@@ -127,7 +127,7 @@ class HomepageController {
         SELECT psi.slider_image, psi.alt_title, psi.image_caption
         FROM pageSliders ps
         LEFT JOIN pageSliderImg psi ON ps.id = psi.pageSliders_id
-        WHERE ps.page_id = ? AND psi.slider_image IS NOT NULL
+        WHERE ps.page_id = ? AND ps.page_type = 'page' AND psi.slider_image IS NOT NULL
       `, [pageId]);
 
       if (sliders.length > 0) {
