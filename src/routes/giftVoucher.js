@@ -7,6 +7,7 @@ function createGiftVoucherRoutes(pool) {
 
   router.post('/create', (req, res) => controller.createVoucher(req, res));
   router.get('/verify', (req, res) => controller.verifyVoucher(req, res));
+  router.get('/template', (req, res) => controller.getVoucherTemplate(req, res));
 
   return router;
 }
