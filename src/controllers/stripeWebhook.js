@@ -323,14 +323,25 @@ class StripeWebhookController {
         return;
       }
 
+      // Check if voucher already exists in gift_voucher table
+      const uniqueVoucherRef = `1SGV${vouchers[0].bid} - OGV`;
+      const [existingVoucher] = await connection.query(
+        `SELECT id FROM gift_voucher WHERE bid = ?`,
+        [bid]
+      );
+
+      if (existingVoucher.length > 0) {
+        console.log(`⚠️ Gift voucher with bid ${bid} already exists in gift_voucher table`);
+        await connection.rollback();
+        return;
+      }
+
       const vData = vouchers[0];
       const paidAmount = (paymentIntent.amount_received || paymentIntent.amount) / 100;
-
-      // Generate unique voucher_ref using bid (each bid is unique)
-      const uniqueVoucherRef = `1SGV${vData.bid} - OGV`;
       const voucherDate = new Date().toLocaleDateString('en-GB');
 
       // Insert into gift_voucher with unique reference
+      console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
       const [insertResult] = await connection.query(
         `INSERT INTO gift_voucher
          (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
@@ -343,6 +354,8 @@ class StripeWebhookController {
          vData.voucher_value, vData.purchased_by, vData.voucher_contact,
          vData.voucher_email, vData.template_id, vData.franchise_to_paid]
       );
+      console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
+
 
       // Fetch the actual inserted voucher data for email
       const [actualVoucher] = await connection.query(
@@ -392,7 +405,7 @@ class StripeWebhookController {
   async handleGiftVoucherPayment(session) {
     console.log('🎁 Processing gift voucher payment:', session.id);
 
-    const { bid, voucher_ref } = session.metadata;
+    const { bid } = session.metadata;
 
     if (!bid) {
       console.error('❌ No bid in session metadata');
@@ -403,6 +416,18 @@ class StripeWebhookController {
     await connection.beginTransaction();
 
     try {
+      // Idempotency check - check if voucher already exists in gift_voucher table
+      const [existingVoucher] = await connection.query(
+        `SELECT id FROM gift_voucher WHERE bid = ?`,
+        [bid]
+      );
+
+      if (existingVoucher.length > 0) {
+        console.log(`⚠️ Gift voucher with bid ${bid} already exists in gift_voucher table`);
+        await connection.rollback();
+        return;
+      }
+
       const [vouchers] = await connection.query(
         `SELECT * FROM gift_voucher_copieds WHERE bid = ?`,
         [bid]
@@ -422,6 +447,7 @@ class StripeWebhookController {
       const voucherDate = new Date().toLocaleDateString('en-GB');
 
       // Insert into gift_voucher with unique reference
+      console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
       const [insertResult] = await connection.query(
         `INSERT INTO gift_voucher
          (voucher_date, voucher_ref, bid, user_id, subject, voucher_person,
@@ -434,6 +460,8 @@ class StripeWebhookController {
          vData.voucher_value, vData.purchased_by, vData.voucher_contact,
          vData.voucher_email, vData.template_id, vData.franchise_to_paid]
       );
+      console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
+
 
       // Fetch the actual inserted voucher data for email
       const [actualVoucher] = await connection.query(

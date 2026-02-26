@@ -32,7 +32,7 @@ class GiftVoucherController {
       try {
         // Get next booking ID from AUTO_INCREMENT (PHP method)
         const [autoInc] = await connection.query(
-          `SELECT AUTO_INCREMENT as ai FROM information_schema.TABLES 
+          `SELECT AUTO_INCREMENT as ai FROM information_schema.TABLES
            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'bookings'`,
           [process.env.DB_NAME || '1stop']
         );
@@ -47,9 +47,9 @@ class GiftVoucherController {
 
         // Insert into gift_voucher_copieds
         await connection.query(
-          `INSERT INTO gift_voucher_copieds 
-           (bid, voucher_ref, voucher_date, subject, voucher_person, voucher_free_text, 
-            voucher_value, purchased_by, voucher_contact, voucher_email, 
+          `INSERT INTO gift_voucher_copieds
+           (bid, voucher_ref, voucher_date, subject, voucher_person, voucher_free_text,
+            voucher_value, purchased_by, voucher_contact, voucher_email,
             voucher_payement_type, template_id, created, franchise_to_paid, user_id, redeem_note)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', 1, NOW(), 1, ?, '')`,
           [bid, voucher_ref, voucher_date, subject || '', recipient_name, field_text || '',
