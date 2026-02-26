@@ -140,6 +140,46 @@ class GiftVoucherController {
       });
     }
   }
+
+  async getVoucherTemplate(req, res) {
+    try {
+      const { id = 1 } = req.query;
+
+      // Get template details
+      const [templates] = await this.pool.query(
+        `SELECT details FROM voucher_templates WHERE id = ?`,
+        [id]
+      );
+
+      if (templates.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Voucher template not found'
+        });
+      }
+
+      // Get gift options
+      const [options] = await this.pool.query(
+        `SELECT gift_option FROM gift_voucher_options WHERE voucher_template_id = ?`,
+        [id]
+      );
+
+      res.json({
+        success: true,
+        data: {
+          template: templates[0],
+          options: options.map(opt => opt.gift_option)
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching voucher template:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch voucher template'
+      });
+    }
+  }
 }
 
 module.exports = GiftVoucherController;

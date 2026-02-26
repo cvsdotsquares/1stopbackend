@@ -4,16 +4,16 @@ const path = require('path');
 const LOG_FILE = path.join(__dirname, '../../getcourse.txt');
 
 const logError = (message) => {
-  const timestamp = new Date().toLocaleString('en-GB', { 
-    day: '2-digit', 
-    month: '2-digit', 
-    year: 'numeric', 
-    hour: '2-digit', 
+  const timestamp = new Date().toLocaleString('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false 
+    hour12: false
   }).replace(',', '');
-  
+
   const logEntry = `[${timestamp}] ${message}\n`;
   fs.appendFileSync(LOG_FILE, logEntry);
 };
@@ -34,23 +34,29 @@ const getCourse = (pool) => async (req, res) => {
       'SELECT is_r2api_setting FROM settings WHERE id = 1'
     );
 
+    console.log('Settings query result:', settingsRows);
+
     if (!settingsRows || settingsRows.length === 0) {
       // No settings row found, treat as disabled
+      console.log('⚠️ No settings row found - returning empty course array');
       return res.status(200).json({ course: [] });
     }
 
     const settings = settingsRows[0];
+    console.log('Settings is_r2api_setting value:', settings.is_r2api_setting);
+
     if (settings.is_r2api_setting === 0) {
       // API is disabled
+      console.log('⚠️ RideTo API is disabled (is_r2api_setting = 0) - returning empty course array');
       return res.status(200).json({ course: [] });
     }
 
     // Step 2: Fetch courses from booking_status for specific locations
     const locationIds = [1, 4, 15, 18];
     const placeholders = locationIds.map(() => '?').join(',');
-    
+
     const [courseRows] = await pool.query(
-      `SELECT 
+      `SELECT
         CourseEventId,
         rideto_course_id,
         course_name,
@@ -84,12 +90,12 @@ const getCourse = (pool) => async (req, res) => {
 
       // Calculate available seats
       let availSeatCount = bookingLimit - bookingsDone - currentLocks;
-      
+
       // If freezeBooking is 1, force AvailSeatCount to 0
       if (row.freezeBooking === 1) {
         availSeatCount = 0;
       }
-      
+
       // Ensure it doesn't go below 0
       if (availSeatCount < 0) {
         availSeatCount = 0;
