@@ -203,7 +203,7 @@ class StripeWebhookController {
   async handlePaymentFailed(paymentIntent) {
     console.log('Processing failed payment for payment intent:', paymentIntent.id);
 
-    const { type, bid, booking_id } = paymentIntent.metadata || {};
+    const { type, bid, booking_id, course_event_id, attendees_count } = paymentIntent.metadata || {};
 
     // Handle gift voucher payment failure
     if (type === 'gift_voucher' && bid) {
@@ -236,27 +236,61 @@ class StripeWebhookController {
       return;
     }
 
-    // Handle regular booking payment failure
+    // Handle regular booking payment failure - immediate cleanup
     if (booking_id) {
-      const [bookings] = await this.pool.query(`
-        SELECT id FROM bookings
-        WHERE id = ?
-      `, [booking_id]);
+      const connection = await this.pool.getConnection();
+      await connection.beginTransaction();
 
-      if (bookings.length === 0) {
-        console.log('No booking found for payment intent:', paymentIntent.id);
-        return;
+      try {
+        // Get booking details
+        const [bookings] = await connection.query(`
+          SELECT id, spaces, course_event_id FROM bookings
+          WHERE id = ? AND status = 0 AND admin_payment_received = 0
+        `, [booking_id]);
+
+        if (bookings.length === 0) {
+          console.log('No unpaid booking found for payment intent:', paymentIntent.id);
+          await connection.rollback();
+          return;
+        }
+
+        const booking = bookings[0];
+        console.log(`❌ Payment failed for booking ${booking.id} - initiating immediate cleanup`);
+
+        // Release current_locks for this booking
+        if (booking.course_event_id && booking.spaces) {
+          await connection.query(`
+            UPDATE course_events
+            SET current_locks = GREATEST(0, current_locks - ?)
+            WHERE id = ?
+          `, [booking.spaces, booking.course_event_id]);
+          console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
+        }
+
+        // Delete attendee records
+        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
+        await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
+        console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
+
+        // Delete booking
+        await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
+        console.log(`🗑️ Deleted booking ${booking.id}`);
+
+        await connection.commit();
+        console.log(`✅ Successfully cleaned up failed payment for booking ${booking.id}`);
+      } catch (error) {
+        await connection.rollback();
+        console.error('❌ Error cleaning up failed booking payment:', error);
+      } finally {
+        connection.release();
       }
-
-      const booking = bookings[0];
-      console.log(`Payment failed for booking ${booking.id}`);
     }
   }
 
   async handlePaymentCanceled(paymentIntent) {
     console.log('Processing canceled payment for payment intent:', paymentIntent.id);
 
-    const { type, bid, booking_id } = paymentIntent.metadata || {};
+    const { type, bid, booking_id, course_event_id, attendees_count } = paymentIntent.metadata || {};
 
     // Handle gift voucher payment cancellation
     if (type === 'gift_voucher' && bid) {
@@ -289,10 +323,54 @@ class StripeWebhookController {
       return;
     }
 
-    // Handle regular booking payment cancellation
+    // Handle regular booking payment cancellation - immediate cleanup
     if (booking_id) {
-      console.log(`Payment canceled for booking ${booking_id}`);
-      // Add additional cleanup logic for regular bookings if needed
+      const connection = await this.pool.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // Get booking details
+        const [bookings] = await connection.query(`
+          SELECT id, spaces, course_event_id FROM bookings
+          WHERE id = ? AND status = 0 AND admin_payment_received = 0
+        `, [booking_id]);
+
+        if (bookings.length === 0) {
+          console.log('No unpaid booking found for payment intent:', paymentIntent.id);
+          await connection.rollback();
+          return;
+        }
+
+        const booking = bookings[0];
+        console.log(`🚫 Payment canceled for booking ${booking.id} - initiating immediate cleanup`);
+
+        // Release current_locks for this booking
+        if (booking.course_event_id && booking.spaces) {
+          await connection.query(`
+            UPDATE course_events
+            SET current_locks = GREATEST(0, current_locks - ?)
+            WHERE id = ?
+          `, [booking.spaces, booking.course_event_id]);
+          console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
+        }
+
+        // Delete attendee records
+        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
+        await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
+        console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
+
+        // Delete booking
+        await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
+        console.log(`🗑️ Deleted booking ${booking.id}`);
+
+        await connection.commit();
+        console.log(`✅ Successfully cleaned up canceled payment for booking ${booking.id}`);
+      } catch (error) {
+        await connection.rollback();
+        console.error('❌ Error cleaning up canceled booking payment:', error);
+      } finally {
+        connection.release();
+      }
     }
   }
 
