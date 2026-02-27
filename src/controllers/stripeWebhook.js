@@ -48,6 +48,10 @@ class StripeWebhookController {
           console.log('❌ Handling payment failed...');
           await this.handlePaymentFailed(event.data.object);
           break;
+        case 'payment_intent.canceled':
+          console.log('❌ Handling payment canceled...');
+          await this.handlePaymentCanceled(event.data.object);
+          break;
         default:
           console.log(`⚠️ Unhandled event type: ${event.type}`);
       }
@@ -199,20 +203,97 @@ class StripeWebhookController {
   async handlePaymentFailed(paymentIntent) {
     console.log('Processing failed payment for payment intent:', paymentIntent.id);
 
-    // Find booking by payment intent
-    const [bookings] = await this.pool.query(`
-      SELECT id FROM bookings
-      WHERE id = ?
-    `, [paymentIntent.metadata?.booking_id]);
+    const { type, bid, booking_id } = paymentIntent.metadata || {};
 
-    if (bookings.length === 0) {
-      console.log('No booking found for payment intent:', paymentIntent.id);
+    // Handle gift voucher payment failure
+    if (type === 'gift_voucher' && bid) {
+      const connection = await this.pool.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // Delete the gift voucher copied entry
+        await connection.query(
+          `DELETE FROM gift_voucher_copieds WHERE bid = ?`,
+          [bid]
+        );
+        console.log(`🗑️ Deleted gift_voucher_copieds entry for bid ${bid}`);
+
+        // Delete the placeholder booking row
+        await connection.query(
+          `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
+          [bid]
+        );
+        console.log(`🗑️ Deleted placeholder booking row for bid ${bid} due to payment failure`);
+
+        await connection.commit();
+        console.log(`✅ Cleaned up failed gift voucher payment for bid ${bid}`);
+      } catch (error) {
+        await connection.rollback();
+        console.error('❌ Error cleaning up failed gift voucher payment:', error);
+      } finally {
+        connection.release();
+      }
       return;
     }
 
-    const booking = bookings[0];
+    // Handle regular booking payment failure
+    if (booking_id) {
+      const [bookings] = await this.pool.query(`
+        SELECT id FROM bookings
+        WHERE id = ?
+      `, [booking_id]);
 
-    console.log(`Payment failed for booking ${booking.id}`);
+      if (bookings.length === 0) {
+        console.log('No booking found for payment intent:', paymentIntent.id);
+        return;
+      }
+
+      const booking = bookings[0];
+      console.log(`Payment failed for booking ${booking.id}`);
+    }
+  }
+
+  async handlePaymentCanceled(paymentIntent) {
+    console.log('Processing canceled payment for payment intent:', paymentIntent.id);
+
+    const { type, bid, booking_id } = paymentIntent.metadata || {};
+
+    // Handle gift voucher payment cancellation
+    if (type === 'gift_voucher' && bid) {
+      const connection = await this.pool.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // Delete the gift voucher copied entry
+        await connection.query(
+          `DELETE FROM gift_voucher_copieds WHERE bid = ?`,
+          [bid]
+        );
+        console.log(`🗑️ Deleted gift_voucher_copieds entry for bid ${bid}`);
+
+        // Delete the placeholder booking row
+        await connection.query(
+          `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
+          [bid]
+        );
+        console.log(`🗑️ Deleted placeholder booking row for bid ${bid} due to payment cancellation`);
+
+        await connection.commit();
+        console.log(`✅ Cleaned up canceled gift voucher payment for bid ${bid}`);
+      } catch (error) {
+        await connection.rollback();
+        console.error('❌ Error cleaning up canceled gift voucher payment:', error);
+      } finally {
+        connection.release();
+      }
+      return;
+    }
+
+    // Handle regular booking payment cancellation
+    if (booking_id) {
+      console.log(`Payment canceled for booking ${booking_id}`);
+      // Add additional cleanup logic for regular bookings if needed
+    }
   }
 
   // Verify payment status (for frontend callbacks)

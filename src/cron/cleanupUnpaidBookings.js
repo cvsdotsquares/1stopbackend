@@ -15,7 +15,7 @@ class BookingCleanupCron {
       // Find unpaid bookings older than 30 minutes (configurable)
       const timeoutMinutes = process.env.BOOKING_TIMEOUT_MINUTES || 30;
       const [unpaidBookings] = await connection.query(`
-        SELECT id, spaces, course_event_id
+        SELECT id, spaces, course_event_id, booking_made_by
         FROM bookings
         WHERE status = 0
           AND admin_payment_received = 0
@@ -33,25 +33,40 @@ class BookingCleanupCron {
         await connection.beginTransaction();
 
         try {
-          // Release current_locks for this booking
-          if (booking.course_event_id && booking.spaces) {
-            await connection.query(`
-              UPDATE course_events
-              SET current_locks = GREATEST(0, current_locks - ?)
-              WHERE id = ?
-            `, [booking.spaces, booking.course_event_id]);
-            console.log(`[CLEANUP CRON] Released ${booking.spaces} locks from event ${booking.course_event_id}`);
+          // Check if this is a gift voucher placeholder booking
+          if (booking.booking_made_by === 'gift_voucher') {
+            // Delete the gift voucher copied entry
+            await connection.query(
+              `DELETE FROM gift_voucher_copieds WHERE bid = ?`,
+              [booking.id]
+            );
+            console.log(`[CLEANUP CRON] Deleted gift_voucher_copieds for bid ${booking.id}`);
+
+            // Delete the placeholder booking
+            await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
+            console.log(`[CLEANUP CRON] Deleted abandoned gift voucher booking ID: ${booking.id}`);
+          } else {
+            // Regular booking cleanup
+            // Release current_locks for this booking
+            if (booking.course_event_id && booking.spaces) {
+              await connection.query(`
+                UPDATE course_events
+                SET current_locks = GREATEST(0, current_locks - ?)
+                WHERE id = ?
+              `, [booking.spaces, booking.course_event_id]);
+              console.log(`[CLEANUP CRON] Released ${booking.spaces} locks from event ${booking.course_event_id}`);
+            }
+
+            // Delete attendee records
+            await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
+            await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
+
+            // Delete booking
+            await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
+            console.log(`[CLEANUP CRON] Deleted booking ID: ${booking.id}`);
           }
 
-          // Delete attendee records
-          await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
-          await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
-
-          // Delete booking
-          await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
-
           await connection.commit();
-          console.log(`[CLEANUP CRON] Deleted booking ID: ${booking.id}`);
         } catch (error) {
           await connection.rollback();
           console.error(`[CLEANUP CRON] Error deleting booking ${booking.id}:`, error);
