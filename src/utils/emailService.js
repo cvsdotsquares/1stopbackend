@@ -309,7 +309,23 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
 };
 
 exports.sendGiftVoucherEmail = async (voucherData, pool) => {
-  const { voucher_ref, voucher_person, voucher_email, subject, voucher_value, voucher_free_text, purchased_by } = voucherData;
+  const { voucher_ref, voucher_person, voucher_email, subject, voucher_value, voucher_free_text, purchased_by, voucher_date, created } = voucherData;
+
+  // Format the issue date (DD/MM/YYYY)
+  const issueDate = created ? new Date(created).toLocaleDateString('en-GB') : new Date().toLocaleDateString('en-GB');
+  
+  // Get voucher terms from database
+  let voucherTerms = '';
+  if (pool) {
+    try {
+      const [templates] = await pool.query('SELECT voucher_terms FROM voucher_templates WHERE id = 1 LIMIT 1');
+      if (templates.length > 0 && templates[0].voucher_terms) {
+        voucherTerms = templates[0].voucher_terms;
+      }
+    } catch (error) {
+      console.error('Error fetching voucher terms:', error);
+    }
+  }
 
   const mailOptions = {
     from: process.env.SMTP_USER,
@@ -330,23 +346,42 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
       </tr>
       <tr>
         <td style="background: #ffffff; padding: 20px;">
-          <h2 style="color: #333; font-family: Arial, sans-serif;">Gift Voucher</h2>
-          <p style="font-size:10pt;font-family:Arial,sans-serif">Dear ${voucher_person},</p>
-          <p style="font-size:10pt;font-family:Arial,sans-serif">You have received a gift voucher from <strong>${purchased_by}</strong> for 1 Stop Instruction training.</p>
-          
-          <table width="100%" style="margin: 20px 0; border: 2px solid #333; padding: 15px; background: #f9f9f9;">
+          <table width="100%" border="0">
             <tr>
-              <td style="font-size:11pt;font-family:Arial,sans-serif">
-                <p><strong>Voucher Reference:</strong> ${voucher_ref}</p>
-                <p><strong>Voucher Value:</strong> £${voucher_value}</p>
-                <p><strong>Course:</strong> ${subject}</p>
-                ${voucher_free_text ? `<p><strong>Message:</strong> ${voucher_free_text}</p>` : ''}
+              <td>
+                <h2 style="color: #333; font-family: Arial, sans-serif; margin: 0;">Gift Voucher For</h2>
+                <h3 style="color: #333; font-family: Arial, sans-serif; margin: 5px 0;">${subject || 'Motorcycle Training, CBT, Driving Lessons'}</h3>
+              </td>
+              <td align="right" valign="top">
+                <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0;">
+                  <strong>Issue Date:</strong> <span style="color: #FF6347;">${issueDate}</span><br>
+                  <span style="font-size:9pt; color: #666;">Date Voucher was Issued (DD/MM/YYYY)</span>
+                </p>
               </td>
             </tr>
           </table>
           
-          <p style="font-size:10pt;font-family:Arial,sans-serif">To redeem this voucher, please contact us with your voucher reference number.</p>
-          <p style="font-size:10pt;font-family:Arial,sans-serif">Contact: <a href="mailto:info@1stopinstruction.com">info@1stopinstruction.com</a></p>
+          <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 15px;">You have received a gift voucher from <strong>${purchased_by}</strong> for 1 Stop Instruction training.</p>
+          
+          <table width="100%" style="margin: 20px 0; border: 2px solid #333; padding: 15px; background: #f9f9f9;">
+            <tr>
+              <td style="font-size:11pt;font-family:Arial,sans-serif">
+                <p style="margin: 5px 0;"><strong>This Voucher belongs to ${voucher_person}</strong></p>
+                <p style="margin: 5px 0;"><strong>Voucher Reference:</strong> ${voucher_ref}</p>
+                <p style="margin: 5px 0;"><strong>Voucher Value:</strong> £${voucher_value}</p>
+                ${voucher_free_text ? `<p style="margin: 5px 0;"><strong>Message:</strong> ${voucher_free_text}</p>` : ''}
+              </td>
+            </tr>
+          </table>
+          
+          <p style="font-size:10pt;font-family:Arial,sans-serif">To redeem this voucher, please contact us on <a href="tel:08008597333" style="color: #00CED1; text-decoration: none;"><strong>0800 8597 7333</strong></a> and provide your voucher reference number.</p>
+          
+          ${voucherTerms ? `
+          <div style="margin: 20px 0; padding: 15px; background: #f9f9f9; border-left: 4px solid #333;">
+            <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0 0 10px 0;"><strong>Terms and Conditions</strong></p>
+            <div style="font-size:9pt;font-family:Arial,sans-serif; color: #555;">${voucherTerms}</div>
+          </div>
+          ` : ''}
           
           <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 30px;">Kind Regards,<br><strong>1 Stop Instruction Team</strong></p>
         </td>
