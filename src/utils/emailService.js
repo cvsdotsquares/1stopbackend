@@ -51,12 +51,12 @@ exports.sendRegistrationEmail = async (userData, pool) => {
           <h2 style="color: #333; font-family: Arial, sans-serif;">Welcome to 1 Stop Instruction!</h2>
           <p style="font-size:10pt;font-family:Arial,sans-serif">Dear ${first_name} ${sur_name},</p>
           <p style="font-size:10pt;font-family:Arial,sans-serif">Thank you for registering with 1 Stop Instruction. Your account has been successfully created.</p>
-          
+
           <div style="background: #f9f9f9; border-left: 4px solid #333; padding: 15px; margin: 20px 0;">
             <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0;"><strong>Your Account Details:</strong></p>
             <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 10px 0 0 0;">Email: ${email}</p>
           </div>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif">You can now:</p>
           <ul style="font-size:10pt;font-family:Arial,sans-serif">
             <li>Browse and book training courses</li>
@@ -64,9 +64,9 @@ exports.sendRegistrationEmail = async (userData, pool) => {
             <li>Update your profile information</li>
             <li>View your booking history</li>
           </ul>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif">If you have any questions, please don't hesitate to contact us.</p>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 30px;">Kind Regards,<br><strong>1 Stop Instruction Team</strong></p>
         </td>
       </tr>
@@ -136,12 +136,12 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
           <h2 style="color: #333; font-family: Arial, sans-serif;">Password Successfully Updated</h2>
           <p style="font-size:10pt;font-family:Arial,sans-serif">Dear ${first_name} ${sur_name},</p>
           <p style="font-size:10pt;font-family:Arial,sans-serif">Your password has been successfully updated. You can now log in with your new password.</p>
-          
+
           <div style="background: #f9f9f9; border-left: 4px solid #333; padding: 15px; margin: 20px 0;">
             <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0;"><strong>Your Account:</strong></p>
             <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 10px 0 0 0;">Email: ${email}</p>
           </div>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif">You can now access all features of your account:</p>
           <ul style="font-size:10pt;font-family:Arial,sans-serif">
             <li>Browse and book training courses</li>
@@ -149,9 +149,9 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
             <li>Update your profile information</li>
             <li>View your booking history</li>
           </ul>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif">If you did not make this change, please contact us immediately.</p>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 30px;">Kind Regards,<br><strong>1 Stop Instruction Team</strong></p>
         </td>
       </tr>
@@ -199,10 +199,10 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
 
 exports.sendBookingConfirmation = async (bookingData, pool) => {
   const { course_name, booking_ref, attendees, location, event_dates, payment, ip } = bookingData;
-  
+
   const attendeeEmails = attendees.map(a => a.email).join(', ');
   const firstName = attendees[0]?.first_name || 'Customer';
-  
+
   const mailOptions = {
     from: process.env.SMTP_USER,
     to: attendeeEmails,
@@ -228,7 +228,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
           <p style="font-size:9pt;font-family:Arial,sans-serif">Dear ${firstName},</p>
           <p style="font-size:9pt;font-family:Arial,sans-serif">Thank you for booking your ${course_name} with 1 Stop Instruction.</p>
           <p style="font-size:9pt;font-family:Arial,sans-serif">Please note your booking confirmation details below:</p>
-          
+
           <table width="99%" style="font-size:9pt;font-family:Arial,sans-serif">
             <tr>
               <td width="15%"><strong>Name:</strong><br><strong>Course:</strong><br><strong>Payment:</strong></td>
@@ -237,13 +237,13 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
               <td width="15%" style="text-align:right">£${payment.paid}<br>£${payment.balance}</td>
             </tr>
           </table>
-          
+
           <p style="font-size:9pt;font-family:Arial,sans-serif"><strong><u>Course Location</u></strong><br>
           ${location.name}<br>${location.address}</p>
-          
+
           <p style="font-size:9pt;font-family:Arial,sans-serif"><strong><u>Date & Time</u></strong><br>
           ${event_dates.map(d => `${d.date} - ${d.start_time}`).join('<br>')}</p>
-          
+
           <div style="font-size:9pt;font-family:Arial,sans-serif">
             <p>Please ensure that you carefully read your booking confirmation details, and in the unlikely event that any details are incorrect, please contact us at the earliest opportunity.</p>
             <p><strong>YOU MUST:</strong></p>
@@ -254,7 +254,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
               <li>Read our <a href="https://www.1stopinstruction.com/termsandconditions.php">terms and conditions</a></li>
             </ul>
           </div>
-          
+
           <p style="font-size:9pt;font-family:Arial,sans-serif">Kind Regards,<br><strong>1 Stop Instruction</strong></p>
           <p style="font-size:8pt;font-family:Arial,sans-serif;color:#666">Booking IP: ${ip}</p>
         </td>
@@ -313,14 +313,14 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
 
   // Format the issue date (DD/MM/YYYY)
   const issueDate = created ? new Date(created).toLocaleDateString('en-GB') : new Date().toLocaleDateString('en-GB');
-  
+
   // Get voucher terms from database
   let voucherTerms = '';
   if (pool) {
     try {
-      const [templates] = await pool.query('SELECT voucher_terms FROM voucher_templates WHERE id = 1 LIMIT 1');
-      if (templates.length > 0 && templates[0].voucher_terms) {
-        voucherTerms = templates[0].voucher_terms;
+      const [templates] = await pool.query('SELECT details FROM voucher_templates WHERE id = 1 LIMIT 1');
+      if (templates.length > 0 && templates[0].details) {
+        voucherTerms = templates[0].details;
       }
     } catch (error) {
       console.error('Error fetching voucher terms:', error);
@@ -360,9 +360,9 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
               </td>
             </tr>
           </table>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 15px;">You have received a gift voucher from <strong>${purchased_by}</strong> for 1 Stop Instruction training.</p>
-          
+
           <table width="100%" style="margin: 20px 0; border: 2px solid #333; padding: 15px; background: #f9f9f9;">
             <tr>
               <td style="font-size:11pt;font-family:Arial,sans-serif">
@@ -373,16 +373,16 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
               </td>
             </tr>
           </table>
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif">To redeem this voucher, please contact us on <a href="tel:08008597333" style="color: #00CED1; text-decoration: none;"><strong>0800 8597 7333</strong></a> and provide your voucher reference number.</p>
-          
+
           ${voucherTerms ? `
           <div style="margin: 20px 0; padding: 15px; background: #f9f9f9; border-left: 4px solid #333;">
             <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0 0 10px 0;"><strong>Terms and Conditions</strong></p>
             <div style="font-size:9pt;font-family:Arial,sans-serif; color: #555;">${voucherTerms}</div>
           </div>
           ` : ''}
-          
+
           <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 30px;">Kind Regards,<br><strong>1 Stop Instruction Team</strong></p>
         </td>
       </tr>
