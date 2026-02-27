@@ -17,7 +17,7 @@ class BookingCleanupCron {
       const [unpaidBookings] = await connection.query(`
         SELECT id, spaces, course_event_id, booking_made_by
         FROM bookings
-        WHERE status = 0
+        WHERE (status = 0 OR status = 3)
           AND admin_payment_received = 0
           AND created < DATE_SUB(NOW(), INTERVAL ? MINUTE)
       `, [timeoutMinutes]);
