@@ -114,11 +114,12 @@ class HomepageController {
 
       // Get hero/slider data
       const [sliders] = await this.pool.query(`
-        SELECT ps.title, sbd.title as box_title, sbd.subtitle, sbd.promocode,
+        SELECT ps.title, ps.next_available_text, sbd.title as box_title, sbd.subtitle, sbd.promocode,
                sbd.book_online_button_title, sbd.book_online_button_link,
                sbd.find_cbt_button_title, sbd.find_cbt_button_link
         FROM pageSliders ps
         LEFT JOIN sliderBoxData sbd ON ps.id = sbd.pageSliders_id
+        LEFT JOIN course_events ce ON ps.page_course_id = ce.course_id
         WHERE ps.page_id = ?
       `, [pageId]);
 
@@ -136,6 +137,7 @@ class HomepageController {
           alt: img.alt_title,
           title: img.image_caption
         }));
+        homepage.hero.nextCourse.label = sliders[0].next_available_text || "Our Next Available CBT Course Is";
         homepage.hero.promotion = {
           title: sliders[0].box_title || null,
           subtitle: sliders[0].subtitle || null,

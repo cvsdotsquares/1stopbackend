@@ -67,7 +67,6 @@ class CMSPagesController {
       }
 
       // Get additional homepage-style sections for this page
-      let sliderImages = null;
       let aboutData = null;
       let servicesData = null;
       let trainingSliderData = null;
@@ -77,20 +76,51 @@ class CMSPagesController {
       let featuresData = null;
       let bannersData = null;
 
-      // Get slider images
+      // Get hero/slider data
       const [sliders] = await this.pool.query(`
+        SELECT ps.title, ps.next_available_text, sbd.title as box_title, sbd.subtitle, sbd.promocode,
+               sbd.book_online_button_title, sbd.book_online_button_link,
+               sbd.find_cbt_button_title, sbd.find_cbt_button_link
+        FROM pageSliders ps
+        LEFT JOIN sliderBoxData sbd ON ps.id = sbd.pageSliders_id
+        LEFT JOIN course_events ce ON ps.page_course_id = ce.course_id
+        WHERE ps.page_id = ?
+      `, [page.id]);
+
+      // Get all slider images
+      const [sliderImages] = await this.pool.query(`
         SELECT psi.slider_image, psi.alt_title, psi.image_caption
         FROM pageSliders ps
         LEFT JOIN pageSliderImg psi ON ps.id = psi.pageSliders_id
-        WHERE ps.page_id = ? AND psi.slider_image IS NOT NULL
+        WHERE ps.page_id = ? AND ps.page_type = 'page' AND psi.slider_image IS NOT NULL
       `, [page.id]);
 
+      let heroData = null;
       if (sliders.length > 0) {
-        sliderImages = sliders.map(img => ({
-          src: '/uploads/sliders/' + img.slider_image,
-          alt: img.alt_title,
-          title: img.image_caption
-        }));
+        heroData = {
+          backgroundImages: sliderImages.map(img => ({
+            src: '/uploads/sliders/' + img.slider_image,
+            alt: img.alt_title,
+            title: img.image_caption
+          })),
+          nextCourse: {
+            label: sliders[0].next_available_text || "Our Next Available CBT Course Is"
+          },
+          promotion: {
+            title: sliders[0].box_title || null,
+            subtitle: sliders[0].subtitle || null,
+            promoCode: sliders[0].promocode || null,
+            primaryCta: {
+              text: sliders[0].book_online_button_title || null,
+              link: sliders[0].book_online_button_link || null
+            },
+            secondaryCta: {
+              text: sliders[0].find_cbt_button_title || null,
+              link: sliders[0].find_cbt_button_link || null
+            }
+          },
+          footerText: sliders[0].title || null
+        };
       }
 
       // Get about/direct access data
@@ -265,7 +295,8 @@ class CMSPagesController {
         ...page,
         page_content: page.page_content ? page.page_content.trim().replace(/\r\n/g, '\n') : '',
         dynamic_sections: sections,
-        slider_images: sliderImages,
+        hero: heroData,
+        slider_images: sliderImages, // Raw slider images for debugging
         about: aboutData,
         services: servicesData,
         training_slider: trainingSliderData,
@@ -280,7 +311,20 @@ class CMSPagesController {
 
       res.json({
         success: true,
-        data: processedData
+        data: processedData,
+        debug: {
+          page_id: page.id,
+          sliders_count: sliders.length,
+          slider_images_count: sliderImages.length,
+          about_count: about.length,
+          services_count: services.length,
+          training_slider_count: trainingSlider.length,
+          why_us_count: whyUs.length,
+          cbt_london_count: cbtLondon.length,
+          cbt_test_london_count: cbtTestLondon.length,
+          exceptional_count: exceptional.length,
+          banners_count: banners.length
+        }
       });
 
     } catch (error) {

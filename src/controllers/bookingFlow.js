@@ -19,6 +19,7 @@ class BookingFlowController {
           '1 day' as duration,
           c.is_cbt,
           c.status,
+          c.description,
           0 as isVoucher
         FROM courses c
         JOIN course_events ce ON c.id = ce.course_id
@@ -41,7 +42,8 @@ class BookingFlowController {
         school_one_off_price: parseFloat(course.school_one_off_price),
         is_cbt: course.is_cbt,
         status: course.status,
-        isVoucher: Boolean(course.isVoucher)
+        isVoucher: Boolean(course.isVoucher),
+        description: course.description
       }));
 
       res.json({ success: true, data: formattedCourses });
@@ -140,7 +142,24 @@ class BookingFlowController {
 
   async getNextAvailabilityForCBT(req, res) {
     try {
-      const cbtCourseId = 1; // CBT course ID
+      const pageId = 9; // Homepage page_id
+
+      // Fetch the course ID from pageSliders table
+      const [sliderData] = await this.pool.query(`
+        SELECT page_course_id
+        FROM pageSliders
+        WHERE page_id = ? AND page_course_id IS NOT NULL
+        LIMIT 1
+      `, [pageId]);
+
+      if (!sliderData.length || !sliderData[0].page_course_id) {
+        return res.status(404).json({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'No course configured for next availability' }
+        });
+      }
+
+      const courseId = sliderData[0].page_course_id;
 
       const [availability] = await this.pool.query(`
         SELECT
@@ -174,19 +193,18 @@ class BookingFlowController {
           GROUP BY course_event_id
         ) f ON f.course_event_id = ced.course_event_id
         WHERE ce.course_id = ?
-          AND c.is_cbt = 1
           AND c.status = '1'
           AND ce.status = '1'
           AND DATE(ced.event_date) > DATE(NOW())
           AND DATE(ced.event_date) <= DATE_ADD(DATE(NOW()), INTERVAL 3 MONTH)
         ORDER BY ced.event_date ASC, l.location_name ASC
         LIMIT 1
-      `, [cbtCourseId]);
+      `, [courseId]);
 
       if (availability.length === 0) {
         return res.status(404).json({
           success: false,
-          error: { code: 'NOT_FOUND', message: 'No CBT courses available' }
+          error: { code: 'NOT_FOUND', message: 'No courses available for the configured course' }
         });
       }
 
