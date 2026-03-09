@@ -42,6 +42,19 @@ class CMSPagesController {
 
       const page = pages[0];
 
+      // Get section ordering from page_junction table
+      const [pageJunctions] = await this.pool.query(`
+        SELECT section_data, sort_order
+        FROM page_junction
+        WHERE data_id = ?
+      `, [page.id]);
+
+      // Create a map of section types to their sort order
+      const sectionOrderMap = {};
+      pageJunctions.forEach(junction => {
+        sectionOrderMap[junction.section_data] = junction.sort_order;
+      });
+
       // Get dynamic content sections for this page
       const [sections] = await this.pool.query(`
         SELECT *
@@ -214,7 +227,7 @@ class CMSPagesController {
 
       // Get CBT across London data
       const [cbtLondon] = await this.pool.query(`
-        SELECT title, subtitle, description, cbt_image
+        SELECT title, subtitle, description, cbt_image, marker_text, bg_color
         FROM cbt_across_london
         WHERE page_id = ?
       `, [page.id]);
@@ -224,13 +237,15 @@ class CMSPagesController {
           title: cbtLondon[0].title || null,
           subtitle: cbtLondon[0].subtitle || null,
           description: cbtLondon[0].description || null,
+          marker_text: cbtLondon[0].marker_text || null,
+          bg_color: !!cbtLondon[0].bg_color,
           image: cbtLondon[0].cbt_image ? `/uploads/cbt_across_london/${cbtLondon[0].cbt_image}` : null
         };
       }
 
       // Get CBT test London data
       const [cbtTestLondon] = await this.pool.query(`
-        SELECT title, subtitle, description, cbt_image
+        SELECT title, subtitle, description, cbt_image, marker_text, bg_color, title_top_center
         FROM cbt_test_london
         WHERE page_id = ?
       `, [page.id]);
@@ -240,6 +255,9 @@ class CMSPagesController {
           title: cbtTestLondon[0].title || null,
           subtitle: cbtTestLondon[0].subtitle || null,
           description: cbtTestLondon[0].description || null,
+          marker_text: cbtTestLondon[0].marker_text || null,
+          bg_color: !!cbtTestLondon[0].bg_color,
+          title_top_center: cbtTestLondon[0].title_top_center || null,
           image: cbtTestLondon[0].cbt_image ? `/uploads/cbt_test_london/${cbtTestLondon[0].cbt_image}` : null
         };
       }
@@ -290,21 +308,411 @@ class CMSPagesController {
         }));
       }
 
+      // Get info card section data
+      let infoCardSectionData = null;
+      const [infoCardSection] = await this.pool.query(`
+        SELECT id, bg_color
+        FROM info_card_section
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (infoCardSection.length > 0) {
+        const section = infoCardSection[0];
+
+        // Get all info cards for this section
+        const [infoCards] = await this.pool.query(`
+          SELECT id, card_title, card_text, card_icon
+          FROM info_card_data
+          WHERE attached_to_card = ?
+          ORDER BY id ASC
+        `, [section.id]);
+
+        infoCardSectionData = {
+          background: section.bg_color || null,
+          cards: infoCards.map(card => ({
+            icon: card.card_icon ? `/uploads/info_cards/${card.card_icon}` : null,
+            title: card.card_title || null,
+            description: card.card_text || null
+          }))
+        };
+      }
+
+      // Get price card section data
+      let priceCardSectionData = null;
+      const [priceCardSection] = await this.pool.query(`
+        SELECT id, title, note, bottom_text
+        FROM price_card_sections
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (priceCardSection.length > 0) {
+        const section = priceCardSection[0];
+
+        // Get all price cards for this section
+        const [priceCards] = await this.pool.query(`
+          SELECT id, marker_text, title, package_time, price, package_content, note_text, button_text, button_url
+          FROM price_card_data
+          WHERE attached_price_card = ?
+          ORDER BY id ASC
+        `, [section.id]);
+
+        priceCardSectionData = {
+          title: section.title || null,
+          note: section.note || null,
+          bottom_text: section.bottom_text || null,
+          cards: priceCards.map(card => ({
+            marker_text: card.marker_text || null,
+            title: card.title || null,
+            time: card.package_time || null,
+            price: card.price || null,
+            description: card.package_content || null,
+            note_text: card.note_text || null,
+            button: {
+              text: card.button_text || null,
+              url: card.button_url || null
+            }
+          }))
+        };
+      }
+
+      // Get service areas section data
+      let serviceAreasSectionData = null;
+      const [serviceAreasSection] = await this.pool.query(`
+        SELECT id, border, show_bg
+        FROM service_areas_section
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (serviceAreasSection.length > 0) {
+        const section = serviceAreasSection[0];
+
+        // Get all service areas for this section
+        const [serviceAreas] = await this.pool.query(`
+          SELECT id, left_text, right_text
+          FROM service_areas_data
+          WHERE attached_to_service = ?
+          ORDER BY id ASC
+        `, [section.id]);
+
+        serviceAreasSectionData = {
+          border: !!section.border,
+          show_bg: !!section.show_bg,
+          areas: serviceAreas.map(area => ({
+            left_text: area.left_text || null,
+            right_text: area.right_text || null
+          }))
+        };
+      }
+
+      // Get accordion section data
+      let accordionSectionData = null;
+      const [accordionSection] = await this.pool.query(`
+        SELECT id, header_txt
+        FROM accordion_section
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (accordionSection.length > 0) {
+        const section = accordionSection[0];
+
+        // Get all accordion items for this section
+        const [accordionItems] = await this.pool.query(`
+          SELECT id, accordion_title, accordion_text
+          FROM accordion_sec_data
+          WHERE ref_accordion = ?
+          ORDER BY id ASC
+        `, [section.id]);
+
+        accordionSectionData = {
+          header: section.header_txt || null,
+          items: accordionItems.map(item => ({
+            title: item.accordion_title || null,
+            content: item.accordion_text || null
+          }))
+        };
+      }
+
+      // Get content cards section data
+      let contentCardsSectionData = null;
+      const [contentCardsSection] = await this.pool.query(`
+        SELECT id, content_text
+        FROM content_cards_section
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (contentCardsSection.length > 0) {
+        const section = contentCardsSection[0];
+
+        // Get all content card items for this section
+        const [contentCardItems] = await this.pool.query(`
+          SELECT id, item_img_uri, item_title, item_text, red_btn_txt, red_btn_url, blue_btn_txt, blue_btn_url, marker_text
+          FROM content_cards_items
+          WHERE ref_content_card = ?
+          ORDER BY id ASC
+        `, [section.id]);
+
+        contentCardsSectionData = {
+          content_text: section.content_text || null,
+          cards: contentCardItems.map(item => ({
+            image: item.item_img_uri ? `/uploads/content_cards/${item.item_img_uri}` : null,
+            title: item.item_title || null,
+            description: item.item_text || null,
+            marker_text: item.marker_text || null,
+            red_button: {
+              text: item.red_btn_txt || null,
+              url: item.red_btn_url || null
+            },
+            blue_button: {
+              text: item.blue_btn_txt || null,
+              url: item.blue_btn_url || null
+            }
+          }))
+        };
+      }
+
+      // Get CMS sidebar data
+      let cmsSidebarData = null;
+      const [cmsSidebar] = await this.pool.query(`
+        SELECT id, sidebar_item_title, sidebar_item_text, sort_order
+        FROM cms_sidebar
+        WHERE page_id = ?
+        ORDER BY sort_order ASC
+      `, [page.id]);
+
+      if (cmsSidebar.length > 0) {
+        cmsSidebarData = {
+          items: cmsSidebar.map(item => ({
+            title: item.sidebar_item_title || null,
+            text: item.sidebar_item_text || null
+          }))
+        };
+      }
+
+      // Get tab section data
+      let tabSectionData = null;
+      const [tabSection] = await this.pool.query(`
+        SELECT id, title, image_uri
+        FROM tab_section
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (tabSection.length > 0) {
+        const section = tabSection[0];
+
+        // Get all tabs for this section
+        const [tabs] = await this.pool.query(`
+          SELECT id, tab_name, tab_text, tab_icon_url
+          FROM tabs
+          WHERE attached_to_tab = ?
+          ORDER BY id ASC
+        `, [section.id]);
+
+        tabSectionData = {
+          title: section.title || null,
+          image: section.image_uri ? section.image_uri : null,
+          tabs: tabs.map(tab => ({
+            id: tab.id.toString(),
+            label: tab.tab_name || null,
+            icon: '/uploads/featured_services/' + tab.tab_icon_url || null,
+            content: tab.tab_text || null
+          }))
+        };
+      }
+
+      // Get process steps section data
+      let processStepsData = null;
+      const [processSteps] = await this.pool.query(`
+        SELECT id, process_step_title
+        FROM process_steps
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page.id]);
+
+      if (processSteps.length > 0) {
+        const section = processSteps[0];
+
+        // Get all process step content for this section
+        const [stepContent] = await this.pool.query(`
+          SELECT id, step_no, step_title, step_description, sort_order
+          FROM process_step_content
+          WHERE main_process_ref = ?
+          ORDER BY sort_order ASC
+        `, [section.id]);
+
+        processStepsData = {
+          title: section.process_step_title || null,
+          steps: stepContent.map(step => ({
+            step_no: step.step_no || null,
+            title: step.step_title || null,
+            description: step.step_description || null
+          }))
+        };
+      }
+
+      // Build sections array with type and order for dynamic rendering
+      const pageSections = [];
+
+      if (heroData) {
+        pageSections.push({
+          type: 'hero',
+          order: sectionOrderMap['home_slider'] || 1,
+          data: heroData
+        });
+      }
+
+      if (aboutData) {
+        pageSections.push({
+          type: 'about',
+          order: sectionOrderMap['direct_access'] || 10,
+          data: aboutData
+        });
+      }
+
+      if (servicesData) {
+        pageSections.push({
+          type: 'services',
+          order: sectionOrderMap['our_services'] || 20,
+          data: servicesData
+        });
+      }
+
+      if (trainingSliderData) {
+        pageSections.push({
+          type: 'training_slider',
+          order: sectionOrderMap['expert_training_slider'] || 30,
+          data: trainingSliderData
+        });
+      }
+
+      if (whyUsData) {
+        pageSections.push({
+          type: 'why_us',
+          order: sectionOrderMap['why_1stop'] || 40,
+          data: whyUsData
+        });
+      }
+
+      if (cbtTestLondonData) {
+        pageSections.push({
+          type: 'cbt_test_london',
+          order: sectionOrderMap['cheap_cbt_test_london'] || 50,
+          data: cbtTestLondonData
+        });
+      }
+
+      if (cbtLondonData) {
+        pageSections.push({
+          type: 'cbt_london',
+          order: sectionOrderMap['cheap_cbt_test_across_london'] || 60,
+          data: cbtLondonData
+        });
+      }
+
+      // Add dynamic content sections - use sort_order from dynamic_content_sections table
+      sections.forEach((section) => {
+        pageSections.push({
+          type: 'dynamic_content',
+          order: section.sort_order,
+          data: section
+        });
+      });
+
+      if (infoCardSectionData) {
+        pageSections.push({
+          type: 'info_card_section',
+          order: sectionOrderMap['info_card_section'] || 65,
+          data: infoCardSectionData
+        });
+      }
+
+      if (priceCardSectionData) {
+        pageSections.push({
+          type: 'price_card_section',
+          order: sectionOrderMap['price_card_section'] || 67,
+          data: priceCardSectionData
+        });
+      }
+
+      if (serviceAreasSectionData) {
+        pageSections.push({
+          type: 'service_areas_section',
+          order: sectionOrderMap['service_areas_section'] || 68,
+          data: serviceAreasSectionData
+        });
+      }
+
+      if (accordionSectionData) {
+        pageSections.push({
+          type: 'accordion_section',
+          order: sectionOrderMap['accordion_section'] || 69,
+          data: accordionSectionData
+        });
+      }
+
+      if (contentCardsSectionData) {
+        pageSections.push({
+          type: 'content_cards_section',
+          order: sectionOrderMap['content_cards_section'] || 71,
+          data: contentCardsSectionData
+        });
+      }
+
+      if (cmsSidebarData) {
+        pageSections.push({
+          type: 'cms_sidebar',
+          order: sectionOrderMap['cms_sidebar'] || 72,
+          data: cmsSidebarData
+        });
+      }
+
+      if (tabSectionData) {
+        pageSections.push({
+          type: 'tab_section',
+          order: sectionOrderMap['tab_section'] || 70,
+          data: tabSectionData
+        });
+      }
+
+      if (processStepsData) {
+        pageSections.push({
+          type: 'process_steps',
+          order: sectionOrderMap['process_steps'] || 73,
+          data: processStepsData
+        });
+      }
+
+      if (featuresData) {
+        pageSections.push({
+          type: 'features',
+          order: sectionOrderMap['our_exceptional'] || 80,
+          data: featuresData
+        });
+      }
+
+      if (bannersData) {
+        bannersData.forEach((banner, index) => {
+          pageSections.push({
+            type: 'banner',
+            order: banner.position || (90 + index),
+            data: banner
+          });
+        });
+      }
+
+      // Sort sections by order
+      pageSections.sort((a, b) => a.order - b.order);
+
       const responseData = {
         pages_menu,
         ...page,
         page_content: page.page_content ? page.page_content.trim().replace(/\r\n/g, '\n') : '',
-        dynamic_sections: sections,
-        hero: heroData,
-        slider_images: sliderImages, // Raw slider images for debugging
-        about: aboutData,
-        services: servicesData,
-        training_slider: trainingSliderData,
-        why_us: whyUsData,
-        cbt_london: cbtLondonData,
-        cbt_test_london: cbtTestLondonData,
-        features: featuresData,
-        banners: bannersData
+        sections: pageSections
       };
 
       const processedData = await replaceTokensInObject(this.pool, responseData);
@@ -323,7 +731,15 @@ class CMSPagesController {
           cbt_london_count: cbtLondon.length,
           cbt_test_london_count: cbtTestLondon.length,
           exceptional_count: exceptional.length,
-          banners_count: banners.length
+          banners_count: banners.length,
+          info_card_section_count: infoCardSection.length,
+          price_card_section_count: priceCardSection.length,
+          service_areas_section_count: serviceAreasSection.length,
+          accordion_section_count: accordionSection.length,
+          content_cards_section_count: contentCardsSection.length,
+          cms_sidebar_count: cmsSidebar.length,
+          tab_section_count: tabSection.length,
+          process_steps_count: processSteps.length
         }
       });
 

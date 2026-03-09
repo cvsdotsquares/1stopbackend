@@ -50,6 +50,12 @@ function createHelperRoutes(pool) {
       .trim()
   ];
 
+  const courseIdValidation = [
+    body('course_id')
+      .isInt({ min: 1 })
+      .withMessage('Valid course ID is required')
+  ];
+
   // Routes
   router.post('/check-blacklisted',
     licenseValidation,
@@ -73,6 +79,16 @@ function createHelperRoutes(pool) {
     contentProcessingValidation,
     handleValidationErrors,
     helperController.processContent.bind(helperController)
+  );
+
+  router.post('/course-bullet-points',
+    courseIdValidation,
+    handleValidationErrors,
+    helperController.getCourseBulletPoints.bind(helperController)
+  );
+
+  router.post('/tab-section',
+    helperController.getTabSection.bind(helperController)
   );
 
   router.get('/footer-data',

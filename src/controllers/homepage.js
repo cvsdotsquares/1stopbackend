@@ -237,7 +237,7 @@ class HomepageController {
 
       // Get CBT across London data
       const [cbtLondon] = await this.pool.query(`
-        SELECT title, subtitle, description, cbt_image
+        SELECT title, subtitle, description, cbt_image, bg_color
         FROM cbt_across_london
         WHERE page_id = ?
       `, [pageId]);
@@ -247,13 +247,14 @@ class HomepageController {
           title: cbtLondon[0].title || null,
           subtitle: cbtLondon[0].subtitle || null,
           description: cbtLondon[0].description || null,
+          bg_color: !!cbtLondon[0].bg_color,
           image: cbtLondon[0].cbt_image ? `/uploads/cbt_across_london/${cbtLondon[0].cbt_image}` : null
         };
       }
 
       // Get CBT test London data
       const [cbtTestLondon] = await this.pool.query(`
-        SELECT title, subtitle, description, cbt_image
+        SELECT title, subtitle, description, cbt_image, bg_color
         FROM cbt_test_london
         WHERE page_id = ?
       `, [pageId]);
@@ -263,6 +264,7 @@ class HomepageController {
           title: cbtTestLondon[0].title || null,
           subtitle: cbtTestLondon[0].subtitle || null,
           description: cbtTestLondon[0].description || null,
+          bg_color: !!cbtTestLondon[0].bg_color,
           image: cbtTestLondon[0].cbt_image ? `/uploads/cbt_test_london/${cbtTestLondon[0].cbt_image}` : null
         };
       }

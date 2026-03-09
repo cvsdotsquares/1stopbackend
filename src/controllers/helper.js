@@ -571,6 +571,113 @@ class HelperController {
       });
     }
   }
+
+  async getCourseBulletPoints(req, res) {
+    try {
+      const { course_id } = req.body;
+
+      if (!course_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'course_id is required'
+        });
+      }
+
+      const [courses] = await this.pool.query(`
+        SELECT id, course_name, course_bullet_points
+        FROM courses
+        WHERE id = ? AND status = '1' AND isDeleted = '0'
+      `, [course_id]);
+
+      if (courses.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Course not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          course_id: courses[0].id,
+          course_name: courses[0].course_name,
+          bullet_points: courses[0].course_bullet_points
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching course bullet points:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch course bullet points',
+        error: error.message
+      });
+    }
+  }
+
+  async getTabSection(req, res) {
+    try {
+      const { page_id } = req.body;
+
+      if (!page_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'page_id is required'
+        });
+      }
+
+      // Get tab section (parent)
+      const [tabSection] = await this.pool.query(`
+        SELECT id, title, image_uri
+        FROM tab_section
+        WHERE page_id = ?
+        LIMIT 1
+      `, [page_id]);
+
+      if (tabSection.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Tab section not found for this page'
+        });
+      }
+
+      const section = tabSection[0];
+
+      // Get all tabs for this section (children)
+      const [tabs] = await this.pool.query(`
+        SELECT id, tab_name, tab_text, tab_icon_url
+        FROM tabs
+        WHERE attached_to_tab = ?
+        ORDER BY id ASC
+      `, [section.id]);
+
+      const response = {
+        title: section.title || null,
+        image: section.image_uri ? section.image_uri : null,
+        tabs: tabs.map(tab => ({
+          id: tab.id.toString(),
+          label: tab.tab_name || null,
+          icon: tab.tab_icon_url ? '/uploads/featured_services/' + tab.tab_icon_url : null,
+          content: tab.tab_text || null
+        }))
+      };
+
+      const processedData = await replaceTokensInObject(this.pool, response);
+
+      res.json({
+        success: true,
+        data: processedData
+      });
+
+    } catch (error) {
+      console.error('Error fetching tab section:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch tab section',
+        error: error.message
+      });
+    }
+  }
 }
 
 module.exports = HelperController;
