@@ -248,7 +248,13 @@ const normalizeUrl = (url, fallback) => {
 
 const isTbcDate = (dateValue) => {
   const raw = String(dateValue || '').trim();
-  return raw.startsWith('0000-00-00') || raw.startsWith('1111-11-11');
+  return (
+    raw.startsWith('0000-00-00') ||
+    raw.startsWith('1111-11-11') ||
+    raw.startsWith('11/11/1111') ||
+    raw === '1111-11-11' ||
+    raw === '11/11/1111'
+  );
 };
 
 exports.sendBookingConfirmation = async (bookingData, pool) => {
@@ -315,6 +321,13 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const hasTbc = event_dates.some(d => isTbcDate(d.event_date));
   const dateRows = event_dates
     .filter(d => !isTbcDate(d.event_date))
+    .sort((a, b) => {
+      const dateA = new Date(a.event_date);
+      const dateB = new Date(b.event_date);
+      const tsA = Number.isNaN(dateA.getTime()) ? Number.MAX_SAFE_INTEGER : dateA.getTime();
+      const tsB = Number.isNaN(dateB.getTime()) ? Number.MAX_SAFE_INTEGER : dateB.getTime();
+      return tsA - tsB;
+    })
    .map((d) => {
     const meeting = formatTime12h(minusMinutes(d.event_start_time, 15));
     const start = formatTime12h(d.event_start_time);
