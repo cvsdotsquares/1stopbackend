@@ -315,7 +315,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const mailOptions = {
    from: process.env.SMTP_USER,
    to: attendeeEmails,
-   bcc: bcc || 'bookings@1stopinstruction.com',
+   bcc: process.env.BOOKING_BCC,
    subject: `${course_name} Booking confirmation`,
    html: `<!Doctype html>
 <html>

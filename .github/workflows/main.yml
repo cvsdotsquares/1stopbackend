@@ -47,6 +47,7 @@ jobs:
             SMTP_PASS=${{ secrets.SMTP_PASS }}
             CONTACT_TO=${{ secrets.CONTACT_TO }}
             CONTACT_FROM=${{ secrets.CONTACT_FROM }}
+            BOOKING_BCC=${{ secrets.BOOKING_BCC }}
             WORLDPAY_INST_ID=${{ secrets.WORLDPAY_INST_ID }}
             WORLDPAY_MD5_SECRET=${{ secrets.WORLDPAY_MD5_SECRET }}
             WORLDPAY_TEST_MODE=${{ secrets.WORLDPAY_TEST_MODE }}
