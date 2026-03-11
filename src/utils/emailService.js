@@ -266,7 +266,13 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    ip
   } = bookingData;
 
-  const attendeeEmails = attendees.map(a => a.email).filter(Boolean).join(', ');
+  const attendeeEmailList = attendees
+    .map(a => String(a?.email || '').trim())
+    .filter(Boolean);
+  const attendeeEmails = attendeeEmailList.join(', ');
+  if (attendeeEmailList.length === 0) {
+    throw new Error('No attendee email found for booking confirmation');
+  }
   const firstAttendee = attendees[0] || {};
   const firstName = firstAttendee.first_name || 'Customer';
   const pupil = `${firstAttendee.first_name || ''} ${firstAttendee.sur_name || ''}`.trim();
@@ -312,10 +318,12 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    ? `${siteUrl}maps/${location.direction_map}`
    : `${siteUrl}images/no-map.jpg`;
 
+  const resolvedBcc = String(bcc || process.env.BOOKING_BCC || '').trim() || undefined;
+
   const mailOptions = {
    from: process.env.SMTP_USER,
-   to: attendeeEmails,
-   bcc: process.env.BOOKING_BCC,
+   to: attendeeEmailList,
+   bcc: resolvedBcc,
    subject: `${course_name} Booking confirmation`,
    html: `<!Doctype html>
 <html>
@@ -529,11 +537,25 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   };
 
   let emailStatus = 0;
+  let deliveryMeta = null;
   try {
-    await transporter.sendMail(mailOptions);
+    const sentInfo = await transporter.sendMail(mailOptions);
+    deliveryMeta = {
+      messageId: sentInfo?.messageId || null,
+      accepted: sentInfo?.accepted || [],
+      rejected: sentInfo?.rejected || [],
+      response: sentInfo?.response || null
+    };
+    console.log('Booking email delivery info:', deliveryMeta);
     emailStatus = 1;
   } catch (error) {
     console.error('Error sending booking confirmation email:', error);
+    if (error?.response) {
+      console.error('SMTP response:', error.response);
+    }
+    if (error?.rejected) {
+      console.error('SMTP rejected recipients:', error.rejected);
+    }
     emailStatus = 0;
   } finally {
     if (pool) {
@@ -543,10 +565,10 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           attendeeEmails,
-          bcc || 'bookings@1stopinstruction.com',
+          resolvedBcc || '',
           process.env.SMTP_USER,
           mailOptions.subject,
-          mailOptions.html,
+          `${mailOptions.html}\n\n<!-- delivery_meta: ${escapeHtml(JSON.stringify(deliveryMeta || {}))} -->`,
           emailStatus,
           'Booking Mail',
           booking_ref,
