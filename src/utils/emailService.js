@@ -198,77 +198,327 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
   return { success: emailStatus === 1, status: emailStatus };
 };
 
-exports.sendBookingConfirmation = async (bookingData, pool) => {
-  const { course_name, booking_ref, attendees, location, event_dates, payment, ip } = bookingData;
+const escapeHtml = (value) => String(value || '')
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#39;');
 
-  const attendeeEmails = attendees.map(a => a.email).join(', ');
-  const firstName = attendees[0]?.first_name || 'Customer';
+const formatCurrency = (amount) => {
+  const parsed = Number.parseFloat(amount || 0);
+  return `£${Number.isFinite(parsed) ? parsed.toFixed(2) : '0.00'}`;
+};
+
+const formatTime12h = (timeString) => {
+  if (!timeString) return 'TBC';
+  const parts = String(timeString).split(':');
+  if (parts.length < 2) return 'TBC';
+  const hours = Number.parseInt(parts[0], 10);
+  const minutes = Number.parseInt(parts[1], 10);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 'TBC';
+  const suffix = hours >= 12 ? 'pm' : 'am';
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, '0')} ${suffix}`;
+};
+
+const minusMinutes = (timeString, minutesToMinus = 15) => {
+  if (!timeString) return null;
+  const parts = String(timeString).split(':');
+  if (parts.length < 2) return null;
+  const hours = Number.parseInt(parts[0], 10);
+  const minutes = Number.parseInt(parts[1], 10);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  let totalMinutes = (hours * 60 + minutes) - minutesToMinus;
+  while (totalMinutes < 0) totalMinutes += 24 * 60;
+  const hh = Math.floor(totalMinutes / 60);
+  const mm = totalMinutes % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
+};
+
+const normalizeUrl = (url, fallback) => {
+  const value = String(url || '').trim();
+  if (!value) return fallback;
+  if (/^https?:\/\//i.test(value)) {
+   return value.replace(/^http:\/\//i, 'https://').replace('http://https://', 'https://');
+  }
+  return `https://${value}`;
+};
+
+exports.sendBookingConfirmation = async (bookingData, pool) => {
+  const {
+   course_name,
+   booking_ref,
+   booking_type = 'o',
+   refundable = 0,
+   attendees = [],
+   location = {},
+   event_dates = [],
+   booking = {},
+   course_email_content = '',
+   franchise = {},
+   bcc,
+   ip
+  } = bookingData;
+
+  const attendeeEmails = attendees.map(a => a.email).filter(Boolean).join(', ');
+  const firstAttendee = attendees[0] || {};
+  const firstName = firstAttendee.first_name || 'Customer';
+  const pupil = `${firstAttendee.first_name || ''} ${firstAttendee.sur_name || ''}`.trim();
+
+  const vehicleTypeMap = {
+   0: 'Manual',
+   1: 'Automatic',
+   3: 'I will be using my own vehicle'
+  };
+  const pupilVehicle = vehicleTypeMap[firstAttendee.vehicle_type] || '';
+
+  const paidAmount = (Number.parseFloat(booking.total_amount || 0) - Number.parseFloat(booking.payment_due || 0));
+  const balanceAmount = Number.parseFloat(booking.payment_due || 0);
+
+  const siteUrl = normalizeUrl(process.env.SITE_URL, 'https://1stopinstruction.com/').replace(/\/$/, '/');
+  const headerPath = franchise.email_header
+   ? `${siteUrl}admin/uploads/${franchise.email_header}`
+   : `${siteUrl}images/header-img.jpg`;
+  const footerPath = franchise.email_footer
+   ? `${siteUrl}admin/uploads/${franchise.email_footer}`
+   : `${siteUrl}images/footer-img.jpg`;
+  const logoPath = franchise.email_logo
+   ? `${siteUrl}admin/uploads/${franchise.email_logo}`
+   : `${siteUrl}images/logo.png`;
+  const logoWebPath = normalizeUrl(franchise.website, siteUrl);
+
+  const hasTbc = event_dates.some(d => d.event_date === '0000-00-00' || d.event_date === '1111-11-11');
+  const dateRows = event_dates
+   .filter(d => d.event_date !== '0000-00-00' && d.event_date !== '1111-11-11')
+   .map((d) => {
+    const meeting = formatTime12h(minusMinutes(d.event_start_time, 15));
+    const start = formatTime12h(d.event_start_time);
+    return `
+    <tr>
+      <td>${escapeHtml(formatMySQLDateToDDMMYYYY(d.event_date))}</td>
+      <td><span class="aQJ">${escapeHtml(meeting)}</span></td>
+      <td><span class="aQJ">${escapeHtml(start)}</span></td>
+    </tr>`;
+   }).join('');
+
+  const directionMapImage = location.direction_map
+   ? `${siteUrl}maps/${location.direction_map}`
+   : `${siteUrl}images/no-map.jpg`;
 
   const mailOptions = {
-    from: process.env.SMTP_USER,
-    to: attendeeEmails,
-    bcc: 'bookings.testds@yopmail.com',
-    subject: `${course_name} Booking confirmation`,
-    html: `<!DOCTYPE html>
+   from: process.env.SMTP_USER,
+   to: attendeeEmails,
+   bcc: bcc || 'bookings@1stopinstruction.com',
+   subject: `${course_name} Booking confirmation`,
+   html: `<!Doctype html>
 <html>
-<head>
-  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-  <title>1stopinstruction.com</title>
-</head>
-<body style="margin:0; padding:0;">
-  <div align="center">
-    <table width="800" border="0" align="center" style="background: #f5f5f5; border: 1px solid #e0e0e0; padding: 5px;">
-      <tr>
-        <td><img src="https://1stopinstruction.com/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
-      </tr>
-      <tr>
-        <td style="background: #ffffff; padding: 10px;">
-          <p style="font-size:9pt;font-family:Arial,sans-serif">
-            <span style="float:right;"><strong>Booking Ref</strong>: ${booking_ref}</span>
-          </p>
-          <p style="font-size:9pt;font-family:Arial,sans-serif">Dear ${firstName},</p>
-          <p style="font-size:9pt;font-family:Arial,sans-serif">Thank you for booking your ${course_name} with 1 Stop Instruction.</p>
-          <p style="font-size:9pt;font-family:Arial,sans-serif">Please note your booking confirmation details below:</p>
-
-          <table width="99%" style="font-size:9pt;font-family:Arial,sans-serif">
-            <tr>
-              <td width="15%"><strong>Name:</strong><br><strong>Course:</strong><br><strong>Payment:</strong></td>
-              <td width="50%">${attendees.map(a => `${a.first_name} ${a.sur_name}`).join('<br>')}<br>${course_name}<br>£${payment.total_amount}</td>
-              <td width="20%"><strong>Payment Received:</strong><br><strong>Balance Outstanding:</strong></td>
-              <td width="15%" style="text-align:right">£${payment.paid}<br>£${payment.balance}</td>
-            </tr>
-          </table>
-
-          <p style="font-size:9pt;font-family:Arial,sans-serif"><strong><u>Course Location</u></strong><br>
-          ${location.name}<br>${location.address}</p>
-
-          <p style="font-size:9pt;font-family:Arial,sans-serif"><strong><u>Date & Time</u></strong><br>
-          ${event_dates.map(d => `${formatMySQLDateToDDMMYYYY(d.date)} - ${d.start_time}`).join('<br>')}</p>
-
-          <div style="font-size:9pt;font-family:Arial,sans-serif">
-            <p>Please ensure that you carefully read your booking confirmation details, and in the unlikely event that any details are incorrect, please contact us at the earliest opportunity.</p>
-            <p><strong>YOU MUST:</strong></p>
-            <ul>
-              <li>Arrive on time for the beginning of your course</li>
-              <li>Bring your original UK photocard driving licence</li>
-              <li>Bring appropriate clothing and equipment</li>
-              <li>Read our <a href="https://www.1stopinstruction.com/termsandconditions.php">terms and conditions</a></li>
-            </ul>
-          </div>
-
-          <p style="font-size:9pt;font-family:Arial,sans-serif">Kind Regards,<br><strong>1 Stop Instruction</strong></p>
-          <p style="font-size:8pt;font-family:Arial,sans-serif;color:#666">Booking IP: ${ip}</p>
-        </td>
-      </tr>
-      <tr>
-        <td style="text-align:center;background:#e6e6e8;padding:10px;">
-          <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
-          <img src="https://1stopinstruction.com/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
-        </td>
-      </tr>
-    </table>
-  </div>
-</body>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <title>1stopinstruction.com</title>
+  </head>
+  <body style="margin:0; padding:0;">
+    <div align="center">
+      <table width="800" border="0" align="center" style="background: #f5f5f5 none repeat scroll 0 0; border: 1px solid #e0e0e0; padding: 5px;">
+        <tbody>
+          <tr>
+            <td class="header">
+              <img src="${escapeHtml(headerPath)}" width="784" height="177" alt="1stopinstruction"/>
+            </td>
+          </tr>
+          <tr>
+            <td class="content">
+              <table width="100%" border="0" style="background: #ffffff none repeat scroll 0 0;padding: 10px; margin:0;">
+                <tbody>
+                  <tr>
+                    <td style="font-size:9.0pt;font-family:Arial,sans-serif">
+                      <span style="float:right;">
+                      <strong>Booking Ref</strong>: ${escapeHtml(booking_ref)} - ${escapeHtml(String(booking_type).charAt(0))}
+                      </span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="font-size:9.0pt;font-family:Arial,sans-serif">
+                      <span style=" float:left;">
+                      Dear ${escapeHtml(firstName)},
+                      </span>
+                      ${Number(refundable) === 1
+      ? '<br><br><p style="color:red"><strong><i class="icon fa fa-ban"></i> You have taken longer than expected to make payment & complete your booking, so your reserved places have not been booked. Please contact to the website administrator to arrange a refund.<strong></p>'
+      : ''}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="font-size:9.0pt;font-family:Arial,sans-serif">
+                      <p>Thank you for booking your ${escapeHtml(course_name)} Course with 1 Stop Instruction.</p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="font-size:9.0pt;font-family:Arial,sans-serif">
+                      <p style="margin-top:0px">Please note your booking confirmation details below:</p>
+                      <table cellspacing="0" cellpadding="0" border="0" width="99%" style="width:99.0%">
+                        <tbody>
+                          <tr style="height:48.75pt">
+                            <td width="9%" style="width:9.0%;padding:0in 0in 0in 0in;height:48.75pt">
+                              <p class="MsoNormal"><span><b><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Name:</span></b></span><b><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
+                                <span>Course:</span><br>
+                                <span>Vehicle:</span></span></b><span style="font-size:9.5pt;font-family:Arial,sans-serif"><u></u><u></u></span>
+                              </p>
+                            </td>
+                            <td width="56%" style="width:56.0%;padding:0in 0in 0in 0in;height:48.75pt">
+                              <p class="MsoNormal"><span><span style="font-size:9.0pt;font-family:Arial,sans-serif">${escapeHtml(pupil)}</span></span><span style="font-size:9.0pt;font-family:Arial,sans-serif"><br>
+                                <span>${escapeHtml(course_name)}</span><br>
+                                <span>${escapeHtml(pupilVehicle)} </span></span>
+                              </p>
+                            </td>
+                            <td width="20%" style="width:20.0%;padding:0in 0in 0in 0in;height:48.75pt">
+                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Payment Received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
+                                <strong><span style="font-family:Arial,sans-serif">Balance Outstanding: </span></strong><u></u><u></u></span>
+                              </p>
+                            </td>
+                            <td width="12%" style="text-align: right;width:12.0%;padding:0in 0in 0in 0in;height:48.75pt">
+                              <p class="MsoNormal"><span style="color: black;">${formatCurrency(paidAmount)}<br>
+                                ${formatCurrency(balanceAmount)}</span>
+                              </p>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="font-size:9.0pt;font-family:Arial,sans-serif">
+                      <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                        <tr>
+                          <td width="60%">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                              <tr>
+                                <td><strong><u>Course Location</u></strong></td>
+                              </tr>
+                              <tr>
+                                <td>
+                                  <div class="">${location.location_name ? `${escapeHtml(location.location_name)}<br>` : ''}</div>
+                                  <div class="">${location.address1 ? `${escapeHtml(location.address1)}<br>` : ''}</div>
+                                  <div class="">${location.address2 ? `${escapeHtml(location.address2)}<br>` : ''}</div>
+                                  <div class="">${location.address3 ? `${escapeHtml(location.address3)}<br>` : ''}</div>
+                                  <div class="">${location.address4 ? `${escapeHtml(location.address4)}<br>` : ''}</div>
+                                  <div class="">${escapeHtml(location.postcode || '')}</div>
+                                </td>
+                              </tr>
+                            </table>
+                          </td>
+                          <td align="right" valign="top">
+                            <table width="98%" border="0" cellspacing="0" cellpadding="0">
+                              <tr>
+                                <td width="24%"><strong><u>Date</u></strong></td>
+                                <td width="36%"><strong><u>Meeting Time</u></strong></td>
+                                <td width="33%"><strong><u>Start Time</u></strong></td>
+                              </tr>
+                              ${dateRows}
+                              ${hasTbc
+      ? `<tr>
+                                <td>TBC</td>
+                                <td>TBC</td>
+                                <td>TBC</td>
+                              </tr>
+                              <tr>
+                                <td colspan="3"> </td>
+                              </tr>
+                              <tr>
+                                <td colspan="3"><i>TBC = To be confirmed once Module 1 Test is passed</i></td>
+                              </tr>`
+      : ''}
+                            </table>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td> </td>
+                  </tr>
+                  <tr>
+                    <td style="font-size:9.0pt;font-family:Arial,sans-serif">
+                      ${course_email_content || ''}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <table width="100%" border="0" cellspacing="0" cellpadding="0" style="font-family: arial; font-size: 12px;" >
+                        <tr>
+                          <td width="50%" height="20" valign="top"><b>Directions</b></td>
+                          <td width="50%" rowspan="2" align="center" valign="top"><b>Map of Location</b><br>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td colspan="2"  valign="top" style="text-align:left;"><img src="${escapeHtml(directionMapImage)}" width="350" style="float:right; margin:10px 0 10px 10px;" alt="Direction Map"/>${location.direction_content || ''} </td>
+                        </tr>
+                        <tr>
+                          <td colspan="2">Finally, we trust that all the information you require is listed in this email, and we hope that you enjoy your course, but should you have any questions in the meantime, please do not hesitate to contact us.</td>
+                        </tr>
+                        <tr>
+                          <td style="color:#ff6600"> </td>
+                          <td> </td>
+                        </tr>
+                        <tr>
+                          <td style="color:black;">Kind Regards,</td>
+                          <td> </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <table width="100%" border="0">
+                        <tbody>
+                          <tr>
+                            <td>
+                              <p class="MsoNormal" style="margin: 10px 0px; font-family: arial;"><span><b><i><span style="font-size:13.5pt">1 Stop Instruction</span></i></b></span><span style="font-size:9.5pt;font-family:Arial,sans-serif"><u></u><u></u></span></p>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td>
+                              <table cellspacing="0" cellpadding="0" border="0" width="99%" style="width:99.0%">
+                                <tbody>
+                                  <tr>
+                                    <td align="left" valign="middle">
+                                      <a href="${escapeHtml(logoWebPath)}"><img src="${escapeHtml(logoPath)}" width="90"  alt="1stopinstruction" /></a>
+                                    </td>
+                                    <td width="45%" valign="top" style="width:45.0%;padding:0in 0in 0in 0in">
+                                      <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:navy">Contact:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:#09016e"><br>
+                                        </span><span><span style="font-size:9.0pt;color:navy; font-family:Arial,sans-serif">Tel: <a target="_blank" href="tel:${escapeHtml(franchise.telephone || '')}">${escapeHtml(franchise.telephone || '')}</a></span></span><span style="line-height: 20px; font-size:9.0pt;font-family:Arial,sans-serif;color:navy"><br>
+                                        <span>Freephone: <a target="_blank" href="tel:${escapeHtml(franchise.freephone || '')}">${escapeHtml(franchise.freephone || '')}</a></span><br>
+                                        <span>Email: <a target="_blank" href="mailto:${escapeHtml(franchise.franchise_email || '')}">${escapeHtml(franchise.franchise_email || '')}</a> </span><br>
+                                        <span>Web: <a target="_blank" href="${escapeHtml(normalizeUrl(franchise.website, siteUrl))}">${escapeHtml(franchise.website || '')}</a></span></span><span style="font-size:9.5pt;font-family:Arial,sans-serif"><u></u><u></u></span>
+                                      </p>
+                                    </td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="footer">
+              <p align="center" style="text-align:center;background:#e6e6e8" class="MsoNormal"><span><b><i><span style="font-size:10.0pt;font-family:Arial,sans-serif">"Roadcraft professionals for all categories of driving"</span></i></b></span><b><span style="font-size:9.5pt;font-family:Arial, sans-serif"><u></u><u></u></span></b></p>
+              <p style="font-family: Arial, sans-serif; text-align:center; font-size:9.5pt;">Please visit our website for <a href="${escapeHtml(`${siteUrl}contactus.php`)}">directions</a> and our <a href="${escapeHtml(`${siteUrl}termsandconditions.php`)}">terms &amp; conditions </a></p>
+              <p style="margin-bottom:0;">
+                <img src="${escapeHtml(footerPath)}" width="786" height="55" alt="1stopinstruction"/>
+              </p>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="display:none">Booking IP: ${escapeHtml(ip || '')}</div>
+  </body>
 </html>`
   };
 
@@ -287,7 +537,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           attendeeEmails,
-          'bookings.testds@yopmail.com',
+          bcc || 'bookings@1stopinstruction.com',
           process.env.SMTP_USER,
           mailOptions.subject,
           mailOptions.html,
