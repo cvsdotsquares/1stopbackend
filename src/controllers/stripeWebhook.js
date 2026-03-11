@@ -1,6 +1,7 @@
 // src/controllers/stripeWebhook.js
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendGiftVoucherEmail } = require('../utils/emailService');
+const { formatDateToDDMMYYYY } = require('../utils/dateFormat');
 
 class StripeWebhookController {
   constructor(pool) {
@@ -497,7 +498,7 @@ class StripeWebhookController {
 
       const vData = vouchers[0];
       const paidAmount = (paymentIntent.amount_received || paymentIntent.amount) / 100;
-      const voucherDate = new Date().toLocaleDateString('en-GB');
+      const voucherDate = formatDateToDDMMYYYY(new Date());
 
       // Insert into gift_voucher with unique reference
       console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
@@ -634,7 +635,7 @@ class StripeWebhookController {
 
       // Generate unique voucher_ref using bid (each bid is unique)
       const uniqueVoucherRef = `1SGV${vData.bid} - OGV`;
-      const voucherDate = new Date().toLocaleDateString('en-GB');
+      const voucherDate = formatDateToDDMMYYYY(new Date());
 
       // Insert into gift_voucher with unique reference
       console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);

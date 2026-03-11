@@ -27,9 +27,10 @@ class PriceCalculationController {
         };
       });
 
-      // Determine if deposit is required
-      const depositRequired = apply_deposit_logic ? 
-        this.shouldChargeDeposit(courseEvent, courseEvent.course_event_dates) : false;
+      // Determine if deposit is available
+      const depositResult = apply_deposit_logic ?
+        this.shouldChargeDeposit(courseEvent, courseEvent.course_event_dates) : { allowed: false, note: null };
+      const depositRequired = typeof depositResult === 'boolean' ? depositResult : depositResult.allowed;
 
       // Calculate totals
       const subtotal = attendeePrices.reduce((sum, price) => sum + price.total, 0);
@@ -57,7 +58,9 @@ class PriceCalculationController {
         pricing_breakdown: {
           base_prices: attendeePrices,
           deposit_required: depositRequired,
-          deposit_reason: depositRequired ? 'Course starts within deposit period' : 'Full payment required',
+          deposit_days: courseEvent.course?.deposit_days || 0,
+          deposit_note: depositResult.note || null,
+          deposit_reason: depositRequired ? 'Deposit payment - course is far enough from start date' : 'Full payment required - course starts within deposit period',
           promo_discount: {
             applied: !!promoData,
             type: promoData?.p_c_discount_type || null,
@@ -87,7 +90,7 @@ class PriceCalculationController {
 
   async getCourseEventWithRelations(courseEventId) {
     const query = `
-      SELECT 
+      SELECT
         ce.*,
         c.course_name, c.deposit_days, c.dsa_fees,
         f.vat, f.franchise_name, f.payment_directly,
@@ -166,28 +169,69 @@ class PriceCalculationController {
   }
 
   shouldChargeDeposit(courseEvent, courseEventDates) {
-    // Check if deposit is enabled
-    if (courseEvent.school_deposit_price <= 0 || !courseEvent.is_deposit) {
-      return false;
+    console.log('💰 [DEPOSIT CALC] Starting deposit calculation...');
+    console.log('💰 [DEPOSIT CALC] school_deposit_price:', courseEvent.school_deposit_price);
+    console.log('💰 [DEPOSIT CALC] is_deposit (period check enabled):', courseEvent.is_deposit);
+
+    const depositDays = Number.parseInt(courseEvent.course?.deposit_days) || 0;
+
+    // Check if deposit pricing is configured
+    if (courseEvent.school_deposit_price <= 0) {
+      console.log('❌ [DEPOSIT CALC] No deposit configured - school_deposit_price is 0');
+      return { allowed: false, note: 'No deposit pricing configured for this course.' };
     }
+
+    // If is_deposit = 0 (unchecked), deposit period check is DISABLED - always allow deposit
+    if (!courseEvent.is_deposit || courseEvent.is_deposit === 0) {
+      console.log('✅ [DEPOSIT CALC] DEPOSIT ALLOWED - Period check disabled (is_deposit=0)');
+      return { allowed: true, note: null };
+    }
+
+    // If is_deposit = 1 (checked), ENFORCE deposit period check using deposit_days
+    console.log('💰 [DEPOSIT CALC] Period check ENABLED - checking course dates...');
+    console.log('💰 [DEPOSIT CALC] courseEventDates:', courseEventDates);
 
     // Get earliest course date
     const validDates = courseEventDates
-      .filter(date => date.event_date !== '0000-00-00')
+      .filter(date => date.event_date !== '0000-00-00' && date.event_date !== '1111-11-11')
       .map(date => new Date(date.event_date))
       .sort((a, b) => a - b);
 
+    console.log('💰 [DEPOSIT CALC] validDates:', validDates);
+
     if (validDates.length === 0) {
-      return false;
+      console.log('❌ [DEPOSIT CALC] No valid dates found - requiring full payment');
+      return { allowed: false, note: 'Deposit option is unavailable as the course dates are yet to be confirmed.' };
     }
 
     const firstDate = validDates[0];
-    const depositPeriod = courseEvent.course.deposit_days;
-    const depositCalcDate = new Date();
-    depositCalcDate.setDate(depositCalcDate.getDate() + depositPeriod + 1);
+    const depositPeriod = depositDays;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const courseStartDate = new Date(firstDate);
+    courseStartDate.setHours(0, 0, 0, 0);
+    const diffTime = courseStartDate.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-    // If course starts after deposit period, charge deposit only
-    return depositCalcDate <= firstDate;
+    console.log('💰 [DEPOSIT CALC] First course date:', firstDate);
+    console.log('💰 [DEPOSIT CALC] Deposit period (days):', depositPeriod);
+    console.log('💰 [DEPOSIT CALC] Today:', today);
+    console.log('💰 [DEPOSIT CALC] Days until course:', diffDays);
+    console.log('💰 [DEPOSIT CALC] Comparison: diffDays > depositPeriod:', diffDays > depositPeriod);
+
+    // If days until course > deposit_days, deposit is allowed
+    // If days until course <= deposit_days, require full payment
+    const shouldCharge = diffDays > depositPeriod;
+    console.log(shouldCharge ? '✅ [DEPOSIT CALC] DEPOSIT ALLOWED - Course is far enough away' : '⚠️ [DEPOSIT CALC] FULL PAYMENT REQUIRED - Course starts too soon');
+
+    if (shouldCharge) {
+      return { allowed: true, note: null };
+    } else {
+      return {
+        allowed: false,
+        note: `Deposit option is only available when booking at least ${depositPeriod} days before the course start date. Full payment is required for this date.`
+      };
+    }
   }
 
   applyPromoDiscount(baseAmount, promoData, attendeeCount) {
@@ -220,8 +264,8 @@ class PriceCalculationController {
     }
 
     // DSA fees are VAT exempt
-    const vatableAmount = amount >= course.dsa_fees 
-      ? (amount - course.dsa_fees) 
+    const vatableAmount = amount >= course.dsa_fees
+      ? (amount - course.dsa_fees)
       : amount;
 
     const vatMultiplier = (100 + vatRate) / 100;
@@ -237,11 +281,11 @@ class PriceCalculationController {
 
   async getPromoCode(promoCodeId) {
     const query = `
-      SELECT * FROM promos 
+      SELECT * FROM promos
       WHERE id = ? AND status = 1 AND isDeleted = 0
       AND (p_c_expiry = 0 OR p_c_expiry_date >= CURDATE())
     `;
-    
+
     const [rows] = await this.pool.execute(query, [promoCodeId]);
     return rows[0] || null;
   }
@@ -256,7 +300,7 @@ class PriceCalculationController {
   async validateCourseEvent(req, res) {
     try {
       const { course_event_id } = req.params;
-      
+
       const courseEvent = await this.getCourseEventWithRelations(course_event_id);
       if (!courseEvent) {
         return res.status(404).json({
@@ -266,10 +310,10 @@ class PriceCalculationController {
       }
 
       // Check if event has valid pricing
-      const hasValidPricing = 
-        courseEvent.school_one_off_price > 0 || 
+      const hasValidPricing =
+        courseEvent.school_one_off_price > 0 ||
         courseEvent.own_one_off_price > 0 ||
-        courseEvent.school_deposit_price > 0 || 
+        courseEvent.school_deposit_price > 0 ||
         courseEvent.own_deposit_price > 0;
 
       if (!hasValidPricing) {
@@ -306,7 +350,7 @@ class PriceCalculationController {
   async getPricingOptions(req, res) {
     try {
       const { course_event_id } = req.params;
-      
+
       const courseEvent = await this.getCourseEventWithRelations(course_event_id);
       if (!courseEvent) {
         return res.status(404).json({

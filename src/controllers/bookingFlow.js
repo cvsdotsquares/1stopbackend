@@ -67,18 +67,30 @@ class BookingFlowController {
         });
       }
 
-      // Include current_locks in availability calculation
+      // Get all course event dates with availability info
       const [events] = await this.pool.query(`
         SELECT
           ced.course_event_id,
-          ced.event_date,
-          ced.event_start_time,
-          ced.event_end_time,
+          DATE_FORMAT(ced.event_date, '%Y-%m-%d') as event_date,
+          TIME_FORMAT(ced.event_start_time, '%H:%i') as event_start_time,
+          TIME_FORMAT(ced.event_end_time, '%H:%i') as event_end_time,
+          ced.freeze,
           ce.booking_limit,
           ce.bookings_done,
           ce.current_locks,
           ce.event_type,
+          ce.is_deposit,
+          ce.vehicle_type_manual,
+          ce.vehicle_type_automatic,
+          ce.vehicle_type_own,
+          ce.school_one_off_price,
+          ce.school_deposit_price,
+          ce.school_total_price,
+          ce.own_one_off_price,
+          ce.own_deposit_price,
+          ce.own_total_price,
           c.course_name,
+          c.deposit_days,
           COALESCE(f.freeze_count, 0) as freeze_count
         FROM course_event_dates ced
         JOIN course_events ce ON ced.course_event_id = ce.id
@@ -92,10 +104,14 @@ class BookingFlowController {
           AND ce.location_id = ?
           AND c.status = '1'
           AND ce.status = '1'
-          AND (ce.bookings_done + COALESCE(ce.current_locks, 0)) < ce.booking_limit
-          AND ced.event_date > CURDATE()
-          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
-        ORDER BY ced.event_date ASC
+          AND ced.course_event_id IN (
+            SELECT DISTINCT course_event_id
+            FROM course_event_dates
+            WHERE event_date > CURDATE()
+              AND event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
+              AND event_date != '1111-11-11'
+          )
+        ORDER BY ced.event_date ASC, ced.event_start_time ASC
       `, [course_id, location_id]);
 
       if (events.length === 0) {
@@ -105,22 +121,187 @@ class BookingFlowController {
         });
       }
 
-      const availability = events.map(event => {
-        const availableSpaces = event.booking_limit - event.bookings_done - (event.current_locks || 0);
-        const isFullyBooked = (event.bookings_done + (event.current_locks || 0)) >= event.booking_limit;
-        const isFrozen = event.freeze_count > 0;
+      // Group dates by course_event_id to get multi-day courses
+      const groupedEvents = {};
+      events.forEach(event => {
+        const eventId = event.course_event_id;
+        if (!groupedEvents[eventId]) {
+          groupedEvents[eventId] = {
+            course_event_id: eventId,
+            course_name: event.course_name,
+            booking_limit: event.booking_limit,
+            bookings_done: event.bookings_done,
+            current_locks: event.current_locks || 0,
+            is_deposit: event.is_deposit,
+            vehicle_type_manual: event.vehicle_type_manual,
+            vehicle_type_automatic: event.vehicle_type_automatic,
+            vehicle_type_own: event.vehicle_type_own,
+            school_one_off_price: event.school_one_off_price,
+            school_deposit_price: event.school_deposit_price,
+            school_total_price: event.school_total_price,
+            own_one_off_price: event.own_one_off_price,
+            own_deposit_price: event.own_deposit_price,
+            own_total_price: event.own_total_price,
+            deposit_days: event.deposit_days,
+            dates: []
+          };
+        }
 
-        return {
-          date: event.event_date,
+        // Check for TBC dates (either 0000-00-00 or 1111-11-11)
+        const isTBC = event.event_date === '0000-00-00' || event.event_date === '1111-11-11';
+
+        groupedEvents[eventId].dates.push({
+          event_date: event.event_date, // Keep original for sorting
+          display_date: isTBC ? 'TBC' : event.event_date,
+          event_start_time: isTBC ? null : event.event_start_time,
+          event_end_time: isTBC ? null : event.event_end_time,
+          is_tbc: isTBC,
+          freeze: event.freeze,
+          freeze_count: event.freeze_count
+        });
+      });
+
+      // Build calendar data with "X Day Course" logic
+      const availability = [];
+      Object.values(groupedEvents).forEach(eventGroup => {
+        const availableSpaces = eventGroup.booking_limit - eventGroup.bookings_done - eventGroup.current_locks;
+        const isFullyBooked = (eventGroup.bookings_done + eventGroup.current_locks) >= eventGroup.booking_limit;
+
+        // Sort dates: real dates chronologically first, then TBC dates at the end
+        const sortedDates = eventGroup.dates.sort((a, b) => {
+          // TBC dates go to the end
+          if (a.is_tbc && !b.is_tbc) return 1;
+          if (!a.is_tbc && b.is_tbc) return -1;
+          // Both TBC or both real - sort by date
+          if (a.event_date < b.event_date) return -1;
+          if (a.event_date > b.event_date) return 1;
+          return 0;
+        });
+
+        // Find first non-TBC date for calendar display
+        const firstRealDate = sortedDates.find(d => !d.is_tbc) || sortedDates[0];
+        const isFrozen = firstRealDate.freeze === 1 || firstRealDate.freeze_count > 0;
+
+        // Calculate number of days for this course
+        const numberOfDays = sortedDates.length;
+
+        // Build pricing object based on which pricing fields are configured
+        const pricing = {
+          vehicle_options: {
+            school_vehicle_available: eventGroup.vehicle_type_manual > 0 || eventGroup.vehicle_type_automatic > 0,
+            own_vehicle_available: eventGroup.vehicle_type_own === 1
+          }
+        };
+
+        // Priority 1: Check if one-off pricing is configured
+        const hasOneOffPricing = (eventGroup.school_one_off_price > 0) || (eventGroup.own_one_off_price > 0);
+
+        // Priority 2: Check if deposit pricing is configured
+        const hasDepositPricing = (eventGroup.school_deposit_price > 0) || (eventGroup.own_deposit_price > 0);
+
+        // === Deposit eligibility calculation based on deposit_days ===
+        const depositDays = Number.parseInt(eventGroup.deposit_days) || 0;
+        const isDepositEnabled = eventGroup.is_deposit === 1;
+        let depositAvailable = false;
+        let depositNote = null;
+
+        if (isDepositEnabled && depositDays > 0) {
+          // Get the earliest non-TBC date to check against deposit_days
+          const firstNonTBCDate = sortedDates.find(d => !d.is_tbc);
+          if (firstNonTBCDate) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const courseStartDate = new Date(firstNonTBCDate.event_date);
+            courseStartDate.setHours(0, 0, 0, 0);
+            const diffTime = courseStartDate.getTime() - today.getTime();
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+            if (diffDays > depositDays) {
+              depositAvailable = true;
+            } else {
+              depositNote = `Deposit option is only available when booking at least ${depositDays} days before the course start date. Full payment is required for this date.`;
+            }
+          } else {
+            // All dates are TBC, cannot determine eligibility
+            depositNote = 'Deposit option is unavailable as the course dates are yet to be confirmed.';
+          }
+        } else if (!isDepositEnabled) {
+          // is_deposit is unchecked — deposit period check disabled, always allow deposit if pricing exists
+          depositAvailable = true;
+        }
+
+        if (hasOneOffPricing) {
+          // One-off pricing mode (full payment only)
+          pricing.pricing_mode = 'one_off';
+          pricing.deposit_period_check_enabled = isDepositEnabled;
+          pricing.deposit_available = false; // One-off means full payment only
+          pricing.deposit_days = depositDays;
+          pricing.deposit_note = 'This course requires full payment.';
+          pricing.school_vehicle = {
+            price: parseFloat(eventGroup.school_one_off_price) || 0,
+            pricing_type: 'one_off'
+          };
+          pricing.own_vehicle = {
+            price: parseFloat(eventGroup.own_one_off_price) || 0,
+            pricing_type: 'one_off'
+          };
+        } else if (hasDepositPricing) {
+          // Deposit pricing mode (deposit + balance)
+          pricing.pricing_mode = 'deposit';
+          pricing.deposit_period_check_enabled = isDepositEnabled;
+          pricing.deposit_available = depositAvailable;
+          pricing.deposit_days = depositDays;
+          pricing.deposit_note = depositNote;
+          pricing.school_vehicle = {
+            deposit: parseFloat(eventGroup.school_deposit_price) || 0,
+            total: parseFloat(eventGroup.school_total_price) || 0,
+            pricing_type: 'deposit'
+          };
+          pricing.own_vehicle = {
+            deposit: parseFloat(eventGroup.own_deposit_price) || 0,
+            total: parseFloat(eventGroup.own_total_price) || 0,
+            pricing_type: 'deposit'
+          };
+        } else {
+          // No pricing configured
+          pricing.pricing_mode = 'none';
+          pricing.deposit_period_check_enabled = false;
+          pricing.deposit_available = false;
+          pricing.deposit_days = 0;
+          pricing.deposit_note = null;
+          pricing.school_vehicle = {
+            price: 0,
+            pricing_type: 'none'
+          };
+          pricing.own_vehicle = {
+            price: 0,
+            pricing_type: 'none'
+          };
+        }
+
+        availability.push({
+          date: firstRealDate.display_date, // Show first date on calendar
+          event_start_time: firstRealDate.event_start_time,
+          event_end_time: firstRealDate.event_end_time,
+          course_event_id: eventGroup.course_event_id,
+          course_name: eventGroup.course_name,
+          number_of_days: numberOfDays, // For "X Day Course"
+          pricing: pricing, // Complete pricing information
+          all_dates: sortedDates.map((d, index) => ({
+            day_number: index + 1, // Day 1, Day 2, etc. (after sorting)
+            event_date: d.display_date, // 'TBC' or 'YYYY-MM-DD'
+            event_start_time: d.event_start_time,
+            event_end_time: d.event_end_time,
+            is_tbc: d.is_tbc
+          })), // All dates with times for this event
           available: !isFullyBooked && !isFrozen,
           available_spaces: Math.max(0, availableSpaces),
-          booking_limit: event.booking_limit,
-          bookings_done: event.bookings_done,
-          event_start_time: event.event_start_time,
-          event_end_time: event.event_end_time,
-          course_event_id: event.course_event_id,
-          freeze: isFrozen ? 1 : 0
-        };
+          booking_limit: eventGroup.booking_limit,
+          bookings_done: eventGroup.bookings_done,
+          current_locks: eventGroup.current_locks,
+          freeze: isFrozen ? 1 : 0,
+          status: isFullyBooked ? 'fully_booked' : (availableSpaces > 0 ? 'available' : 'not_available')
+        });
       });
 
       res.json({
@@ -633,6 +814,39 @@ class BookingFlowController {
         });
       }
 
+      // Validate p_c_for - existing customers only check
+      if (promo.p_c_for !== 'anyone') {
+        // If license_numbers array is provided, validate existing customers
+        const { license_numbers } = req.body;
+
+        if (!license_numbers || !Array.isArray(license_numbers) || license_numbers.length === 0) {
+          return res.json({
+            success: true,
+            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is only valid for existing customers' }
+          });
+        }
+
+        // Check if ALL license numbers have previous bookings
+        for (const license of license_numbers) {
+          if (!license || license.trim() === '') {
+            continue; // Skip empty licenses
+          }
+
+          const [bookings] = await this.pool.query(`
+            SELECT COUNT(*) as count FROM booking_attendees
+            WHERE license_number = ?
+          `, [license.trim()]);
+
+          if (bookings[0].count === 0) {
+            // At least one attendee is a new customer
+            return res.json({
+              success: true,
+              data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is only valid for existing customers' }
+            });
+          }
+        }
+      }
+
       // All validations passed
       res.json({
         success: true,
@@ -647,7 +861,8 @@ class BookingFlowController {
             franchise_specific: promo.p_c_franchise === 0,
             location_specific: promo.p_c_location === 0,
             min_bookings: promo.p_c_min_booking,
-            day_restrictions: promo.p_c_days === 0 ? promo.p_c_day : null
+            day_restrictions: promo.p_c_days === 0 ? promo.p_c_day : null,
+            existing_customers_only: promo.p_c_for !== 'anyone'
           }
         }
       });

@@ -2,7 +2,7 @@
 /**
  * Location Controller - handles training location operations
  */
-
+const { formatMySQLDateToDDMMYYYY } = require('../utils/dateFormat');
 class LocationController {
   constructor(pool) {
     this.pool = pool;

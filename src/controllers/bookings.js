@@ -1,6 +1,6 @@
 // src/controllers/bookings.js
 const { validationResult } = require('express-validator');
-
+const { formatMySQLDateToDDMMYYYY, formatDateToDDMMYYYY } = require('../utils/dateFormat');
 class BookingController {
   constructor(pool) {
     this.pool = pool;
@@ -462,9 +462,17 @@ class BookingController {
       const total = countResult[0].total;
       const totalPages = Math.ceil(total / limit);
 
+      // Format dates to DD/MM/YYYY
+      const formattedBookings = bookings.map(booking => ({
+        ...booking,
+        event_date: formatMySQLDateToDDMMYYYY(booking.event_date),
+        created: formatDateToDDMMYYYY(booking.created),
+        modified: formatDateToDDMMYYYY(booking.modified)
+      }));
+
       res.json({
         success: true,
-        data: bookings,
+        data: formattedBookings,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),

@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const { formatDateToDDMMYYYY, formatMySQLDateToDDMMYYYY } = require('./dateFormat');
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -242,7 +243,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
           ${location.name}<br>${location.address}</p>
 
           <p style="font-size:9pt;font-family:Arial,sans-serif"><strong><u>Date & Time</u></strong><br>
-          ${event_dates.map(d => `${d.date} - ${d.start_time}`).join('<br>')}</p>
+          ${event_dates.map(d => `${formatMySQLDateToDDMMYYYY(d.date)} - ${d.start_time}`).join('<br>')}</p>
 
           <div style="font-size:9pt;font-family:Arial,sans-serif">
             <p>Please ensure that you carefully read your booking confirmation details, and in the unlikely event that any details are incorrect, please contact us at the earliest opportunity.</p>
@@ -312,7 +313,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
   const { voucher_ref, voucher_person, voucher_email, subject, voucher_value, voucher_free_text, purchased_by, voucher_date, created } = voucherData;
 
   // Format the issue date (DD/MM/YYYY)
-  const issueDate = created ? new Date(created).toLocaleDateString('en-GB') : new Date().toLocaleDateString('en-GB');
+  const issueDate = created ? formatDateToDDMMYYYY(created) : formatDateToDDMMYYYY(new Date());
 
   // Get voucher terms from database
   let voucherTerms = '';
