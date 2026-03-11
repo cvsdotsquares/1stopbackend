@@ -245,6 +245,11 @@ const normalizeUrl = (url, fallback) => {
   return `https://${value}`;
 };
 
+const isTbcDate = (dateValue) => {
+  const raw = String(dateValue || '').trim();
+  return raw.startsWith('0000-00-00') || raw.startsWith('1111-11-11');
+};
+
 exports.sendBookingConfirmation = async (bookingData, pool) => {
   const {
    course_name,
@@ -276,7 +281,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const paidAmount = (Number.parseFloat(booking.total_amount || 0) - Number.parseFloat(booking.payment_due || 0));
   const balanceAmount = Number.parseFloat(booking.payment_due || 0);
 
-  const siteUrl = normalizeUrl(process.env.SITE_URL, 'https://1stopinstruction.com/').replace(/\/$/, '/');
+  const normalizedSiteUrl = normalizeUrl(process.env.SITE_URL, 'https://1stopinstruction.com/');
+  const siteUrl = normalizedSiteUrl.endsWith('/') ? normalizedSiteUrl : `${normalizedSiteUrl}/`;
   const headerPath = franchise.email_header
    ? `${siteUrl}admin/uploads/${franchise.email_header}`
    : `${siteUrl}images/header-img.jpg`;
@@ -288,9 +294,9 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    : `${siteUrl}images/logo.png`;
   const logoWebPath = normalizeUrl(franchise.website, siteUrl);
 
-  const hasTbc = event_dates.some(d => d.event_date === '0000-00-00' || d.event_date === '1111-11-11');
+  const hasTbc = event_dates.some(d => isTbcDate(d.event_date));
   const dateRows = event_dates
-   .filter(d => d.event_date !== '0000-00-00' && d.event_date !== '1111-11-11')
+    .filter(d => !isTbcDate(d.event_date))
    .map((d) => {
     const meeting = formatTime12h(minusMinutes(d.event_start_time, 15));
     const start = formatTime12h(d.event_start_time);
@@ -534,7 +540,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
       try {
         await pool.query(`
           INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, ip, created)
-          VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
+          VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           attendeeEmails,
           bcc || 'bookings@1stopinstruction.com',
