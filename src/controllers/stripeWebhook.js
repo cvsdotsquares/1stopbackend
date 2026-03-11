@@ -137,6 +137,14 @@ class StripeWebhookController {
 
         await connection.commit();
         console.log(`✅ Payment confirmed for booking ${booking_id}`);
+
+        // Send confirmation email ONLY after payment is confirmed
+        try {
+          await this.sendBookingConfirmationEmail(booking_id);
+        } catch (emailError) {
+          console.error('❌ Failed to send confirmation email for booking', booking_id, ':', emailError);
+          // Don't throw - email failure shouldn't fail the payment confirmation
+        }
       } catch (error) {
         await connection.rollback();
         console.error('Error:', error);
@@ -165,35 +173,52 @@ class StripeWebhookController {
     await connection.beginTransaction();
 
     try {
-      // Update booking status to cancelled (status = 3)
-      await connection.query(`
-        UPDATE bookings
-        SET status = 3,
-            modified = NOW()
-        WHERE id = ? AND status = 0
-      `, [booking_id]);
-
-      // Get booking details to release locks
-      const [bookingDetails] = await connection.query(`
-        SELECT course_event_id, spaces
+      // Get booking details with lock
+      const [bookings] = await connection.query(`
+        SELECT id, spaces, course_event_id, status, admin_payment_received
         FROM bookings
-        WHERE id = ?
+        WHERE id = ? FOR UPDATE
       `, [booking_id]);
 
-      if (bookingDetails.length > 0) {
-        const { course_event_id, spaces } = bookingDetails[0];
+      if (bookings.length === 0) {
+        console.log('No booking found for expired payment:', booking_id);
+        await connection.rollback();
+        return;
+      }
 
-        // Release locks
+      const booking = bookings[0];
+
+      // Only cleanup if booking hasn't been paid
+      if (booking.admin_payment_received > 0) {
+        console.log('Booking already paid, no cleanup needed:', booking_id);
+        await connection.rollback();
+        return;
+      }
+
+      console.log(`⏱️ Payment expired for booking ${booking_id} - initiating cleanup`);
+
+      // Release current_locks for this booking - CRITICAL
+      if (booking.course_event_id && booking.spaces) {
         await connection.query(`
           UPDATE course_events
           SET current_locks = GREATEST(0, current_locks - ?),
               modified = NOW()
           WHERE id = ?
-        `, [spaces, course_event_id]);
+        `, [booking.spaces, booking.course_event_id]);
+        console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
       }
 
+      // Delete attendee records (which also deletes booking references)
+      await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
+      await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
+      console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
+
+      // Delete booking
+      await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
+      console.log(`🗑️ Deleted booking ${booking.id}`);
+
       await connection.commit();
-      console.log(`Payment expired for booking ${booking_id}`);
+      console.log(`✅ Successfully cleaned up expired payment for booking ${booking.id}`);
 
     } catch (error) {
       await connection.rollback();
@@ -246,26 +271,39 @@ class StripeWebhookController {
       await connection.beginTransaction();
 
       try {
-        // Get booking details
+        // Get booking details with lock
         const [bookings] = await connection.query(`
           SELECT id, spaces, course_event_id FROM bookings
-          WHERE id = ? AND status = 0 AND admin_payment_received = 0
+          WHERE id = ? FOR UPDATE
         `, [booking_id]);
 
         if (bookings.length === 0) {
-          console.log('No unpaid booking found for payment intent:', paymentIntent.id);
+          console.log('No booking found for payment intent:', paymentIntent.id);
           await connection.rollback();
           return;
         }
 
         const booking = bookings[0];
+
+        // Check if booking is already paid or deleted
+        const [bookingStatus] = await connection.query(`
+          SELECT status, admin_payment_received FROM bookings WHERE id = ?
+        `, [booking_id]);
+
+        if (bookingStatus.length === 0 || bookingStatus[0].admin_payment_received > 0) {
+          console.log('Booking already processed or paid:', booking_id);
+          await connection.rollback();
+          return;
+        }
+
         console.log(`❌ Payment failed for booking ${booking.id} - initiating immediate cleanup`);
 
-        // Release current_locks for this booking
+        // Release current_locks for this booking - CRITICAL
         if (booking.course_event_id && booking.spaces) {
           await connection.query(`
             UPDATE course_events
-            SET current_locks = GREATEST(0, current_locks - ?)
+            SET current_locks = GREATEST(0, current_locks - ?),
+                modified = NOW()
             WHERE id = ?
           `, [booking.spaces, booking.course_event_id]);
           console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
@@ -288,6 +326,8 @@ class StripeWebhookController {
       } finally {
         connection.release();
       }
+    } else {
+      console.error('❌ No booking_id or gift voucher bid in payment failed metadata');
     }
   }
 
@@ -327,38 +367,51 @@ class StripeWebhookController {
       return;
     }
 
-    // Handle regular booking payment cancellation - immediate cleanup
+    // Handle regular booking payment cancellation - same as failure
     if (booking_id) {
       const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        // Get booking details
+        // Get booking details with lock
         const [bookings] = await connection.query(`
           SELECT id, spaces, course_event_id FROM bookings
-          WHERE id = ? AND status = 0 AND admin_payment_received = 0
+          WHERE id = ? FOR UPDATE
         `, [booking_id]);
 
         if (bookings.length === 0) {
-          console.log('No unpaid booking found for payment intent:', paymentIntent.id);
+          console.log('No booking found for payment intent:', paymentIntent.id);
           await connection.rollback();
           return;
         }
 
         const booking = bookings[0];
+
+        // Check if booking is already paid or deleted
+        const [bookingStatus] = await connection.query(`
+          SELECT status, admin_payment_received FROM bookings WHERE id = ?
+        `, [booking_id]);
+
+        if (bookingStatus.length === 0 || bookingStatus[0].admin_payment_received > 0) {
+          console.log('Booking already processed or paid:', booking_id);
+          await connection.rollback();
+          return;
+        }
+
         console.log(`🚫 Payment canceled for booking ${booking.id} - initiating immediate cleanup`);
 
-        // Release current_locks for this booking
+        // Release current_locks for this booking - CRITICAL
         if (booking.course_event_id && booking.spaces) {
           await connection.query(`
             UPDATE course_events
-            SET current_locks = GREATEST(0, current_locks - ?)
+            SET current_locks = GREATEST(0, current_locks - ?),
+                modified = NOW()
             WHERE id = ?
           `, [booking.spaces, booking.course_event_id]);
           console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
         }
 
-        // Delete attendee records
+        // Delete attendee records (which also deletes booking references)
         await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
         await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
         console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
@@ -375,6 +428,8 @@ class StripeWebhookController {
       } finally {
         connection.release();
       }
+    } else {
+      console.error('❌ No booking_id or gift voucher bid in payment canceled metadata');
     }
   }
 
@@ -732,6 +787,102 @@ class StripeWebhookController {
         sql: error.sql,
         bid: bid
       });
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Send booking confirmation email after payment is confirmed
+  async sendBookingConfirmationEmail(booking_id) {
+    const connection = await this.pool.getConnection();
+    try {
+      // Get booking details
+      const [bookings] = await connection.query(`
+        SELECT
+          b.id, b.course_id, b.course_event_id, b.total_amount,
+          b.payment_due, b.vat, b.total_fees,
+          ba.booking_ref, ba.email
+        FROM bookings b
+        JOIN booking_attendees ba ON b.id = ba.booking_id AND ba.primary = 1
+        WHERE b.id = ?
+      `, [booking_id]);
+
+      if (bookings.length === 0) {
+        console.log(`⚠️ Booking not found for email: ${booking_id}`);
+        return;
+      }
+
+      const booking = bookings[0];
+
+      // Get all attendees for this booking
+      const [attendees] = await connection.query(`
+        SELECT first_name, sur_name, email, contact1, contact2, contact3, vehicle_type
+        FROM booking_attendees
+        WHERE booking_id = ?
+      `, [booking_id]);
+
+      // Get course details
+      const [courseData] = await connection.query(`
+        SELECT email_content, course_name FROM courses WHERE id = ?
+      `, [booking.course_id]);
+
+      // Get location details
+      const [locationData] = await connection.query(`
+        SELECT location_name, address1, address2, address3, address4,
+               postcode, direction_map, direction_content
+        FROM locations
+        WHERE id = (SELECT location_id FROM course_events WHERE id = ?)
+      `, [booking.course_event_id]);
+
+      // Get event dates
+      const [eventDates] = await connection.query(`
+        SELECT event_date, event_start_time
+        FROM course_event_dates
+        WHERE course_event_id = ?
+        ORDER BY event_date ASC, event_start_time ASC
+      `, [booking.course_event_id]);
+
+      // Get franchise details
+      const [franchiseData] = await connection.query(`
+        SELECT f.email_header, f.email_footer, f.email_logo, f.website,
+               f.telephone, f.freephone, f.franchise_email
+        FROM franchise f
+        JOIN course_events ce ON ce.franchise_id = f.id
+        WHERE ce.id = ?
+        LIMIT 1
+      `, [booking.course_event_id]);
+
+      // Get settings
+      const [settingsData] = await connection.query(`
+        SELECT booking_bcc FROM settings LIMIT 1
+      `);
+
+      const { sendBookingConfirmation } = require('../utils/emailService');
+
+      await sendBookingConfirmation({
+        course_name: courseData[0]?.course_name || 'Course',
+        booking_ref: booking.booking_ref,
+        booking_type: 'o',
+        refundable: 0,
+        attendees: attendees,
+        location: locationData[0] || {},
+        event_dates: eventDates,
+        booking: {
+          total_amount: booking.total_amount,
+          payment_due: Math.max(0, booking.payment_due),
+          vat: booking.vat,
+          total_fees: booking.total_fees
+        },
+        course_email_content: courseData[0]?.email_content || '',
+        franchise: franchiseData[0] || {},
+        bcc: settingsData[0]?.booking_bcc || 'bookings@1stopinstruction.com',
+        ip: 'webhook'
+      }, this.pool);
+
+      console.log(`📧 Booking confirmation email sent for booking ${booking_id} (${booking.booking_ref})`);
+    } catch (error) {
+      console.error('❌ Error sending booking confirmation email:', error);
       throw error;
     } finally {
       connection.release();

@@ -1229,57 +1229,9 @@ class BookingFlowController {
 
           await connection.commit();
 
-          // Send confirmation email
-          try {
-            const [courseEmailData] = await this.pool.query(`
-              SELECT email_content FROM courses WHERE id = ?
-            `, [course_id]);
-
-            const [locationData] = await this.pool.query(`
-              SELECT location_name, address1, address2, address3, address4, postcode, direction_map, direction_content
-              FROM locations
-              WHERE id = ?
-            `, [location_id]);
-
-            const [eventDates] = await this.pool.query(`
-              SELECT event_date, event_start_time
-              FROM course_event_dates
-              WHERE course_event_id = ?
-              ORDER BY event_date ASC, event_start_time ASC
-            `, [course_event_id]);
-
-            const [franchiseData] = await this.pool.query(`
-              SELECT f.email_header, f.email_footer, f.email_logo, f.website, f.telephone, f.freephone, f.franchise_email
-              FROM franchise f
-              JOIN course_events ce ON ce.franchise_id = f.id
-              WHERE ce.id = ?
-              LIMIT 1
-            `, [course_event_id]);
-
-            const [settingsData] = await this.pool.query(`
-              SELECT booking_bcc FROM settings LIMIT 1
-            `);
-
-            await sendBookingConfirmation({
-              course_name: courseData[0]?.course_name || 'Course',
-              booking_ref: bookingRef,
-              booking_type: 'o',
-              refundable: 0,
-              attendees: attendees,
-              location: locationData[0] || {},
-              event_dates: eventDates,
-              booking: {
-                total_amount: totalAmount,
-                payment_due: Math.max(0, totalAmount - amountToChargeNow)
-              },
-              course_email_content: courseEmailData[0]?.email_content || '',
-              franchise: franchiseData[0] || {},
-              bcc: settingsData[0]?.booking_bcc || 'bookings@1stopinstruction.com',
-              ip: req.clientIp || req.ip || 'unknown'
-            }, this.pool);
-          } catch (emailError) {
-            console.error('Email send failed:', emailError);
-          }
+          // NOTE: Email is NOT sent here anymore. It will be sent by the Stripe webhook
+          // when payment is successfully confirmed. This prevents sending confirmation
+          // emails for failed/declined payments.
 
           res.status(201).json({
             success: true,
