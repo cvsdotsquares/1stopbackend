@@ -77,7 +77,7 @@ class StripeWebhookController {
 
     // New flow: booking already created by bookingFlow.js
     if (booking_id && course_event_id && (spaces || attendees_count)) {
-      const bookingSpaces = parseInt(spaces || attendees_count);
+      const bookingSpaces = Number.parseInt(spaces || attendees_count, 10);
       console.log(`💼 Processing payment for existing booking ${booking_id}`);
 
       const connection = await this.pool.getConnection();
@@ -118,12 +118,15 @@ class StripeWebhookController {
           console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
         }
 
-        // Update booking status
+        // Update booking status and remaining due amount
         await connection.query(`
           UPDATE bookings
-          SET admin_payment_received = ?, status = 1, modified = NOW()
+          SET admin_payment_received = COALESCE(admin_payment_received, 0) + ?,
+              payment_due = GREATEST(0, COALESCE(payment_due, total_amount) - ?),
+              status = 1,
+              modified = NOW()
           WHERE id = ?
-        `, [paidAmount, booking_id]);
+        `, [paidAmount, paidAmount, booking_id]);
 
         // Save payment record
         await connection.query(`

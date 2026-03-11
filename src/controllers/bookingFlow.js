@@ -913,6 +913,49 @@ class BookingFlowController {
     return password;
   }
 
+  shouldChargeDeposit(courseEvent, eventDates) {
+    const hasDepositPricing =
+      (Number.parseFloat(courseEvent.school_deposit_price) || 0) > 0 ||
+      (Number.parseFloat(courseEvent.own_deposit_price) || 0) > 0;
+
+    if (!hasDepositPricing) {
+      return false;
+    }
+
+    const isDepositEnabled = Number(courseEvent.is_deposit) === 1;
+    const depositDays = Number.parseInt(courseEvent.deposit_days, 10) || 0;
+
+    // If period check is disabled, allow deposit whenever deposit pricing exists
+    if (!isDepositEnabled) {
+      return true;
+    }
+
+    // If period check is enabled but deposit_days is missing/invalid, default to full payment
+    if (depositDays <= 0) {
+      return false;
+    }
+
+    const validDates = (eventDates || [])
+      .map(d => d.event_date)
+      .filter(d => d && d !== '1111-11-11' && d !== '0000-00-00')
+      .sort();
+
+    if (validDates.length === 0) {
+      return false;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const firstDate = new Date(validDates[0]);
+    firstDate.setHours(0, 0, 0, 0);
+
+    const diffTime = firstDate.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    return diffDays > depositDays;
+  }
+
   async createBookingWithAttendees(req, res) {
 
     try {
@@ -1026,30 +1069,49 @@ class BookingFlowController {
           throw new Error('Course not found');
         }
 
-        // Calculate price for each attendee based on vehicle type
+        const [eventDates] = await connection.query(`
+          SELECT event_date
+          FROM course_event_dates
+          WHERE course_event_id = ?
+          ORDER BY event_date ASC
+        `, [course_event_id]);
+
+        const chargeDepositNow = this.shouldChargeDeposit(courseData[0], eventDates);
+
+        // Calculate full course fees and initial payable amount separately
         let totalFees = 0;
+        let payableNowFees = 0;
         for (const attendee of attendees) {
           const vehicleType = attendee.vehicle_type || 0;
-          let attendeePrice = 0;
+          let attendeeTotalPrice = 0;
+          let attendeePayableNow = 0;
 
           // Priority 1: One-off pricing
           if (courseData[0].school_one_off_price > 0 || courseData[0].own_one_off_price > 0) {
-            attendeePrice = vehicleType === 3 ? courseData[0].own_one_off_price : courseData[0].school_one_off_price;
+            attendeeTotalPrice = vehicleType === 3 ? courseData[0].own_one_off_price : courseData[0].school_one_off_price;
+            attendeePayableNow = attendeeTotalPrice;
           }
-          // Priority 2: Deposit + Total pricing
+          // Priority 2: Deposit + Total pricing (charge deposit only when allowed)
           else if (courseData[0].school_deposit_price > 0 || courseData[0].own_deposit_price > 0) {
-            attendeePrice = vehicleType === 3 ? courseData[0].own_total_price : courseData[0].school_total_price;
+            const attendeeDeposit = vehicleType === 3 ? courseData[0].own_deposit_price : courseData[0].school_deposit_price;
+            const attendeeConfiguredTotal = vehicleType === 3 ? courseData[0].own_total_price : courseData[0].school_total_price;
+
+            attendeeTotalPrice = attendeeConfiguredTotal > 0 ? attendeeConfiguredTotal : attendeeDeposit;
+            attendeePayableNow = chargeDepositNow ? attendeeDeposit : attendeeTotalPrice;
           }
           // Fallback: DSA fees
           else {
-            attendeePrice = courseData[0].dsa_fees;
+            attendeeTotalPrice = courseData[0].dsa_fees;
+            attendeePayableNow = attendeeTotalPrice;
           }
 
-          totalFees += attendeePrice;
+          totalFees += Number(attendeeTotalPrice) || 0;
+          payableNowFees += Number(attendeePayableNow) || 0;
         }
 
         // Apply promo code discount if provided
-        let promoDiscount = 0;
+        let promoDiscountOnTotal = 0;
+        let promoDiscountOnPayableNow = 0;
         let promoCodeId = null;
         if (promo_code) {
           const [promos] = await connection.query(`
@@ -1063,14 +1125,17 @@ class BookingFlowController {
             promoCodeId = promo.id;
 
             if (promo.p_c_discount_type === 'pounds_off') {
-              promoDiscount = attendees_count * promo.p_c_amount;
+              promoDiscountOnTotal = attendees_count * promo.p_c_amount;
+              promoDiscountOnPayableNow = attendees_count * promo.p_c_amount;
             } else if (promo.p_c_discount_type === 'percent_off') {
-              promoDiscount = (totalFees * promo.p_c_amount) / 100;
+              promoDiscountOnTotal = (totalFees * promo.p_c_amount) / 100;
+              promoDiscountOnPayableNow = (payableNowFees * promo.p_c_amount) / 100;
             }
           }
         }
 
-        const discountedFees = Math.max(0, totalFees - promoDiscount);
+        const discountedTotalFees = Math.max(0, totalFees - promoDiscountOnTotal);
+        const discountedPayableNowFees = Math.max(0, payableNowFees - promoDiscountOnPayableNow);
 
         // Calculate VAT (DSA fees are VAT exempt)
         const vatRate = 0.20;
@@ -1078,13 +1143,22 @@ class BookingFlowController {
 
         if (courseData[0].franchise_vat === 1) {
           const dsaFees = courseData[0].dsa_fees * attendees_count;
-          const vatableAmount = discountedFees > dsaFees ? (discountedFees - dsaFees) : 0;
+          const vatableAmount = discountedTotalFees > dsaFees ? (discountedTotalFees - dsaFees) : 0;
           const vatMultiplier = (100 + (vatRate * 100)) / 100;
           vat = vatableAmount - (vatableAmount / vatMultiplier);
           vat = Math.round(vat * 100) / 100;
         }
 
-        const totalAmount = discountedFees + vat;
+        const totalAmount = discountedTotalFees + vat;
+
+        const hasDepositPricing =
+          (courseData[0].school_deposit_price > 0 || courseData[0].own_deposit_price > 0) &&
+          !(courseData[0].school_one_off_price > 0 || courseData[0].own_one_off_price > 0);
+
+        // Deposit flow charges deposit now; one-off/full flow charges full total now
+        const amountToChargeNow = hasDepositPricing && chargeDepositNow
+          ? discountedPayableNowFees
+          : totalAmount;
 
         // Use first attendee's user_id as primary booking user
         const primaryUserId = userIds[0];
@@ -1094,7 +1168,7 @@ class BookingFlowController {
           INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
           VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
-        `, [course_id, course_event_id, primaryUserId, attendees_count, totalAmount, discountedFees, vatRate, vat, totalAmount, primaryUserId, primaryUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
+        `, [course_id, course_event_id, primaryUserId, attendees_count, totalAmount, discountedTotalFees, vatRate, vat, totalAmount, primaryUserId, primaryUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
 
         const booking_id = bookingResult.insertId;
         const bookingRef = `BK${String(booking_id).padStart(6, '0')}`;
@@ -1139,7 +1213,7 @@ class BookingFlowController {
         try {
 
           const paymentIntent = await stripe.paymentIntents.create({
-            amount: Math.round(totalAmount * 100),
+            amount: Math.round(amountToChargeNow * 100),
             currency: 'gbp',
             automatic_payment_methods: { enabled: true },
             metadata: {
@@ -1180,8 +1254,8 @@ class BookingFlowController {
               })),
               payment: {
                 total_amount: totalAmount.toFixed(2),
-                paid: totalAmount.toFixed(2),
-                balance: '0.00'
+                paid: amountToChargeNow.toFixed(2),
+                balance: Math.max(0, totalAmount - amountToChargeNow).toFixed(2)
               },
               ip: req.clientIp || req.ip || 'unknown'
             });
@@ -1194,10 +1268,11 @@ class BookingFlowController {
             booking_id,
             booking_ref: bookingRef,
             payment_due: totalAmount,
-            total_fees: discountedFees,
-            promo_discount: promoDiscount,
+            total_fees: discountedTotalFees,
+            promo_discount: promoDiscountOnTotal,
             vat,
             total_amount: totalAmount,
+            amount_to_charge_now: amountToChargeNow,
             client_secret: paymentIntent.client_secret,
             payment_intent_id: paymentIntent.id,
             user_accounts: generatedPasswords
