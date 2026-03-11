@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const { formatDateToDDMMYYYY, formatMySQLDateToDDMMYYYY } = require('./dateFormat');
+const { replaceTokens } = require('./tokenReplacer');
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -300,6 +301,17 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    : `${siteUrl}images/logo.png`;
   const logoWebPath = normalizeUrl(franchise.website, siteUrl);
 
+  // Process course_email_content to replace tokens
+  let processedCourseEmailContent = course_email_content;
+  if (pool) {
+    try {
+      processedCourseEmailContent = await replaceTokens(pool, course_email_content);
+    } catch (error) {
+      console.error('Error replacing tokens in course_email_content:', error);
+      processedCourseEmailContent = course_email_content;
+    }
+  }
+
   const hasTbc = event_dates.some(d => isTbcDate(d.event_date));
   const dateRows = event_dates
     .filter(d => !isTbcDate(d.event_date))
@@ -453,7 +465,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                   </tr>
                   <tr>
                     <td style="font-size:9.0pt;font-family:Arial,sans-serif">
-                      ${course_email_content || ''}
+                      ${processedCourseEmailContent || ''}
                     </td>
                   </tr>
                   <tr>
