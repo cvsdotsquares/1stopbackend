@@ -515,11 +515,11 @@ class CMSPagesController {
 
         tabSectionData = {
           title: section.title || null,
-          image: section.image_uri ? section.image_uri : null,
+          image: section.image_uri ? '/uploads/directions/' + section.image_uri : null,
           tabs: tabs.map(tab => ({
             id: tab.id.toString(),
             label: tab.tab_name || null,
-            icon: '/uploads/featured_services/' + tab.tab_icon_url || null,
+            icon: tab.tab_icon_url ? '/uploads/tabs/' + tab.tab_icon_url : null,
             content: tab.tab_text || null
           }))
         };
@@ -614,11 +614,18 @@ class CMSPagesController {
         });
       }
 
-      // Add dynamic content sections - use sort_order from dynamic_content_sections table
-      sections.forEach((section) => {
+      // Add dynamic content sections
+      // Top-level order comes from page_junction (same as other sections)
+      // while nested sequence among dynamic sections remains unchanged.
+      const dynamicContentBaseOrder =
+        sectionOrderMap['dynamic_content'] ||
+        sectionOrderMap['dynamic_content_sections'] ||
+        61;
+
+      sections.forEach((section, index) => {
         pageSections.push({
           type: 'dynamic_content',
-          order: section.sort_order,
+          order: dynamicContentBaseOrder + (index / 1000),
           data: section
         });
       });
