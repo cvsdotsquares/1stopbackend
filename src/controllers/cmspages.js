@@ -756,7 +756,7 @@ class CMSPagesController {
       }
 
       if (bannersData) {
-        const bannersBaseOrder = getNextSectionOrder(['pages_banner', 'banner', 'banners'], 90);
+        const bannersBaseOrder = getNextSectionOrder(['page_banner', 'pages_banner', 'banner', 'banners'], 90);
         bannersData.forEach((banner, index) => {
           pageSections.push({
             type: 'banner',
