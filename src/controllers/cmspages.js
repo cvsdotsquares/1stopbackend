@@ -631,15 +631,11 @@ class CMSPagesController {
       }
 
       // Add dynamic content sections
-      // Top-level order comes from page_junction (same as other sections)
-      // while nested sequence among dynamic sections remains unchanged.
-      const dynamicContentBaseOrder =
-        getNextSectionOrder(['dynamic_content', 'dynamic_content_sections'], 61);
-
-      sections.forEach((section, index) => {
+      // Each repeated section consumes its own page_junction order entry.
+      sections.forEach((section) => {
         pageSections.push({
           type: 'dynamic_content',
-          order: dynamicContentBaseOrder + (index / 1000),
+          order: getNextSectionOrder(['dynamic_content', 'dynamic_content_sections'], 61),
           data: section
         });
       });
@@ -731,7 +727,7 @@ class CMSPagesController {
         tabSectionData.forEach((sectionData) => {
           pageSections.push({
             type: 'tab_section',
-            order: getNextSectionOrder(['tab_section', 'tabs', 'tabs_section'], 70),
+            order: getNextSectionOrder(['directions_parking', 'tab_section', 'tabs', 'tabs_section'], 70),
             data: sectionData
           });
         });
