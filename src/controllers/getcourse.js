@@ -34,20 +34,15 @@ const getCourse = (pool) => async (req, res) => {
       'SELECT is_r2api_setting FROM settings WHERE id = 1'
     );
 
-    console.log('Settings query result:', settingsRows);
-
     if (!settingsRows || settingsRows.length === 0) {
       // No settings row found, treat as disabled
-      console.log('⚠️ No settings row found - returning empty course array');
       return res.status(200).json({ course: [] });
     }
 
     const settings = settingsRows[0];
-    console.log('Settings is_r2api_setting value:', settings.is_r2api_setting);
 
     if (settings.is_r2api_setting === 0) {
       // API is disabled
-      console.log('⚠️ RideTo API is disabled (is_r2api_setting = 0) - returning empty course array');
       return res.status(200).json({ course: [] });
     }
 

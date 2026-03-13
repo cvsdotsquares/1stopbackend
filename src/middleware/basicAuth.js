@@ -1,19 +1,26 @@
 const VALID_TOKEN = '4lCBbMxPvSBXOYWSej8WAEdl3ZRE0v8O4Y6WMTXLSc100H1xjt';
 
 const basicAuth = (req, res, next) => {
+  console.log('🔐 basicAuth middleware called for:', req.method, req.path);
   const authHeader = req.headers['authorization'];
-
   if (!authHeader || !authHeader.startsWith('Basic ')) {
+    console.log('❌ Auth failed: missing or invalid header');
     return res.status(401).json({ message: 'Authorization header missing or invalid' });
   }
 
   const base64Token = authHeader.substring(6).trim();
   const decodedToken = Buffer.from(base64Token, 'base64').toString('utf-8');
 
-  if (decodedToken !== VALID_TOKEN) {
+  const tokenToCheck = decodedToken.endsWith(':')
+    ? decodedToken.slice(0, -1)  // Remove trailing colon
+    : decodedToken;
+
+  if (tokenToCheck !== VALID_TOKEN) {
+    console.log('❌ Auth failed: invalid token');
     return res.status(401).json({ message: 'Invalid authorization token' });
   }
 
+  console.log('✅ Auth passed');
   next();
 };
 

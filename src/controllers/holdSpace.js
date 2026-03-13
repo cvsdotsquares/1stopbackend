@@ -150,6 +150,7 @@ const lockBooking = async (pool, eventId, spaceRequired) => {
             parent = ?,
             space_required = ?,
             automatic_lock = 1,
+            manual_lock = 0,
             locked_by = 'ride2',
             created = NOW(),
             modified = NOW(),

@@ -157,7 +157,7 @@ app.use('/api/dashboard', createDashboardRoutes(pool));
 app.use('/api/user', createUserRoutes(pool));
 app.use('/api/vouchers', createGiftVoucherRoutes(pool));
 app.use('/api/vouchers', createDebugVoucherRoutes(pool));
-app.use('/api/booking', createCheckAvailabilityRoutes(pool));
+app.use('/restapi/booking', createCheckAvailabilityRoutes(pool));
 app.use('/api/booking', createConfirmBookingRoutes(pool));
 app.use('/restapi/booking', createGetcourseRoutes(pool));
 app.use('/restapi/booking', createHoldSpaceRoutes(pool));

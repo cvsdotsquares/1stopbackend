@@ -74,7 +74,7 @@ const checkAvailability = (pool) => async (req, res) => {
   const { school_course_id, location, course_type, date, start_time, finish_time } = req.body;
 
   try {
-    const query = `
+    let query = `
       SELECT 
         courseId, 
         eventId, 
@@ -88,19 +88,25 @@ const checkAvailability = (pool) => async (req, res) => {
       FROM booking_status
       WHERE courseId = ?
         AND address4 = ?
-        AND event_date = ?
+        AND DATE(event_date) = ?
         AND event_start_time = ?
         AND event_end_time = ?
-        ${course_type === 'LICENCE_CBT' ? "AND course_name = 'CBT'" : ''}
     `;
 
-    const [results] = await pool.query(query, [
-      school_course_id,
-      location,
-      date,
-      start_time,
-      finish_time
-    ]);
+    const params = [school_course_id, location, date, start_time, finish_time];
+
+    // Add course_name filter for CBT courses
+    if (course_type === 'LICENCE_CBT') {
+      query += " AND course_name = ?";
+      params.push('CBT');
+    }
+
+    console.log('🔍 Check Availability Query Debug:');
+    console.log('  Query:', query);
+    console.log('  Params:', params);
+    console.log('  Request Body:', { school_course_id, location, course_type, date, start_time, finish_time });
+
+    const [results] = await pool.query(query, params);
 
     if (results.length === 0) {
       logRequest(404, 'Course is not available', { school_course_id });
@@ -128,8 +134,7 @@ const checkAvailability = (pool) => async (req, res) => {
       return res.status(400).json(response);
     }
   } catch (error) {
-    console.error('Error in checkAvailability:', error);
-    logRequest(500, 'Database error', { error: error.message, stack: error.stack });
+    logRequest(500, 'Database error', { error: error.message });
     return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 };

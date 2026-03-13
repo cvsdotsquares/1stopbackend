@@ -2,14 +2,14 @@
 
 ## ✅ Implementation Complete
 
-Both RideTo booking APIs have been successfully implemented and integrated into the 1Stop Backend system.
+RideTo booking APIs have been successfully implemented and integrated into the 1Stop Backend system.
 
 ---
 
 ## 📦 What Was Implemented
 
 ### 1. Check Availability API ✅
-- **Endpoint**: `POST /api/booking/check-availability`
+- **Endpoint**: `POST /restapi/booking/check-availability`
 - **Status**: Already existed, verified working
 - **Location**: 
   - Controller: `src/controllers/checkAvailability.js`
@@ -22,6 +22,13 @@ Both RideTo booking APIs have been successfully implemented and integrated into 
   - Controller: `src/controllers/confirmBooking.js` (NEW)
   - Route: `src/routes/confirmBooking.js` (NEW)
   - Registered in: `src/index.js` (UPDATED)
+
+### 3. Hold Space API ✅
+- **Endpoint**: `POST /restapi/booking/hold_space`
+- **Status**: Already existed, verified working
+- **Location**:
+  - Controller: `src/controllers/holdSpace.js`
+  - Route: `src/routes/holdSpace.js`
 
 ---
 
@@ -51,7 +58,7 @@ Both RideTo booking APIs have been successfully implemented and integrated into 
 - **Method**: Basic Auth
 - **Token**: `4lCBbMxPvSBXOYWSej8WAEdl3ZRE0v8O4Y6WMTXLSc100H1xjt`
 - **Middleware**: `src/middleware/basicAuth.js`
-- **Applied to**: Both endpoints
+- **Applied to**: RideTo endpoints
 
 ### Database Operations
 - **Connection**: MySQL connection pool
@@ -176,7 +183,23 @@ Four separate log files created:
 
 **Check Availability:**
 ```bash
-curl -X POST http://localhost:3000/api/booking/check-availability \
+curl -X POST http://localhost:3000/restapi/booking/check-availability \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic NGxDQmJNeFB2U0JYT1lXU2VqOFdBRWRsM1pSRTB2OE80WTZXTVRYTFNjMTAwSDF4anQ=" \
+  -d '{
+    "school_course_id": 123,
+    "location": "London",
+    "course_type": "LICENCE_CBT",
+    "date": "2024-12-25",
+    "start_time": "09:00",
+    "finish_time": "17:00",
+    "bike_hire_type": "manual"
+  }'
+```
+
+**Hold Space:**
+```bash
+curl -X POST http://localhost:3000/restapi/booking/hold_space \
   -H "Content-Type: application/json" \
   -H "Authorization: Basic NGxDQmJNeFB2U0JYT1lXU2VqOFdBRWRsM1pSRTB2OE80WTZXTVRYTFNjMTAwSDF4anQ=" \
   -d '{
@@ -248,9 +271,10 @@ curl -X POST http://localhost:3000/api/booking/confirm-booking \
 3. ✅ Restart Node.js server: `npm start` or `pm2 restart all`
 4. ✅ Check server health: `curl http://localhost:3000/health`
 5. ✅ Test check-availability endpoint
-6. ✅ Test confirm-booking endpoint
-7. ✅ Verify log files are created
-8. ✅ Check email delivery
+6. ✅ Test hold_space endpoint
+7. ✅ Test confirm-booking endpoint
+8. ✅ Verify log files are created
+9. ✅ Check email delivery
 
 ### Post-Deployment Verification
 ```bash
@@ -264,12 +288,18 @@ curl http://localhost:3000/db-test
 curl http://localhost:3000/api
 
 # 4. Test check-availability (with valid data)
-curl -X POST http://localhost:3000/api/booking/check-availability \
+curl -X POST http://localhost:3000/restapi/booking/check-availability \
   -H "Content-Type: application/json" \
   -H "Authorization: Basic NGxDQmJNeFB2U0JYT1lXU2VqOFdBRWRsM1pSRTB2OE80WTZXTVRYTFNjMTAwSDF4anQ=" \
   -d '{"school_course_id":1,"location":"Test","course_type":"LICENCE_CBT","date":"2024-12-25","start_time":"09:00","finish_time":"17:00","bike_hire_type":"manual"}'
 
-# 5. Check logs
+# 5. Test hold_space (with valid data)
+curl -X POST http://localhost:3000/restapi/booking/hold_space \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic NGxDQmJNeFB2U0JYT1lXU2VqOFdBRWRsM1pSRTB2OE80WTZXTVRYTFNjMTAwSDF4anQ=" \
+  -d '{"school_course_id":1,"location":"Test","course_type":"LICENCE_CBT","date":"2024-12-25","start_time":"09:00","finish_time":"17:00","bike_hire_type":"manual"}'
+
+# 6. Check logs
 ls -la *.log *.txt
 ```
 
