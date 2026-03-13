@@ -175,7 +175,7 @@ class CMSPagesController {
 
       // Get about/direct access data
       const [about] = await this.pool.query(`
-        SELECT da.section_title, da.section_subtitle, da.content,
+        SELECT da.id, da.page_type, da.section_title, da.section_subtitle, da.content,
                dai.img_title, dai.access_img
         FROM direct_access da
         LEFT JOIN direct_access_image dai ON da.id = dai.direct_access_id
@@ -184,6 +184,8 @@ class CMSPagesController {
 
       if (about.length > 0) {
         aboutData = {
+          id: about[0].id || null,
+          page_type: about[0].page_type || null,
           title: about[0].section_title || null,
           subtitle: about[0].section_subtitle || null,
           content: about[0].content || null,
