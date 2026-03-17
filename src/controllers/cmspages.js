@@ -502,18 +502,20 @@ class CMSPagesController {
       // Get CMS sidebar data
       let cmsSidebarData = null;
       const [cmsSidebar] = await this.pool.query(`
-        SELECT id, sidebar_item_title, sidebar_item_text, sort_order
-        FROM cms_sidebar
-        WHERE page_id = ?
-        ORDER BY sort_order ASC
+        SELECT id, page_ex_rhs
+        FROM pages
+        WHERE id = ?
       `, [page.id]);
 
-      if (cmsSidebar.length > 0) {
+      const cmsSidebarItems = cmsSidebar
+        .filter(item => item.page_ex_rhs !== null && item.page_ex_rhs !== undefined && String(item.page_ex_rhs).trim() !== '')
+        .map(item => ({
+          text: item.page_ex_rhs
+        }));
+
+      if (cmsSidebarItems.length > 0) {
         cmsSidebarData = {
-          items: cmsSidebar.map(item => ({
-            title: item.sidebar_item_title || null,
-            text: item.sidebar_item_text || null
-          }))
+          items: cmsSidebarItems
         };
       }
 
