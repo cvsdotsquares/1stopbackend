@@ -3,6 +3,7 @@ const BookingController = require('../controllers/bookings');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendBookingConfirmation } = require('../utils/emailService');
+const { replaceTokens } = require('../utils/tokenReplacer');
 
 class BookingFlowController {
   constructor(pool) {
@@ -34,7 +35,7 @@ class BookingFlowController {
         ORDER BY c.course_name
       `);
 
-      const formattedCourses = courses.map(course => ({
+      const formattedCourses = await Promise.all(courses.map(async course => ({
         id: course.id,
         course_name: course.course_name,
         course_abb: course.course_abb,
@@ -43,8 +44,8 @@ class BookingFlowController {
         is_cbt: course.is_cbt,
         status: course.status,
         isVoucher: Boolean(course.isVoucher),
-        description: course.description
-      }));
+        description: await replaceTokens(this.pool, course.description)
+      })));
 
       res.json({ success: true, data: formattedCourses });
     } catch (error) {
