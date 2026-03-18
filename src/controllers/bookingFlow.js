@@ -503,14 +503,14 @@ class BookingFlowController {
 
   async getVehicleTypesByCourseLocation(req, res) {
     try {
-      const { courseId, locationId } = req.params;
+      const { courseId, locationId, courseEventId } = req.params;
 
       const [rows] = await this.pool.query(`
         SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own,
                automatic_lock_done, manual_lock_done
         FROM course_events
-        WHERE course_id = ? AND location_id = ? AND status = '1'
-      `, [courseId, locationId]);
+        WHERE course_id = ? AND location_id = ? AND id   = ? AND status = '1'
+      `, [courseId, locationId, courseEventId]);
 
       if (!rows.length) {
         return res.json({ error: 'No course events found' });

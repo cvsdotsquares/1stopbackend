@@ -56,7 +56,7 @@ module.exports = (pool) => {
    * @desc Get available vehicle types for course and location
    * @access Public
    */
-  router.get('/vehicle-types/:courseId/:locationId', bookingFlowController.getVehicleTypesByCourseLocation.bind(bookingFlowController));
+  router.get('/vehicle-types/:courseId/:locationId/:courseEventId', bookingFlowController.getVehicleTypesByCourseLocation.bind(bookingFlowController));
 
   /**
    * @route GET /api/booking/license-types
