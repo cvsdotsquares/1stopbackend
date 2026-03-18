@@ -261,7 +261,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const {
    course_name,
    booking_ref,
-   booking_type = 'o',
+   booking_type = 'O',
    refundable = 0,
    attendees = [],
    location = {},
@@ -373,7 +373,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                   <tr>
                     <td style="font-size:9.0pt;font-family:Arial,sans-serif">
                       <span style="float:right;">
-                      <strong>Booking Ref</strong>: ${escapeHtml(booking_ref)} - ${escapeHtml(String(booking_type).charAt(0))}
+                      <strong>Booking Ref</strong>: ${escapeHtml(booking_ref)} - ${escapeHtml(String(booking_type).charAt(0).toUpperCase())}
                       </span>
                     </td>
                   </tr>

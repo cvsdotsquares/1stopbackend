@@ -567,6 +567,7 @@ class BookingFlowController {
       const [rows] = await this.pool.query(`
         SELECT id, licence_type
         FROM driving_licence_types
+        Where status = 1
         ORDER BY id
       `);
 
@@ -914,6 +915,57 @@ class BookingFlowController {
     return password;
   }
 
+  /**
+   * Validates whether a deposit payment is still eligible at booking-creation time.
+   * Returns { eligible: true } or { eligible: false, reason } when the cutoff has passed.
+   * Mirrors the frontend resolvePaymentType() logic so both layers agree.
+   */
+  validateDepositEligibility(courseEvent, eventDates) {
+    const hasDepositPricing =
+      (Number.parseFloat(courseEvent.school_deposit_price) || 0) > 0 ||
+      (Number.parseFloat(courseEvent.own_deposit_price) || 0) > 0;
+
+    if (!hasDepositPricing) {
+      return { eligible: false, reason: 'No deposit pricing configured' };
+    }
+
+    const isDepositEnabled = Number(courseEvent.is_deposit) === 1;
+    const depositDays = Number.parseInt(courseEvent.deposit_days, 10) || 0;
+
+    // Period check disabled — deposit always allowed when pricing exists
+    if (!isDepositEnabled) {
+      return { eligible: true };
+    }
+
+    if (depositDays <= 0) {
+      return { eligible: false, reason: 'Deposit period not configured' };
+    }
+
+    const validDates = (eventDates || [])
+      .map(d => d.event_date)
+      .filter(d => d && d !== '1111-11-11' && d !== '0000-00-00')
+      .sort();
+
+    if (validDates.length === 0) {
+      return { eligible: false, reason: 'Course dates are not yet confirmed' };
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const firstDate = new Date(validDates[0]);
+    firstDate.setHours(0, 0, 0, 0);
+    const diffDays = Math.ceil((firstDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (diffDays <= depositDays) {
+      return {
+        eligible: false,
+        reason: `This course requires full payment as the course start date is too soon (${diffDays} day(s) away, minimum ${depositDays} required for deposit).`,
+      };
+    }
+
+    return { eligible: true };
+  }
+
   shouldChargeDeposit(courseEvent, eventDates) {
     const hasDepositPricing =
       (Number.parseFloat(courseEvent.school_deposit_price) || 0) > 0 ||
@@ -1079,7 +1131,26 @@ class BookingFlowController {
 
         const chargeDepositNow = this.shouldChargeDeposit(courseData[0], eventDates);
 
+        // Server-side deposit cutoff guard — reject if deposit is requested but cutoff has passed
+        const hasDepositPricingOnly =
+          (courseData[0].school_deposit_price > 0 || courseData[0].own_deposit_price > 0) &&
+          !(courseData[0].school_one_off_price > 0 || courseData[0].own_one_off_price > 0);
+
+        if (hasDepositPricingOnly && !chargeDepositNow) {
+          const depositCheck = this.validateDepositEligibility(courseData[0], eventDates);
+          if (!depositCheck.eligible) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({
+              success: false,
+              message: depositCheck.reason || 'Deposit payment is not available for this booking date. Full payment is required.',
+            });
+          }
+        }
+
         // Calculate full course fees and initial payable amount separately
+        // Track per-attendee amounts for accurate per-booking storage
+        const perAttendeeAmounts = [];
         let totalFees = 0;
         let payableNowFees = 0;
         for (const attendee of attendees) {
@@ -1108,6 +1179,7 @@ class BookingFlowController {
 
           totalFees += Number(attendeeTotalPrice) || 0;
           payableNowFees += Number(attendeePayableNow) || 0;
+          perAttendeeAmounts.push({ total: Number(attendeeTotalPrice) || 0, payableNow: Number(attendeePayableNow) || 0 });
         }
 
         // Apply promo code discount if provided
@@ -1164,48 +1236,56 @@ class BookingFlowController {
         // Use first attendee's user_id as primary booking user
         const primaryUserId = userIds[0];
 
-        // Insert booking first to get auto-generated ID, then update with booking_ref
-        const [bookingResult] = await connection.query(`
-          INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
-                               payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
-          VALUES (?, ?, ?, 'o', ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
-        `, [course_id, course_event_id, primaryUserId, attendees_count, totalAmount, discountedTotalFees, vatRate, vat, totalAmount, primaryUserId, primaryUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
-
-        const booking_id = bookingResult.insertId;
-        const bookingRef = `BK${String(booking_id).padStart(6, '0')}`;
-
-        // Note: booking_ref is stored in booking_attendees tables, not in bookings table
+        // Each attendee gets their own booking row and unique booking ref
+        const bookingIds = [];
+        const bookingRefs = [];
 
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];
           const attendeeUserId = userIds[i];
+          const attendeeTotal = perAttendeeAmounts[i].total;
+          const attendeePayableNow = perAttendeeAmounts[i].payableNow;
+          // payment_due = balance still owed after this payment (total - deposit paid now)
+          const attendeePaymentDue = attendeeTotal - attendeePayableNow;
 
-          // Insert into booking_attendees
-          const [attendeeResult] = await connection.query(`
+          const [bookingResult] = await connection.query(`
+            INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
+                                 payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
+            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeTotal, vatRate, 0, attendeeTotal, attendeePayableNow, attendeeUserId, attendeeUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
+
+          const booking_id = bookingResult.insertId;
+          const bookingRef = `1SRC${booking_id}`;
+          bookingIds.push(booking_id);
+          bookingRefs.push(bookingRef);
+
+          await connection.query(`
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                          email, vehicle_type, license_type, license_number, theory_number,
                                          admin_notes, notes, contact_card_id, \`primary\`, created)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, 1, NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
-            attendee.theory_number || '', i === 0 ? 1 : 0
+            attendee.theory_number || ''
           ]);
 
-          // Insert into booking_attendees_dropdown
-          const [dropdownResult] = await connection.query(`
+          await connection.query(`
             INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                    email, vehicle_type, license_type, license_number, theory_number,
                                                    notes, \`primary\`, created, updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
-            attendee.theory_number || '', attendee.notes || '', i === 0 ? 1 : 0
+            attendee.theory_number || '', attendee.notes || ''
           ]);
         }
+
+        const primaryBookingId = bookingIds[0];
+        const primaryBookingRef = bookingRefs[0];
 
         // Stripe Integration
         const primaryAttendee = attendees[0];
@@ -1217,27 +1297,27 @@ class BookingFlowController {
             currency: 'gbp',
             automatic_payment_methods: { enabled: true },
             metadata: {
-              booking_id: booking_id.toString(),
-              booking_ref: bookingRef,
+              booking_id: primaryBookingId.toString(),
+              booking_ref: primaryBookingRef,
+              booking_ids: bookingIds.join(','),
+              booking_refs: bookingRefs.join(','),
               course_id: course_id.toString(),
               course_event_id: course_event_id.toString(),
-              user_id: primaryUserId.toString(),
+              user_id: userIds[0].toString(),
               attendees_count: attendees_count.toString()
             },
             description: `Course: ${courseData[0]?.course_name || 'Course'} - ${attendees_count} attendee(s)`,
-            receipt_email: primaryAttendee.email
+            receipt_email: attendees[0].email
           });
 
           await connection.commit();
 
-          // NOTE: Email is NOT sent here anymore. It will be sent by the Stripe webhook
-          // when payment is successfully confirmed. This prevents sending confirmation
-          // emails for failed/declined payments.
-
           res.status(201).json({
             success: true,
-            booking_id,
-            booking_ref: bookingRef,
+            booking_id: primaryBookingId,
+            booking_ref: primaryBookingRef,
+            booking_ids: bookingIds,
+            booking_refs: bookingRefs,
             payment_due: totalAmount,
             total_fees: discountedTotalFees,
             promo_discount: promoDiscountOnTotal,

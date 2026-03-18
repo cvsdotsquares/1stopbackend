@@ -73,18 +73,23 @@ class StripeWebhookController {
       return this.handleGiftVoucherPayment(session);
     }
 
-    const { booking_id, course_event_id, spaces, attendees_count } = session.metadata || {};
+    const { booking_id, booking_ids, course_event_id, spaces, attendees_count } = session.metadata || {};
 
     // New flow: booking already created by bookingFlow.js
-    if (booking_id && course_event_id && (spaces || attendees_count)) {
+    // Support both multi-booking (booking_ids) and legacy single booking (booking_id)
+    const allBookingIds = booking_ids
+      ? booking_ids.split(',').map(id => parseInt(id, 10)).filter(Boolean)
+      : booking_id ? [parseInt(booking_id, 10)] : [];
+
+    if (allBookingIds.length > 0 && course_event_id && (spaces || attendees_count)) {
       const bookingSpaces = Number.parseInt(spaces || attendees_count, 10);
-      console.log(`💼 Processing payment for existing booking ${booking_id}`);
+      console.log(`💼 Processing payment for bookings: ${allBookingIds.join(', ')}`);
 
       const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        // Idempotency check
+        // Idempotency check against the primary booking
         const [existingPayment] = await connection.query(`
           SELECT id FROM booking_payments WHERE transation_id = ?
         `, [session.payment_intent || session.id]);
@@ -96,6 +101,7 @@ class StripeWebhookController {
         }
 
         const paidAmount = (session.amount_received || session.amount || 0) / 100;
+        const perBookingAmount = paidAmount / allBookingIds.length;
 
         // Lock event and move from current_locks to bookings_done
         const [eventDetails] = await connection.query(`
@@ -103,11 +109,6 @@ class StripeWebhookController {
         `, [course_event_id]);
 
         if (eventDetails.length > 0) {
-          const currentLocks = eventDetails[0].current_locks || 0;
-          const bookingsDone = eventDetails[0].bookings_done || 0;
-          console.log(`📊 bookings_done: ${bookingsDone}, current_locks: ${currentLocks}, confirming: ${bookingSpaces}`);
-
-          // Move spaces from current_locks to bookings_done
           await connection.query(`
             UPDATE course_events
             SET bookings_done = bookings_done + ?,
@@ -118,32 +119,30 @@ class StripeWebhookController {
           console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
         }
 
-        // Update booking status and remaining due amount
-        await connection.query(`
-          UPDATE bookings
-          SET admin_payment_received = COALESCE(admin_payment_received, 0) + ?,
-              payment_due = GREATEST(0, COALESCE(payment_due, total_amount) - ?),
-              status = 1,
-              modified = NOW()
-          WHERE id = ?
-        `, [paidAmount, paidAmount, booking_id]);
+        // Update each booking status and insert a payment record for each
+        // payment_due and admin_payment_received are already set correctly at booking creation time
+        for (const bid of allBookingIds) {
+          await connection.query(`
+            UPDATE bookings SET status = 1, modified = NOW() WHERE id = ?
+          `, [bid]);
 
-        // Save payment record
-        await connection.query(`
-          INSERT INTO booking_payments
-          (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
-          VALUES (?, 'SALE', ?, ?, 'booking', ?, NOW(), 0, '', '')
-        `, [booking_id, session.payment_intent || session.id, paidAmount, JSON.stringify({ session_id: session.id, payment_status: session.payment_status })]);
+          await connection.query(`
+            INSERT INTO booking_payments
+            (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
+            VALUES (?, 'SALE', ?, ?, 'booking', ?, NOW(), 0, '', '')
+          `, [bid, session.payment_intent || session.id, perBookingAmount, JSON.stringify({ session_id: session.id, payment_status: session.payment_status })]);
+        }
 
         await connection.commit();
-        console.log(`✅ Payment confirmed for booking ${booking_id}`);
+        console.log(`✅ Payment confirmed for bookings: ${allBookingIds.join(', ')}`);
 
-        // Send confirmation email ONLY after payment is confirmed
-        try {
-          await this.sendBookingConfirmationEmail(booking_id);
-        } catch (emailError) {
-          console.error('❌ Failed to send confirmation email for booking', booking_id, ':', emailError);
-          // Don't throw - email failure shouldn't fail the payment confirmation
+        // Send confirmation email for each booking
+        for (const bid of allBookingIds) {
+          try {
+            await this.sendBookingConfirmationEmail(bid);
+          } catch (emailError) {
+            console.error(`❌ Failed to send confirmation email for booking ${bid}:`, emailError);
+          }
         }
       } catch (error) {
         await connection.rollback();
@@ -232,7 +231,7 @@ class StripeWebhookController {
   async handlePaymentFailed(paymentIntent) {
     console.log('Processing failed payment for payment intent:', paymentIntent.id);
 
-    const { type, bid, booking_id, course_event_id, attendees_count } = paymentIntent.metadata || {};
+    const { type, bid, booking_id, booking_ids, course_event_id, attendees_count } = paymentIntent.metadata || {};
 
     // Handle gift voucher payment failure
     if (type === 'gift_voucher' && bid) {
@@ -266,60 +265,40 @@ class StripeWebhookController {
     }
 
     // Handle regular booking payment failure - immediate cleanup
-    if (booking_id) {
+    const allBookingIds = booking_ids
+      ? booking_ids.split(',').map(id => parseInt(id, 10)).filter(Boolean)
+      : booking_id ? [parseInt(booking_id, 10)] : [];
+
+    if (allBookingIds.length > 0) {
       const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        // Get booking details with lock
-        const [bookings] = await connection.query(`
-          SELECT id, spaces, course_event_id FROM bookings
-          WHERE id = ? FOR UPDATE
-        `, [booking_id]);
+        for (const bid of allBookingIds) {
+          const [bookings] = await connection.query(`
+            SELECT id, spaces, course_event_id, status, admin_payment_received FROM bookings
+            WHERE id = ? FOR UPDATE
+          `, [bid]);
 
-        if (bookings.length === 0) {
-          console.log('No booking found for payment intent:', paymentIntent.id);
-          await connection.rollback();
-          return;
+          if (bookings.length === 0 || bookings[0].admin_payment_received > 0) continue;
+
+          const booking = bookings[0];
+
+          if (booking.course_event_id && booking.spaces) {
+            await connection.query(`
+              UPDATE course_events
+              SET current_locks = GREATEST(0, current_locks - ?), modified = NOW()
+              WHERE id = ?
+            `, [booking.spaces, booking.course_event_id]);
+          }
+
+          await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [bid]);
+          await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [bid]);
+          await connection.query(`DELETE FROM bookings WHERE id = ?`, [bid]);
+          console.log(`🗑️ Cleaned up failed booking ${bid}`);
         }
-
-        const booking = bookings[0];
-
-        // Check if booking is already paid or deleted
-        const [bookingStatus] = await connection.query(`
-          SELECT status, admin_payment_received FROM bookings WHERE id = ?
-        `, [booking_id]);
-
-        if (bookingStatus.length === 0 || bookingStatus[0].admin_payment_received > 0) {
-          console.log('Booking already processed or paid:', booking_id);
-          await connection.rollback();
-          return;
-        }
-
-        console.log(`❌ Payment failed for booking ${booking.id} - initiating immediate cleanup`);
-
-        // Release current_locks for this booking - CRITICAL
-        if (booking.course_event_id && booking.spaces) {
-          await connection.query(`
-            UPDATE course_events
-            SET current_locks = GREATEST(0, current_locks - ?),
-                modified = NOW()
-            WHERE id = ?
-          `, [booking.spaces, booking.course_event_id]);
-          console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
-        }
-
-        // Delete attendee records
-        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
-        await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
-        console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
-
-        // Delete booking
-        await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
-        console.log(`🗑️ Deleted booking ${booking.id}`);
 
         await connection.commit();
-        console.log(`✅ Successfully cleaned up failed payment for booking ${booking.id}`);
       } catch (error) {
         await connection.rollback();
         console.error('❌ Error cleaning up failed booking payment:', error);
@@ -327,14 +306,14 @@ class StripeWebhookController {
         connection.release();
       }
     } else {
-      console.error('❌ No booking_id or gift voucher bid in payment failed metadata');
+      console.error('❌ No booking_ids or gift voucher bid in payment failed metadata');
     }
   }
 
   async handlePaymentCanceled(paymentIntent) {
     console.log('Processing canceled payment for payment intent:', paymentIntent.id);
 
-    const { type, bid, booking_id, course_event_id, attendees_count } = paymentIntent.metadata || {};
+    const { type, bid, booking_id, booking_ids, course_event_id, attendees_count } = paymentIntent.metadata || {};
 
     // Handle gift voucher payment cancellation
     if (type === 'gift_voucher' && bid) {
@@ -368,60 +347,40 @@ class StripeWebhookController {
     }
 
     // Handle regular booking payment cancellation - same as failure
-    if (booking_id) {
+    const allCanceledBookingIds = booking_ids
+      ? booking_ids.split(',').map(id => parseInt(id, 10)).filter(Boolean)
+      : booking_id ? [parseInt(booking_id, 10)] : [];
+
+    if (allCanceledBookingIds.length > 0) {
       const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        // Get booking details with lock
-        const [bookings] = await connection.query(`
-          SELECT id, spaces, course_event_id FROM bookings
-          WHERE id = ? FOR UPDATE
-        `, [booking_id]);
+        for (const bid of allCanceledBookingIds) {
+          const [bookings] = await connection.query(`
+            SELECT id, spaces, course_event_id, status, admin_payment_received FROM bookings
+            WHERE id = ? FOR UPDATE
+          `, [bid]);
 
-        if (bookings.length === 0) {
-          console.log('No booking found for payment intent:', paymentIntent.id);
-          await connection.rollback();
-          return;
+          if (bookings.length === 0 || bookings[0].admin_payment_received > 0) continue;
+
+          const booking = bookings[0];
+
+          if (booking.course_event_id && booking.spaces) {
+            await connection.query(`
+              UPDATE course_events
+              SET current_locks = GREATEST(0, current_locks - ?), modified = NOW()
+              WHERE id = ?
+            `, [booking.spaces, booking.course_event_id]);
+          }
+
+          await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [bid]);
+          await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [bid]);
+          await connection.query(`DELETE FROM bookings WHERE id = ?`, [bid]);
+          console.log(`🗑️ Cleaned up canceled booking ${bid}`);
         }
-
-        const booking = bookings[0];
-
-        // Check if booking is already paid or deleted
-        const [bookingStatus] = await connection.query(`
-          SELECT status, admin_payment_received FROM bookings WHERE id = ?
-        `, [booking_id]);
-
-        if (bookingStatus.length === 0 || bookingStatus[0].admin_payment_received > 0) {
-          console.log('Booking already processed or paid:', booking_id);
-          await connection.rollback();
-          return;
-        }
-
-        console.log(`🚫 Payment canceled for booking ${booking.id} - initiating immediate cleanup`);
-
-        // Release current_locks for this booking - CRITICAL
-        if (booking.course_event_id && booking.spaces) {
-          await connection.query(`
-            UPDATE course_events
-            SET current_locks = GREATEST(0, current_locks - ?),
-                modified = NOW()
-            WHERE id = ?
-          `, [booking.spaces, booking.course_event_id]);
-          console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
-        }
-
-        // Delete attendee records (which also deletes booking references)
-        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
-        await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
-        console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
-
-        // Delete booking
-        await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
-        console.log(`🗑️ Deleted booking ${booking.id}`);
 
         await connection.commit();
-        console.log(`✅ Successfully cleaned up canceled payment for booking ${booking.id}`);
       } catch (error) {
         await connection.rollback();
         console.error('❌ Error cleaning up canceled booking payment:', error);
@@ -429,7 +388,7 @@ class StripeWebhookController {
         connection.release();
       }
     } else {
-      console.error('❌ No booking_id or gift voucher bid in payment canceled metadata');
+      console.error('❌ No booking_ids or gift voucher bid in payment canceled metadata');
     }
   }
 
