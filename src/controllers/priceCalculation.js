@@ -169,27 +169,18 @@ class PriceCalculationController {
   }
 
   shouldChargeDeposit(courseEvent, courseEventDates) {
-    console.log('💰 [DEPOSIT CALC] Starting deposit calculation...');
-    console.log('💰 [DEPOSIT CALC] school_deposit_price:', courseEvent.school_deposit_price);
-    console.log('💰 [DEPOSIT CALC] is_deposit (period check enabled):', courseEvent.is_deposit);
 
     const depositDays = Number.parseInt(courseEvent.course?.deposit_days) || 0;
 
     // Check if deposit pricing is configured
     if (courseEvent.school_deposit_price <= 0) {
-      console.log('❌ [DEPOSIT CALC] No deposit configured - school_deposit_price is 0');
       return { allowed: false, note: 'No deposit pricing configured for this course.' };
     }
 
     // If is_deposit = 0 (unchecked), deposit period check is DISABLED - always allow deposit
     if (!courseEvent.is_deposit || courseEvent.is_deposit === 0) {
-      console.log('✅ [DEPOSIT CALC] DEPOSIT ALLOWED - Period check disabled (is_deposit=0)');
       return { allowed: true, note: null };
     }
-
-    // If is_deposit = 1 (checked), ENFORCE deposit period check using deposit_days
-    console.log('💰 [DEPOSIT CALC] Period check ENABLED - checking course dates...');
-    console.log('💰 [DEPOSIT CALC] courseEventDates:', courseEventDates);
 
     // Get earliest course date
     const validDates = courseEventDates
@@ -197,10 +188,8 @@ class PriceCalculationController {
       .map(date => new Date(date.event_date))
       .sort((a, b) => a - b);
 
-    console.log('💰 [DEPOSIT CALC] validDates:', validDates);
 
     if (validDates.length === 0) {
-      console.log('❌ [DEPOSIT CALC] No valid dates found - requiring full payment');
       return { allowed: false, note: 'Deposit option is unavailable as the course dates are yet to be confirmed.' };
     }
 
@@ -213,16 +202,9 @@ class PriceCalculationController {
     const diffTime = courseStartDate.getTime() - today.getTime();
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-    console.log('💰 [DEPOSIT CALC] First course date:', firstDate);
-    console.log('💰 [DEPOSIT CALC] Deposit period (days):', depositPeriod);
-    console.log('💰 [DEPOSIT CALC] Today:', today);
-    console.log('💰 [DEPOSIT CALC] Days until course:', diffDays);
-    console.log('💰 [DEPOSIT CALC] Comparison: diffDays > depositPeriod:', diffDays > depositPeriod);
-
     // If days until course > deposit_days, deposit is allowed
     // If days until course <= deposit_days, require full payment
     const shouldCharge = diffDays > depositPeriod;
-    console.log(shouldCharge ? '✅ [DEPOSIT CALC] DEPOSIT ALLOWED - Course is far enough away' : '⚠️ [DEPOSIT CALC] FULL PAYMENT REQUIRED - Course starts too soon');
 
     if (shouldCharge) {
       return { allowed: true, note: null };

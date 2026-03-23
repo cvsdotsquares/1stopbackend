@@ -14,25 +14,28 @@ class BookingFlowController {
     try {
       const [courses] = await this.pool.query(`
         SELECT DISTINCT
-          c.id,
-          c.course_name,
-          c.course_abb,
-          '1 day' as duration,
-          c.is_cbt,
-          c.status,
-          c.description,
-          0 as isVoucher
+            c.id,
+            c.course_name,
+            c.course_abb,
+            '1 day' as duration,
+            c.is_cbt,
+            c.status,
+            c.description,
+            0 as isVoucher
         FROM courses c
-        JOIN course_events ce ON c.id = ce.course_id
-        JOIN course_event_dates ced ON ce.id = ced.course_event_id
+        JOIN course_events ce
+            ON c.id = ce.course_id
+        JOIN course_event_dates ced
+            ON ce.id = ced.course_event_id
         WHERE c.status = '1'
-          AND c.isDeleted = '0'
-          AND ce.status = '1'
-          AND ce.booking_limit > 0
-          AND ced.event_date IS NOT NULL
-          AND STR_TO_DATE(ced.event_date, '%Y-%m-%d') IS NOT NULL
-          AND ced.event_date > CURDATE()
-        ORDER BY c.course_name
+        AND c.isDeleted = '0'
+        AND ce.status = '1'
+        AND ce.booking_limit > 0
+        AND ce.booking_limit > ce.bookings_done
+        AND ced.event_date
+            BETWEEN CURDATE()
+            AND DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
+        ORDER BY c.course_name;
       `);
 
       const formattedCourses = await Promise.all(courses.map(async course => ({
@@ -105,6 +108,7 @@ class BookingFlowController {
           AND ce.location_id = ?
           AND c.status = '1'
           AND ce.status = '1'
+          AND ce.booking_limit > ce.bookings_done
           AND ced.course_event_id IN (
             SELECT DISTINCT course_event_id
             FROM course_event_dates
