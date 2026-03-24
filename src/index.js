@@ -160,7 +160,7 @@ app.use('/api/attendee', createAttendeeRoutes(pool));
 app.use('/api/vouchers', createGiftVoucherRoutes(pool));
 app.use('/api/vouchers', createDebugVoucherRoutes(pool));
 app.use('/restapi/booking', createCheckAvailabilityRoutes(pool));
-app.use('/api/booking', createConfirmBookingRoutes(pool));
+app.use('/restapi/booking', createConfirmBookingRoutes(pool));
 app.use('/restapi/booking', createGetcourseRoutes(pool));
 app.use('/restapi/booking', createHoldSpaceRoutes(pool));
 app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
