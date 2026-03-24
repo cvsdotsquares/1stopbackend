@@ -101,7 +101,42 @@ class StripeWebhookController {
         }
 
         const paidAmount = (session.amount_received || session.amount || 0) / 100;
-        const perBookingAmount = paidAmount / allBookingIds.length;
+
+        // Prefer per-booking amounts from the booking records, so mixed own/school values (e.g. 200 + 300) are preserved.
+        const placeholderList = allBookingIds.map(() => '?').join(',');
+        const [bookingRows] = await connection.query(
+          `SELECT id, total_amount, payment_due FROM bookings WHERE id IN (${placeholderList})`,
+          allBookingIds
+        );
+
+        const bookingAmounts = allBookingIds.map((bid) => {
+          const b = bookingRows.find((row) => Number(row.id) === Number(bid));
+          if (!b) return paidAmount / allBookingIds.length;
+
+          const amount = Number(b.total_amount || 0) - Number(b.payment_due || 0);
+          return Math.max(amount, 0);
+        });
+
+        const computedTotal = bookingAmounts.reduce((sum, amount) => sum + amount, 0);
+        const fallbackPerBookingAmount = paidAmount / allBookingIds.length;
+
+        console.log('Stripe webhook bookingAmounts', {
+          allBookingIds,
+          bookingRows,
+          bookingAmounts,
+          paidAmount,
+          computedTotal,
+          fallbackPerBookingAmount
+        });
+
+        // If the computed total differs from paid amount (e.g. rounding or partial payments), preserve the paid amount.
+        if (Math.abs(computedTotal - paidAmount) > 0.01 || computedTotal <= 0) {
+          console.log('Stripe webhook fallback to equal split payment amounts');
+          // fallback to equal split if no valid booking amount breakdown exists
+          for (let i = 0; i < bookingAmounts.length; i += 1) {
+            bookingAmounts[i] = fallbackPerBookingAmount;
+          }
+        }
 
         // Lock event and move from current_locks to bookings_done
         const [eventDetails] = await connection.query(`
@@ -121,7 +156,17 @@ class StripeWebhookController {
 
         // Update each booking status and insert a payment record for each
         // payment_due and admin_payment_received are already set correctly at booking creation time
-        for (const bid of allBookingIds) {
+        let assignedSum = 0;
+        const useBookingAmounts = computedTotal > 0 && Math.abs(computedTotal - paidAmount) <= 0.5;
+
+        for (let i = 0; i < allBookingIds.length; i += 1) {
+          const bid = allBookingIds[i];
+          const amountForBooking = useBookingAmounts
+            ? (i === allBookingIds.length - 1 ? paidAmount - assignedSum : bookingAmounts[i])
+            : fallbackPerBookingAmount;
+
+          assignedSum += amountForBooking;
+
           await connection.query(`
             UPDATE bookings SET status = 1, modified = NOW() WHERE id = ?
           `, [bid]);
@@ -130,7 +175,7 @@ class StripeWebhookController {
             INSERT INTO booking_payments
             (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
             VALUES (?, 'SALE', ?, ?, 'booking', ?, NOW(), 0, '', '')
-          `, [bid, session.payment_intent || session.id, perBookingAmount, JSON.stringify({ session_id: session.id, payment_status: session.payment_status })]);
+          `, [bid, session.payment_intent || session.id, amountForBooking, JSON.stringify({ session_id: session.id, payment_status: session.payment_status })]);
         }
 
         await connection.commit();

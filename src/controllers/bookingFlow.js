@@ -1140,17 +1140,17 @@ class BookingFlowController {
           (courseData[0].school_deposit_price > 0 || courseData[0].own_deposit_price > 0) &&
           !(courseData[0].school_one_off_price > 0 || courseData[0].own_one_off_price > 0);
 
-        if (hasDepositPricingOnly && !chargeDepositNow) {
-          const depositCheck = this.validateDepositEligibility(courseData[0], eventDates);
-          if (!depositCheck.eligible) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({
-              success: false,
-              message: depositCheck.reason || 'Deposit payment is not available for this booking date. Full payment is required.',
-            });
-          }
-        }
+        // if (hasDepositPricingOnly && !chargeDepositNow) {
+        //   const depositCheck = this.validateDepositEligibility(courseData[0], eventDates);
+        //   if (!depositCheck.eligible) {
+        //     await connection.rollback();
+        //     connection.release();
+        //     return res.status(400).json({
+        //       success: false,
+        //       message: depositCheck.reason || 'Deposit payment is not available for this booking date. Full payment is required.',
+        //     });
+        //   }
+        // }
 
         // Calculate full course fees and initial payable amount separately
         // Track per-attendee amounts for accurate per-booking storage

@@ -24,6 +24,7 @@ const createWebhookRoutes = require('./routes/webhook');
 const createManualPaymentRoutes = require('./routes/manualPayment');
 const createDashboardRoutes = require('./routes/dashboard');
 const createUserRoutes = require('./routes/user');
+const createAttendeeRoutes = require('./routes/attendee');
 const createGiftVoucherRoutes = require('./routes/giftVoucher');
 const createDebugVoucherRoutes = require('./routes/debugVoucher');
 const createCheckAvailabilityRoutes = require('./routes/checkAvailability');
@@ -155,6 +156,7 @@ app.use('/api/webhook', createWebhookRoutes(pool));
 app.use('/api/payment', createManualPaymentRoutes(pool));
 app.use('/api/dashboard', createDashboardRoutes(pool));
 app.use('/api/user', createUserRoutes(pool));
+app.use('/api/attendee', createAttendeeRoutes(pool));
 app.use('/api/vouchers', createGiftVoucherRoutes(pool));
 app.use('/api/vouchers', createDebugVoucherRoutes(pool));
 app.use('/restapi/booking', createCheckAvailabilityRoutes(pool));
@@ -261,6 +263,9 @@ app.get('/api', (req, res) => {
       user: {
         'GET /api/user/profile': 'Get user profile (requires token)',
         'PUT /api/user/profile': 'Update user profile (requires token)'
+      },
+      attendee: {
+        'GET /api/attendee/:refId': 'Get attendee details by Ref ID (requires token)',
       }
     },
     authentication: {

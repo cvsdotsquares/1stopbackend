@@ -413,7 +413,7 @@ class CMSPagesController {
       // Get service areas section data
       let serviceAreasSectionData = [];
       const [serviceAreasSections] = await this.pool.query(`
-        SELECT id, border, show_bg
+        SELECT id, border, show_bg, bullet_type
         FROM service_areas_section
         WHERE page_id = ?
         ORDER BY id ASC
@@ -430,6 +430,7 @@ class CMSPagesController {
         serviceAreasSectionData.push({
           border: !!section.border,
           show_bg: !!section.show_bg,
+          bullet_type: section.bullet_type || null,
           areas: serviceAreas.map(area => ({
             left_text: area.left_text || null,
             right_text: area.right_text || null
