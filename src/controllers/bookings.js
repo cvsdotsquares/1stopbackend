@@ -731,11 +731,6 @@ class BookingController {
         const now = new Date();
         const hoursUntilEvent = (eventDate - now) / (1000 * 60 * 60);
 
-        if (hoursUntilEvent < 24) {
-          // Still allow cancellation but note it's late
-          console.log(`Late cancellation: ${hoursUntilEvent} hours until event`);
-        }
-
         // Update booking status to cancelled
         await connection.query(`
           UPDATE bookings

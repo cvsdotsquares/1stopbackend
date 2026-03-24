@@ -16,12 +16,10 @@ class StripeWebhookController {
 
     // Temporary: Skip signature verification for testing
     if (endpointSecret === 'whsec_...') {
-      console.log('⚠️  Using webhook without signature verification (testing mode)');
       event = req.body;
     } else {
       try {
         event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-        console.log('Stripe webhook event received:', event.type);
       } catch (err) {
         console.error('Webhook signature verification failed:', err.message);
         return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -29,12 +27,9 @@ class StripeWebhookController {
     }
 
     try {
-      console.log(`📨 Processing webhook event: ${event.type}`);
-      console.log(`📋 Event data:`, JSON.stringify(event.data?.object?.metadata || {}, null, 2));
 
       switch (event.type) {
         case 'payment_intent.created':
-          console.log('ℹ️ Payment intent created (no action needed)');
           break;
         case 'payment_intent.succeeded':
           const paymentIntent = event.data.object;
@@ -43,18 +38,14 @@ class StripeWebhookController {
           } else {
             await this.handlePaymentSuccess(paymentIntent);
           }
-          console.log('✅ Payment intent succeeded');
           break;
         case 'payment_intent.payment_failed':
-          console.log('❌ Handling payment failed...');
           await this.handlePaymentFailed(event.data.object);
           break;
         case 'payment_intent.canceled':
-          console.log('❌ Handling payment canceled...');
           await this.handlePaymentCanceled(event.data.object);
           break;
         default:
-          console.log(`⚠️ Unhandled event type: ${event.type}`);
       }
 
       res.json({ received: true });
@@ -65,8 +56,6 @@ class StripeWebhookController {
   }
 
   async handlePaymentSuccess(session) {
-    console.log('🔄 Processing successful payment for session:', session.id);
-    console.log('📋 Session metadata:', session.metadata);
 
     // Check if gift voucher
     if (session.metadata?.type === 'gift_voucher') {
@@ -83,7 +72,6 @@ class StripeWebhookController {
 
     if (allBookingIds.length > 0 && course_event_id && (spaces || attendees_count)) {
       const bookingSpaces = Number.parseInt(spaces || attendees_count, 10);
-      console.log(`💼 Processing payment for bookings: ${allBookingIds.join(', ')}`);
 
       const connection = await this.pool.getConnection();
       await connection.beginTransaction();
@@ -95,7 +83,6 @@ class StripeWebhookController {
         `, [session.payment_intent || session.id]);
 
         if (existingPayment.length > 0) {
-          console.log(`⚠️ Payment already processed`);
           await connection.commit();
           return;
         }
@@ -120,18 +107,8 @@ class StripeWebhookController {
         const computedTotal = bookingAmounts.reduce((sum, amount) => sum + amount, 0);
         const fallbackPerBookingAmount = paidAmount / allBookingIds.length;
 
-        console.log('Stripe webhook bookingAmounts', {
-          allBookingIds,
-          bookingRows,
-          bookingAmounts,
-          paidAmount,
-          computedTotal,
-          fallbackPerBookingAmount
-        });
-
         // If the computed total differs from paid amount (e.g. rounding or partial payments), preserve the paid amount.
         if (Math.abs(computedTotal - paidAmount) > 0.01 || computedTotal <= 0) {
-          console.log('Stripe webhook fallback to equal split payment amounts');
           // fallback to equal split if no valid booking amount breakdown exists
           for (let i = 0; i < bookingAmounts.length; i += 1) {
             bookingAmounts[i] = fallbackPerBookingAmount;
@@ -151,7 +128,6 @@ class StripeWebhookController {
                 modified = NOW()
             WHERE id = ?
           `, [bookingSpaces, bookingSpaces, course_event_id]);
-          console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
         }
 
         // Update each booking status and insert a payment record for each
@@ -179,7 +155,6 @@ class StripeWebhookController {
         }
 
         await connection.commit();
-        console.log(`✅ Payment confirmed for bookings: ${allBookingIds.join(', ')}`);
 
         // Send confirmation email for each booking
         for (const bid of allBookingIds) {
@@ -204,7 +179,6 @@ class StripeWebhookController {
   }
 
   async handlePaymentExpired(session) {
-    console.log('Processing expired payment for session:', session.id);
 
     const { booking_id } = session.metadata;
 
@@ -225,7 +199,6 @@ class StripeWebhookController {
       `, [booking_id]);
 
       if (bookings.length === 0) {
-        console.log('No booking found for expired payment:', booking_id);
         await connection.rollback();
         return;
       }
@@ -234,12 +207,9 @@ class StripeWebhookController {
 
       // Only cleanup if booking hasn't been paid
       if (booking.admin_payment_received > 0) {
-        console.log('Booking already paid, no cleanup needed:', booking_id);
         await connection.rollback();
         return;
       }
-
-      console.log(`⏱️ Payment expired for booking ${booking_id} - initiating cleanup`);
 
       // Release current_locks for this booking - CRITICAL
       if (booking.course_event_id && booking.spaces) {
@@ -249,20 +219,16 @@ class StripeWebhookController {
               modified = NOW()
           WHERE id = ?
         `, [booking.spaces, booking.course_event_id]);
-        console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
       }
 
       // Delete attendee records (which also deletes booking references)
       await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
       await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
-      console.log(`🗑️ Deleted attendee records for booking ${booking.id}`);
 
       // Delete booking
       await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
-      console.log(`🗑️ Deleted booking ${booking.id}`);
 
       await connection.commit();
-      console.log(`✅ Successfully cleaned up expired payment for booking ${booking.id}`);
 
     } catch (error) {
       await connection.rollback();
@@ -274,7 +240,6 @@ class StripeWebhookController {
   }
 
   async handlePaymentFailed(paymentIntent) {
-    console.log('Processing failed payment for payment intent:', paymentIntent.id);
 
     const { type, bid, booking_id, booking_ids, course_event_id, attendees_count } = paymentIntent.metadata || {};
 
@@ -289,17 +254,14 @@ class StripeWebhookController {
           `DELETE FROM gift_voucher_copieds WHERE bid = ?`,
           [bid]
         );
-        console.log(`🗑️ Deleted gift_voucher_copieds entry for bid ${bid}`);
 
         // Delete the placeholder booking row
         await connection.query(
           `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
           [bid]
         );
-        console.log(`🗑️ Deleted placeholder booking row for bid ${bid} due to payment failure`);
 
         await connection.commit();
-        console.log(`✅ Cleaned up failed gift voucher payment for bid ${bid}`);
       } catch (error) {
         await connection.rollback();
         console.error('❌ Error cleaning up failed gift voucher payment:', error);
@@ -340,7 +302,6 @@ class StripeWebhookController {
           await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [bid]);
           await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [bid]);
           await connection.query(`DELETE FROM bookings WHERE id = ?`, [bid]);
-          console.log(`🗑️ Cleaned up failed booking ${bid}`);
         }
 
         await connection.commit();
@@ -356,7 +317,6 @@ class StripeWebhookController {
   }
 
   async handlePaymentCanceled(paymentIntent) {
-    console.log('Processing canceled payment for payment intent:', paymentIntent.id);
 
     const { type, bid, booking_id, booking_ids, course_event_id, attendees_count } = paymentIntent.metadata || {};
 
@@ -371,17 +331,14 @@ class StripeWebhookController {
           `DELETE FROM gift_voucher_copieds WHERE bid = ?`,
           [bid]
         );
-        console.log(`🗑️ Deleted gift_voucher_copieds entry for bid ${bid}`);
 
         // Delete the placeholder booking row
         await connection.query(
           `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
           [bid]
         );
-        console.log(`🗑️ Deleted placeholder booking row for bid ${bid} due to payment cancellation`);
 
         await connection.commit();
-        console.log(`✅ Cleaned up canceled gift voucher payment for bid ${bid}`);
       } catch (error) {
         await connection.rollback();
         console.error('❌ Error cleaning up canceled gift voucher payment:', error);
@@ -422,7 +379,6 @@ class StripeWebhookController {
           await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [bid]);
           await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [bid]);
           await connection.query(`DELETE FROM bookings WHERE id = ?`, [bid]);
-          console.log(`🗑️ Cleaned up canceled booking ${bid}`);
         }
 
         await connection.commit();
@@ -509,7 +465,6 @@ class StripeWebhookController {
   }
 
   async handleGiftVoucherPaymentIntent(paymentIntent) {
-    console.log('🎁 Processing gift voucher payment intent:', paymentIntent.id);
 
     const { bid, voucher_ref } = paymentIntent.metadata;
 
@@ -529,7 +484,6 @@ class StripeWebhookController {
       );
 
       if (existingPayment.length > 0) {
-        console.log(`⚠️ Gift voucher ${voucher_ref} already processed`);
         await connection.rollback();
         return;
       }
@@ -540,7 +494,6 @@ class StripeWebhookController {
       );
 
       if (vouchers.length === 0) {
-        console.error(`❌ Gift voucher ${bid} not found`);
         await connection.rollback();
         return;
       }
@@ -553,7 +506,6 @@ class StripeWebhookController {
       );
 
       if (existingVoucher.length > 0) {
-        console.log(`⚠️ Gift voucher with bid ${bid} already exists in gift_voucher table`);
         await connection.rollback();
         return;
       }
@@ -561,17 +513,6 @@ class StripeWebhookController {
       const vData = vouchers[0];
       const paidAmount = (paymentIntent.amount_received || paymentIntent.amount) / 100;
       const voucherDate = formatDateToDDMMYYYY(new Date());
-
-      // Insert into gift_voucher with unique reference
-      console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
-      console.log(`📊 Voucher data:`, JSON.stringify({
-        bid: vData.bid,
-        voucher_ref: uniqueVoucherRef,
-        user_id: vData.user_id,
-        voucher_value: vData.voucher_value,
-        voucher_person: vData.voucher_person,
-        voucher_email: vData.voucher_email
-      }, null, 2));
 
       let insertResult;
       try {
@@ -587,7 +528,6 @@ class StripeWebhookController {
            vData.voucher_value, vData.purchased_by, vData.voucher_contact || '',
            vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1]
         );
-        console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
       } catch (insertError) {
         console.error(`❌ CRITICAL: Failed to insert into gift_voucher table:`, insertError);
         console.error(`SQL Error Code: ${insertError.code}, SQLState: ${insertError.sqlState}`);
@@ -626,15 +566,12 @@ class StripeWebhookController {
         `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
         [vData.bid]
       );
-      console.log(`🗑️ Deleted placeholder booking row for bid ${vData.bid}`);
 
       await connection.commit();
-      console.log(`✅ Gift voucher ${actualVoucher[0].voucher_ref} payment confirmed`);
 
       // Send email with actual voucher data
       try {
         await sendGiftVoucherEmail(actualVoucher[0], this.pool);
-        console.log(`📧 Gift voucher email sent to ${actualVoucher[0].voucher_email}`);
       } catch (emailError) {
         console.error('❌ Error sending gift voucher email:', emailError);
       }
@@ -656,7 +593,6 @@ class StripeWebhookController {
   }
 
   async handleGiftVoucherPayment(session) {
-    console.log('🎁 Processing gift voucher payment:', session.id);
 
     const { bid } = session.metadata;
 
@@ -676,7 +612,6 @@ class StripeWebhookController {
       );
 
       if (existingVoucher.length > 0) {
-        console.log(`⚠️ Gift voucher with bid ${bid} already exists in gift_voucher table`);
         await connection.rollback();
         return;
       }
@@ -699,17 +634,6 @@ class StripeWebhookController {
       const uniqueVoucherRef = `1SGV${vData.bid} - OGV`;
       const voucherDate = formatDateToDDMMYYYY(new Date());
 
-      // Insert into gift_voucher with unique reference
-      console.log(`📝 Inserting gift voucher with bid ${vData.bid} and ref ${uniqueVoucherRef}`);
-      console.log(`📊 Voucher data:`, JSON.stringify({
-        bid: vData.bid,
-        voucher_ref: uniqueVoucherRef,
-        user_id: vData.user_id,
-        voucher_value: vData.voucher_value,
-        voucher_person: vData.voucher_person,
-        voucher_email: vData.voucher_email
-      }, null, 2));
-
       let insertResult;
       try {
         [insertResult] = await connection.query(
@@ -724,7 +648,6 @@ class StripeWebhookController {
            vData.voucher_value, vData.purchased_by, vData.voucher_contact || '',
            vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1]
         );
-        console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
       } catch (insertError) {
         console.error(`❌ CRITICAL: Failed to insert into gift_voucher table:`, insertError);
         console.error(`SQL Error Code: ${insertError.code}, SQLState: ${insertError.sqlState}`);
@@ -768,15 +691,12 @@ class StripeWebhookController {
         `DELETE FROM bookings WHERE id = ? AND booking_made_by = 'gift_voucher'`,
         [vData.bid]
       );
-      console.log(`🗑️ Deleted placeholder booking row for bid ${vData.bid}`);
 
       await connection.commit();
-      console.log(`✅ Gift voucher ${actualVoucher[0].voucher_ref} payment confirmed`);
 
       // Send email with actual voucher data
       try {
         await sendGiftVoucherEmail(actualVoucher[0], this.pool);
-        console.log(`📧 Gift voucher email sent to ${actualVoucher[0].voucher_email}`);
       } catch (emailError) {
         console.error('❌ Error sending gift voucher email:', emailError);
       }
@@ -813,7 +733,7 @@ class StripeWebhookController {
       `, [booking_id]);
 
       if (bookings.length === 0) {
-        console.log(`⚠️ Booking not found for email: ${booking_id}`);
+        console.error(`⚠️ Booking not found for email: ${booking_id}`);
         return;
       }
 
@@ -884,7 +804,6 @@ class StripeWebhookController {
         ip: 'webhook'
       }, this.pool);
 
-      console.log(`📧 Booking confirmation email sent for booking ${booking_id} (${booking.booking_ref})`);
     } catch (error) {
       console.error('❌ Error sending booking confirmation email:', error);
       throw error;

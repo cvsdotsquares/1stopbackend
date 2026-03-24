@@ -43,7 +43,6 @@ class GiftVoucherController {
         );
 
         const bid = bookingInsert.insertId;
-        console.log(`🎫 Reserved booking ID ${bid} for gift voucher`);
 
         // Generate voucher reference
         const voucher_ref = `1SGV${bid} - OGV`;
@@ -60,7 +59,6 @@ class GiftVoucherController {
            voucher_value, purchased_by, contact_number, email_address, user_id]
         );
 
-        console.log(`✅ Inserted into gift_voucher_copieds with bid ${bid}, row ID: ${insertResult.insertId}`);
 
         // Calculate total with VAT
         const vat = voucher_value * 0.2;
@@ -84,7 +82,6 @@ class GiftVoucherController {
 
         // Commit the transaction
         await connection.commit();
-        console.log(`✅ Gift voucher creation completed successfully for bid ${bid}`);
 
         res.json({
           success: true,

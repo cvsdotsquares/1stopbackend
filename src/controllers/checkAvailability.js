@@ -4,15 +4,15 @@ const path = require('path');
 const LOG_FILE = path.join(__dirname, '../../check_availability.log');
 
 const logRequest = (status, message, data = null) => {
-  const timestamp = new Date().toLocaleString('en-GB', { 
-    day: '2-digit', 
-    month: '2-digit', 
-    year: 'numeric', 
-    hour: '2-digit', 
+  const timestamp = new Date().toLocaleString('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
     minute: '2-digit',
-    hour12: false 
+    hour12: false
   }).replace(',', '');
-  
+
   const logEntry = `[${timestamp}] :: Status:${status} -- ${message} >> ${data ? JSON.stringify(data) : 'N/A'}\n`;
   fs.appendFileSync(LOG_FILE, logEntry);
 };
@@ -75,15 +75,15 @@ const checkAvailability = (pool) => async (req, res) => {
 
   try {
     let query = `
-      SELECT 
-        courseId, 
-        eventId, 
-        course_name, 
-        address4, 
-        event_date, 
-        event_start_time, 
-        event_end_time, 
-        availableSpace, 
+      SELECT
+        courseId,
+        eventId,
+        course_name,
+        address4,
+        event_date,
+        event_start_time,
+        event_end_time,
+        availableSpace,
         vehicle_automatic
       FROM booking_status
       WHERE courseId = ?
@@ -100,11 +100,6 @@ const checkAvailability = (pool) => async (req, res) => {
       query += " AND course_name = ?";
       params.push('CBT');
     }
-
-    console.log('🔍 Check Availability Query Debug:');
-    console.log('  Query:', query);
-    console.log('  Params:', params);
-    console.log('  Request Body:', { school_course_id, location, course_type, date, start_time, finish_time });
 
     const [results] = await pool.query(query, params);
 
