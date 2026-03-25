@@ -112,7 +112,7 @@ class CMSPagesController {
         // Sanitize content to prevent hydration issues
         section.items = items.map(item => ({
           ...item,
-          item_content: item.item_content ? item.item_content.trim().replace(/\r\n/g, '\n') : ''
+          item_content: item.item_content ? item.item_content.trim().replaceAll('\r\n', '\n') : ''
         }));
       }
 
@@ -121,8 +121,7 @@ class CMSPagesController {
       let servicesData = null;
       let trainingSliderData = null;
       let whyUsData = null;
-      let cbtLondonData = null;
-      let cbtTestLondonData = null;
+
       let featuresData = null;
       let bannersData = null;
 
@@ -235,7 +234,7 @@ class CMSPagesController {
             id: index + 1,
             title: item.slide_title || null,
             image: item.slider_img ? '/uploads/expert_training/' + item.slider_img : null,
-            link: "/" + (item.slide_title || "").toLowerCase().replace(/\s+/g, '-')
+            link: "/" + (item.slide_title || "").toLowerCase().replaceAll(' ', '-')
           }))
         };
       }
@@ -264,43 +263,52 @@ class CMSPagesController {
         };
       }
 
-      // Get CBT across London data
-      const [cbtLondon] = await this.pool.query(`
-        SELECT title, subtitle, description, cbt_image, marker_text, bg_color
+      // Get ALL CBT across London sections for this page
+      const [cbtLondonRows] = await this.pool.query(`
+        SELECT id, title, subtitle, description, cbt_image, marker_text, bg_color
         FROM cbt_across_london
         WHERE page_id = ?
       `, [page.id]);
 
-      if (cbtLondon.length > 0) {
-        cbtLondonData = {
-          title: cbtLondon[0].title || null,
-          subtitle: cbtLondon[0].subtitle || null,
-          description: cbtLondon[0].description || null,
-          marker_text: cbtLondon[0].marker_text || null,
-          bg_color: !!cbtLondon[0].bg_color,
-          image: cbtLondon[0].cbt_image ? `/uploads/cbt_across_london/${cbtLondon[0].cbt_image}` : null
-        };
+      // For each cbt_london section, push as a separate section, ordered by page_junction
+      let cbtLondonSectionData = [];
+      if (cbtLondonRows.length > 0) {
+        // For each row, get its order from page_junction (section_data = 'cbt_across_london' or similar, data_id = page.id)
+        // We'll use the same getNextSectionOrder logic, so each consumes its own order entry
+        cbtLondonRows.forEach(row => {
+          cbtLondonSectionData.push({
+            title: row.title || null,
+            subtitle: row.subtitle || null,
+            description: row.description || null,
+            marker_text: row.marker_text || null,
+            bg_color: !!row.bg_color,
+            image: row.cbt_image ? `/uploads/cbt_across_london/${row.cbt_image}` : null
+          });
+        });
       }
 
-      // Get CBT test London data
-      const [cbtTestLondon] = await this.pool.query(`
-        SELECT title, subtitle, description, cbt_image, marker_text, bg_color, title_top_center
+      // Get ALL CBT test London sections for this page
+      const [cbtTestLondonRows] = await this.pool.query(`
+        SELECT id, title, subtitle, description, cbt_image, marker_text, bg_color, title_top_center
         FROM cbt_test_london
         WHERE page_id = ?
       `, [page.id]);
 
-      if (cbtTestLondon.length > 0) {
-        cbtTestLondonData = {
-          title: cbtTestLondon[0].title || null,
-          subtitle: cbtTestLondon[0].subtitle || null,
-          description: cbtTestLondon[0].description || null,
-          marker_text: cbtTestLondon[0].marker_text || null,
-          bg_color: !!cbtTestLondon[0].bg_color,
-          title_top_center: cbtTestLondon[0].title_top_center || null,
-          image: cbtTestLondon[0].cbt_image ? `/uploads/cbt_test_london/${cbtTestLondon[0].cbt_image}` : null
-        };
+      // For each cbt_test_london section, push as a separate section, ordered by page_junction
+      let cbtTestLondonSectionData = [];
+      if (cbtTestLondonRows.length > 0) {
+        cbtTestLondonRows.forEach(row => {
+          cbtTestLondonSectionData.push({
+            title: row.title || null,
+            subtitle: row.subtitle || null,
+            description: row.description || null,
+            marker_text: row.marker_text || null,
+            bg_color: !!row.bg_color,
+            title_top_center: row.title_top_center || null,
+            image: row.cbt_image ? `/uploads/cbt_test_london/${row.cbt_image}` : null
+          });
+        });
       }
-
       // Get features data
       const [exceptional] = await this.pool.query(`
         SELECT exceptional_title, exceptional_subtitle, exceptional_content,
@@ -619,19 +627,23 @@ class CMSPagesController {
         });
       }
 
-      if (cbtTestLondonData) {
-        pageSections.push({
-          type: 'cbt_test_london',
-          order: getNextSectionOrder(['cheap_cbt_test_london', 'cbt_test_london'], 50),
-          data: cbtTestLondonData
+      if (cbtTestLondonSectionData.length > 0) {
+        cbtTestLondonSectionData.forEach(sectionData => {
+          pageSections.push({
+            type: 'cbt_test_london',
+            order: getNextSectionOrder(['cheap_cbt_test_london', 'cbt_test_london'], 50),
+            data: sectionData
+          });
         });
       }
 
-      if (cbtLondonData) {
-        pageSections.push({
-          type: 'cbt_london',
-          order: getNextSectionOrder(['cheap_cbt_test_across_london', 'cbt_across_london', 'cbt_london'], 60),
-          data: cbtLondonData
+      if (cbtLondonSectionData.length > 0) {
+        cbtLondonSectionData.forEach(sectionData => {
+          pageSections.push({
+            type: 'cbt_london',
+            order: getNextSectionOrder(['cheap_cbt_test_across_london', 'cbt_across_london', 'cbt_london'], 60),
+            data: sectionData
+          });
         });
       }
 
@@ -773,7 +785,7 @@ class CMSPagesController {
       const responseData = {
         pages_menu,
         ...page,
-        page_content: page.page_content ? page.page_content.trim().replace(/\r\n/g, '\n') : '',
+        page_content: page.page_content ? page.page_content.trim().replaceAll('\r\n', '\n') : '',
         sections: pageSections
       };
 
@@ -790,8 +802,7 @@ class CMSPagesController {
           services_count: services.length,
           training_slider_count: trainingSlider.length,
           why_us_count: whyUs.length,
-          cbt_london_count: cbtLondon.length,
-          cbt_test_london_count: cbtTestLondon.length,
+          cbt_test_london_count: cbtTestLondonRows.length,
           exceptional_count: exceptional.length,
           banners_count: banners.length,
           info_card_section_count: infoCardSections.length,
