@@ -32,9 +32,8 @@ class BookingFlowController {
         AND ce.status = '1'
         AND ce.booking_limit > 0
         AND ce.booking_limit > ce.bookings_done
-        AND ced.event_date
-            BETWEEN CURDATE()
-            AND DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
+        AND ced.event_date > CURDATE()
+        AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
         ORDER BY c.course_name;
       `);
 
@@ -462,10 +461,12 @@ class BookingFlowController {
           AND ce.course_id = ?
           AND ce.status = '1'
           AND ce.booking_limit > 0
+          AND ce.booking_limit > ce.bookings_done
           AND c.status = '1'
           AND ced.event_date IS NOT NULL
           AND STR_TO_DATE(ced.event_date, '%Y-%m-%d') IS NOT NULL
           AND ced.event_date > CURDATE()
+          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
       `, [course_id]);
 
       res.json({ success: true, data: locations });
