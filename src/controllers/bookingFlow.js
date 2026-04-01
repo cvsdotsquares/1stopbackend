@@ -382,6 +382,7 @@ class BookingFlowController {
           AND ce.status = '1'
           AND DATE(ced.event_date) > DATE(NOW())
           AND DATE(ced.event_date) <= DATE_ADD(DATE(NOW()), INTERVAL 3 MONTH)
+          AND ce.booking_limit > ce.bookings_done
         ORDER BY ced.event_date ASC, l.location_name ASC
         LIMIT 1
       `, [courseId]);
