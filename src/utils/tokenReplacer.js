@@ -3,6 +3,66 @@ let tokensCache = null;
 let tokensCacheTime = 0;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
+function getPhpSiteUrlBase() {
+  const rawBaseUrl = process.env.PHP_SITE_URL;
+  if (!rawBaseUrl || typeof rawBaseUrl !== 'string') return '';
+  return rawBaseUrl.trim().replace(/\/+$/, '');
+}
+
+function normalizeCkeditorImageSrcs(content) {
+  if (!content || typeof content !== 'string') return content;
+
+  const baseUrl = getPhpSiteUrlBase();
+  if (!baseUrl) return content;
+
+  const isAbsoluteOrIgnored = (src) => {
+    if (!src || typeof src !== 'string') return true;
+
+    const trimmed = src.trim();
+    return (
+      /^https?:\/\//i.test(trimmed) ||
+      trimmed.startsWith('//') ||
+      /^(data:|blob:|mailto:|tel:|#)/i.test(trimmed)
+    );
+  };
+
+  const toAbsoluteSrc = (src) => {
+    const trimmed = src.trim();
+    const baseLower = baseUrl.toLowerCase();
+
+    if (trimmed.toLowerCase().startsWith(baseLower)) {
+      return trimmed;
+    }
+
+    if (trimmed.startsWith('/')) {
+      return `${baseUrl}${trimmed}`;
+    }
+
+    const relativeSrc = trimmed.replace(/^\.\//, '');
+    return `${baseUrl}/${relativeSrc}`;
+  };
+
+  const normalizeQuotedSrc = (match, prefix, quote, srcValue) => {
+    if (isAbsoluteOrIgnored(srcValue)) {
+      return match;
+    }
+
+    return `${prefix}${quote}${toAbsoluteSrc(srcValue)}${quote}`;
+  };
+
+  const normalizeUnquotedSrc = (match, prefix, srcValue) => {
+    if (isAbsoluteOrIgnored(srcValue)) {
+      return match;
+    }
+
+    return `${prefix}${toAbsoluteSrc(srcValue)}`;
+  };
+
+  return content
+    .replaceAll(/(<img\b[^>]*\bsrc\s*=\s*)(["'])([^"']+)\2/gi, normalizeQuotedSrc)
+    .replaceAll(/(<img\b[^>]*\bsrc\s*=\s*)([^\s"'>]+)/gi, normalizeUnquotedSrc);
+}
+
 async function getTokens(pool) {
   const now = Date.now();
   if (tokensCache && (now - tokensCacheTime) < CACHE_DURATION) {
@@ -33,7 +93,7 @@ async function replaceTokens(pool, content) {
     replacedContent = replacedContent.replace(tokenPattern, tokens[tokenName]);
   });
 
-  return replacedContent;
+  return normalizeCkeditorImageSrcs(replacedContent);
 }
 
 async function replaceTokensInObject(pool, obj) {
@@ -58,4 +118,4 @@ async function replaceTokensInObject(pool, obj) {
   return obj;
 }
 
-module.exports = { replaceTokens, replaceTokensInObject };
+module.exports = { replaceTokens, replaceTokensInObject, normalizeCkeditorImageSrcs };

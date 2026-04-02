@@ -28,7 +28,7 @@ class CMSPagesController {
           id, page_title, slug , meta_title, meta_keyword, meta_desc,
           is_parent, parent_level, link_title, banner_type, overlay_caption, page_content, overlay_caption_text,
           weight, carousel_static_image, carousel_static_caption, featured_service, featured_icon,
-          footer_link, testimonial_display, featured_display, accreditation_display, created, updated
+          footer_link, testimonial_display, featured_display, accreditation_display, display_counter, created, updated
         FROM pages
         WHERE id = ?
       `, [pages_menu.length > 0 ? pages_menu[0].page_link_id : null]);
@@ -242,7 +242,7 @@ class CMSPagesController {
       // Get why us data
       const [whyUs] = await this.pool.query(`
         SELECT w1s.why_title, w1s.why_subtitle, w1s.why_content, w1s.why_footer_content,
-               w1si.icon_title, w1si.icon_img, w1si.icon_content
+               w1si.icon_title, w1si.icon_img, w1si.icon_content, w1si.icon_link_title, w1si.icon_link
         FROM why_1stop w1s
         LEFT JOIN why_1stop_images w1si ON w1s.id = w1si.why_id
         WHERE w1s.page_id = ?
@@ -258,14 +258,16 @@ class CMSPagesController {
             id: index + 1,
             title: item.icon_title,
             description: item.icon_content || null,
-            icon: '/uploads/why_1stop/' + item.icon_img || null
+            icon: '/uploads/why_1stop/' + item.icon_img || null,
+            linkUrl: item.icon_link || null,
+            linkTitle: item.icon_link_title || null
           }))
         };
       }
 
       // Get ALL CBT across London sections for this page
       const [cbtLondonRows] = await this.pool.query(`
-        SELECT id, title, subtitle, description, cbt_image, marker_text, bg_color
+        SELECT id, title, subtitle, description, cbt_image, marker_text, bg_color, marker_link
         FROM cbt_across_london
         WHERE page_id = ?
       `, [page.id]);
@@ -281,6 +283,7 @@ class CMSPagesController {
             subtitle: row.subtitle || null,
             description: row.description || null,
             marker_text: row.marker_text || null,
+            marker_link: row.marker_link || null,
             bg_color: !!row.bg_color,
             image: row.cbt_image ? `/uploads/cbt_across_london/${row.cbt_image}` : null
           });
@@ -289,7 +292,7 @@ class CMSPagesController {
 
       // Get ALL CBT test London sections for this page
       const [cbtTestLondonRows] = await this.pool.query(`
-        SELECT id, title, subtitle, description, cbt_image, marker_text, bg_color, title_top_center
+        SELECT id, title, subtitle, description, cbt_image, marker_text, bg_color, title_top_center, marker_link
         FROM cbt_test_london
         WHERE page_id = ?
       `, [page.id]);
@@ -303,6 +306,7 @@ class CMSPagesController {
             subtitle: row.subtitle || null,
             description: row.description || null,
             marker_text: row.marker_text || null,
+            marker_link: row.marker_link || null,
             bg_color: !!row.bg_color,
             title_top_center: row.title_top_center || null,
             image: row.cbt_image ? `/uploads/cbt_test_london/${row.cbt_image}` : null
@@ -614,7 +618,7 @@ class CMSPagesController {
       if (trainingSliderData) {
         pageSections.push({
           type: 'training_slider',
-          order: getNextSectionOrder(['expert_training_slider', 'training_slider'], 30),
+          order: getNextSectionOrder(['expert_training', 'training_slider'], 30),
           data: trainingSliderData
         });
       }
