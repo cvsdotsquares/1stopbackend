@@ -134,6 +134,7 @@ class CMSController {
           is_parent,
           parent_level,
           link_title,
+          page_ex_rhs,
           banner_type,
           overlay_caption,
           overlay_caption_text,
