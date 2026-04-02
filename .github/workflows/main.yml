@@ -55,6 +55,7 @@ jobs:
             STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}
             STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}
             AES_SECRET_KEY=${{ secrets.AES_SECRET_KEY }}
+            PHP_SITE_URL=${{ secrets.PHP_SITE_URL }}
             EOF
 
             echo "Setting .env file permissions..."
