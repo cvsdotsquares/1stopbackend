@@ -38,7 +38,7 @@ const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const app = express();
 
 // MySQL pool (uses env vars)
-/* const pool = mysql.createPool({
+const pool = mysql.createPool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER,
@@ -47,17 +47,6 @@ const app = express();
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-});*/
-
-const pool = mysql.createPool({
-    host: '172.236.21.167',
-    port: 3306,
-    user: '1stop',
-    password: 'Gbgz&En4Wg&HmFJTFf',
-    database: '1stop',
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
 });
 
 // IMPORTANT: Stripe webhook route MUST be registered BEFORE express.json() middleware

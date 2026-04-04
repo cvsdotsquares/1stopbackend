@@ -105,7 +105,7 @@ class HelperController {
 
       // Get all menu items for this group
       const [menuItems] = await this.pool.query(`
-        SELECT id, page_title, page_slug, parent_id, page_link_id, sort_order
+        SELECT id, page_title, page_slug, parent_id, page_link_id, sort_order, front_menu_show
         FROM page_menus
         WHERE menu_group = ?
         ORDER BY id ASC
@@ -114,7 +114,7 @@ class HelperController {
       // Build nested structure
       const buildMenuTree = (items, parentId = null) => {
         return items
-          .filter(item => (item.parent_id === parentId || (parentId === null && (item.parent_id === null || item.parent_id === 0))))
+          .filter(item => (item.front_menu_show === 0 && (item.parent_id === parentId || (parentId === null && (item.parent_id === null || item.parent_id === 0)))))
           .map(item => ({
             id: item.id,
             page_title: item.page_title,
@@ -185,7 +185,6 @@ class HelperController {
         FROM footer_menu_section
         ORDER BY menu_weight ASC
       `);
-
       const [footerMenuSections] = await this.pool.query(`
         SELECT id, footer_menu_column, menu_weight
         FROM footer_menu_section
@@ -222,21 +221,95 @@ class HelperController {
         pageSlugMap[page.page_link_id] = page.page_slug;
       });
 
-      // Build menu structure - use fallback if no sections found
+      const resolveFooterLinkUrl = (link) => {
+        // Use footer_link_url if available (directly set in footer_links table)
+        if (link.footer_link_url) {
+          return link.footer_link_url;
+        }
+
+        // Use page slug from page_menus if navigation_type references a page
+        if (pageSlugMap[link.navigation_type]) {
+          return pageSlugMap[link.navigation_type];
+        }
+
+        // No URL found in database - return empty string
+        return '';
+      };
+
+      // Build menu structure - support both legacy zero-based menu_column values
+      // and newer direct footer_menu_section.id references.
       let menu = [];
       if (footerMenuSections.length > 0) {
-        menu = footerMenuSections.map(section => {
-          const items = footerLinks.filter(link => link.menu_column === section.id);
-          return {
-            name: section.footer_menu_column,
-            items: items.map(link => ({
-              footer_link_title: link.footer_link_title,
-              navigation_type: link.navigation_type,
-              footer_link_url: link.footer_link_url || pageSlugMap[link.navigation_type] || '',
-              weight: link.weight
-            }))
-          };
+        const normalizeLink = (link) => ({
+          footer_link_title: link.footer_link_title,
+          navigation_type: link.navigation_type,
+          footer_link_url: resolveFooterLinkUrl(link),
+          weight: link.weight
         });
+
+        const buildMenuCandidate = (matcher) => {
+          const assignedIndexes = new Set();
+          const builtMenu = footerMenuSections.map((section, sectionIndex) => {
+            const items = [];
+
+            footerLinks.forEach((link, linkIndex) => {
+              if (!assignedIndexes.has(linkIndex) && matcher(link, section, sectionIndex)) {
+                assignedIndexes.add(linkIndex);
+                items.push(normalizeLink(link));
+              }
+            });
+
+            return {
+              name: section.footer_menu_column,
+              items
+            };
+          });
+
+          const populatedSections = builtMenu.filter(group => group.items.length > 0).length;
+          return {
+            menu: builtMenu,
+            assignedIndexes,
+            assignedCount: assignedIndexes.size,
+            populatedSections
+          };
+        };
+
+        const candidates = [
+          buildMenuCandidate((link, section) => Number(link.menu_column) === Number(section.id)),
+          buildMenuCandidate((link, section) => Number(link.menu_column) === Number(section.menu_weight)),
+          buildMenuCandidate((link, _section, sectionIndex) => Number(link.menu_column) === Number(sectionIndex))
+        ];
+
+        candidates.sort((a, b) => {
+          if (b.assignedCount !== a.assignedCount) {
+            return b.assignedCount - a.assignedCount;
+          }
+
+          return b.populatedSections - a.populatedSections;
+        });
+
+        const bestCandidate = candidates[0];
+
+        // After choosing the best overall mapping, add any still-unassigned links that
+        // explicitly reference a section id. This preserves links like menu_column = 2
+        // even when the rest of the data uses legacy zero-based columns.
+        footerLinks.forEach((link, linkIndex) => {
+          if (bestCandidate.assignedIndexes.has(linkIndex)) {
+            return;
+          }
+
+          const targetSectionIndex = footerMenuSections.findIndex(
+            section => Number(section.id) === Number(link.menu_column)
+          );
+
+          if (targetSectionIndex !== -1) {
+            bestCandidate.menu[targetSectionIndex].items.push(normalizeLink(link));
+            bestCandidate.assignedIndexes.add(linkIndex);
+          }
+        });
+
+        menu = bestCandidate.menu;
+
       } else {
         // Fallback: group by menu_column values
         const columnGroups = {};
@@ -247,7 +320,7 @@ class HelperController {
           columnGroups[link.menu_column].push({
             footer_link_title: link.footer_link_title,
             navigation_type: link.navigation_type,
-            footer_link_url: link.footer_link_url || pageSlugMap[link.navigation_type] || '',
+            footer_link_url: resolveFooterLinkUrl(link),
             weight: link.weight
           });
         });

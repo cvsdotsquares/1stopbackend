@@ -188,6 +188,35 @@ class AuthController {
   }
 
   /**
+   * Check whether a user account already exists for an email address.
+   */
+  async checkUserExists(req, res) {
+    try {
+      const { email } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ success: false, message: 'Email is required' });
+      }
+
+      const [users] = await this.pool.query(
+        'SELECT id FROM users WHERE email = ? LIMIT 1',
+        [email]
+      );
+
+      return res.json({
+        success: true,
+        data: {
+          exists: users.length > 0,
+          email
+        }
+      });
+    } catch (error) {
+      console.error('Check user exists error:', error);
+      return res.status(500).json({ success: false, message: 'Server error' });
+    }
+  }
+
+  /**
    * Step 2: Send OTP for email verification or password reset
    */
   async sendVerificationOTP(req, res) {

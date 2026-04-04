@@ -209,6 +209,7 @@ function createAuthRoutes(pool) {
 
   // New login flow routes
   router.post('/check-email', emailValidation, authController.checkEmail.bind(authController));
+  router.post('/check-user-exists', emailValidation, authController.checkUserExists.bind(authController));
   router.post('/send-otp', sendOTPValidation, authController.sendVerificationOTP.bind(authController));
   router.post('/verify-otp', otpValidation, authController.verifyOTP.bind(authController));
   router.post('/set-password', setPasswordValidation, authController.setNewPassword.bind(authController));

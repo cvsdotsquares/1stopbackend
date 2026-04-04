@@ -1188,10 +1188,46 @@ class BookingFlowController {
           perAttendeeAmounts.push({ total: Number(attendeeTotalPrice) || 0, payableNow: Number(attendeePayableNow) || 0 });
         }
 
+        const roundCurrency = (value) => Math.round((Number(value) || 0) * 100) / 100;
+        const allocateProportionalAmounts = (baseAmounts, totalAllocation) => {
+          const normalizedBases = baseAmounts.map((amount) => Math.max(0, roundCurrency(amount)));
+          const totalBase = roundCurrency(normalizedBases.reduce((sum, amount) => sum + amount, 0));
+          const cappedAllocation = Math.min(roundCurrency(totalAllocation), totalBase);
+
+          if (cappedAllocation <= 0 || totalBase <= 0) {
+            return normalizedBases.map(() => 0);
+          }
+
+          let remainingAllocation = cappedAllocation;
+          let remainingBase = totalBase;
+
+          return normalizedBases.map((baseAmount, index) => {
+            if (baseAmount <= 0) {
+              return 0;
+            }
+
+            if (index === normalizedBases.length - 1) {
+              return roundCurrency(Math.min(baseAmount, remainingAllocation));
+            }
+
+            const proportionalShare = remainingBase > 0
+              ? roundCurrency((remainingAllocation * baseAmount) / remainingBase)
+              : 0;
+            const allocatedAmount = Math.min(baseAmount, proportionalShare);
+
+            remainingAllocation = roundCurrency(remainingAllocation - allocatedAmount);
+            remainingBase = roundCurrency(remainingBase - baseAmount);
+
+            return allocatedAmount;
+          });
+        };
+
         // Apply promo code discount if provided
         let promoDiscountOnTotal = 0;
         let promoDiscountOnPayableNow = 0;
         let promoCodeId = null;
+        let promoDiscountsPerAttendeeTotal = perAttendeeAmounts.map(() => 0);
+        let promoDiscountsPerAttendeePayableNow = perAttendeeAmounts.map(() => 0);
         if (promo_code) {
           const [promos] = await connection.query(`
             SELECT id, p_c_amount, p_c_discount_type
@@ -1202,13 +1238,29 @@ class BookingFlowController {
           if (promos.length > 0) {
             const promo = promos[0];
             promoCodeId = promo.id;
+            const promoAmount = Number(promo.p_c_amount) || 0;
 
             if (promo.p_c_discount_type === 'pounds_off') {
-              promoDiscountOnTotal = attendees_count * promo.p_c_amount;
-              promoDiscountOnPayableNow = attendees_count * promo.p_c_amount;
+              promoDiscountsPerAttendeeTotal = perAttendeeAmounts.map(({ total }) => Math.min(roundCurrency(total), promoAmount));
+              promoDiscountsPerAttendeePayableNow = perAttendeeAmounts.map(({ payableNow }) => Math.min(roundCurrency(payableNow), promoAmount));
+
+              promoDiscountOnTotal = roundCurrency(
+                promoDiscountsPerAttendeeTotal.reduce((sum, amount) => sum + amount, 0)
+              );
+              promoDiscountOnPayableNow = roundCurrency(
+                promoDiscountsPerAttendeePayableNow.reduce((sum, amount) => sum + amount, 0)
+              );
             } else if (promo.p_c_discount_type === 'percent_off') {
-              promoDiscountOnTotal = (totalFees * promo.p_c_amount) / 100;
-              promoDiscountOnPayableNow = (payableNowFees * promo.p_c_amount) / 100;
+              promoDiscountOnTotal = roundCurrency((totalFees * promoAmount) / 100);
+              promoDiscountOnPayableNow = roundCurrency((payableNowFees * promoAmount) / 100);
+              promoDiscountsPerAttendeeTotal = allocateProportionalAmounts(
+                perAttendeeAmounts.map(({ total }) => total),
+                promoDiscountOnTotal
+              );
+              promoDiscountsPerAttendeePayableNow = allocateProportionalAmounts(
+                perAttendeeAmounts.map(({ payableNow }) => payableNow),
+                promoDiscountOnPayableNow
+              );
             }
           }
         }
@@ -1246,22 +1298,41 @@ class BookingFlowController {
         const bookingIds = [];
         const bookingRefs = [];
 
+        const discountedPerAttendeeNetTotals = perAttendeeAmounts.map(({ total }, index) =>
+          roundCurrency(Math.max(0, total - (promoDiscountsPerAttendeeTotal[index] || 0)))
+        );
+        const discountedPerAttendeePayableNow = perAttendeeAmounts.map(({ payableNow }, index) =>
+          roundCurrency(Math.max(0, payableNow - (promoDiscountsPerAttendeePayableNow[index] || 0)))
+        );
+        const perAttendeeVatableNet = courseData[0].franchise_vat === 1
+          ? discountedPerAttendeeNetTotals.map((attendeeNetTotal) =>
+              roundCurrency(Math.max(0, attendeeNetTotal - (Number(courseData[0].dsa_fees) || 0)))
+            )
+          : discountedPerAttendeeNetTotals.map(() => 0);
+        const perAttendeeVat = allocateProportionalAmounts(perAttendeeVatableNet, vat);
+
         for (let i = 0; i < attendees.length; i++) {
           const attendee = attendees[i];
           const attendeeUserId = userIds[i];
-          const attendeeTotal = perAttendeeAmounts[i].total;
-          const attendeePayableNow = perAttendeeAmounts[i].payableNow;
-          // payment_due = balance still owed after this payment (total - deposit paid now)
-          const attendeePaymentDue = attendeeTotal - attendeePayableNow;
+          const attendeeNetTotal = discountedPerAttendeeNetTotals[i];
+          const attendeePayableNow = discountedPerAttendeePayableNow[i];
+          const attendeeVat = roundCurrency(perAttendeeVat[i] || 0);
+          const attendeeGrossTotal = roundCurrency(attendeeNetTotal + attendeeVat);
+          // payment_due = balance still owed after this payment (gross total - amount paid now)
+          const attendeePaymentDue = roundCurrency(Math.max(0, attendeeGrossTotal - attendeePayableNow));
 
           const [bookingResult] = await connection.query(`
             INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                  payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
             VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
-          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeTotal, vatRate, 0, attendeeTotal, attendeePayableNow, attendeeUserId, attendeeUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, attendeeUserId, attendeeUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
 
           const booking_id = bookingResult.insertId;
           const bookingRef = `1SRC${booking_id}`;
+          let primaryFlag = 0;
+          if (i === 0) {
+            primaryFlag = 1;
+          }
           bookingIds.push(booking_id);
           bookingRefs.push(bookingRef);
 
@@ -1269,12 +1340,12 @@ class BookingFlowController {
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                          email, vehicle_type, license_type, license_number, theory_number,
                                          admin_notes, notes, contact_card_id, \`primary\`, created)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, 1, NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
-            attendee.theory_number || ''
+            attendee.theory_number || '', primaryFlag
           ]);
 
           await connection.query(`
