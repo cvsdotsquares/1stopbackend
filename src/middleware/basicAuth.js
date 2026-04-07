@@ -1,7 +1,6 @@
 const VALID_TOKEN = '4lCBbMxPvSBXOYWSej8WAEdl3ZRE0v8O4Y6WMTXLSc100H1xjt';
 
 const basicAuth = (req, res, next) => {
-  console.log('basicAuth middleware called for:', req.method, req.path);
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Basic ')) {
     console.log('Auth failed: missing or invalid header');

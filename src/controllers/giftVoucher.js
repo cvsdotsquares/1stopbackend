@@ -1,8 +1,33 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { sendGiftVoucherEmail } = require('../utils/emailService');
 
 class GiftVoucherController {
   constructor(pool) {
     this.pool = pool;
+  }
+
+  async getVoucherEmailPayload(voucherId, userId, userEmail) {
+    const [vouchers] = await this.pool.query(
+      `SELECT
+        gv.id,
+        gv.voucher_ref,
+        gv.voucher_date,
+        gv.subject,
+        gv.voucher_person,
+        gv.voucher_value,
+        gv.voucher_free_text,
+        gv.purchased_by,
+        gv.voucher_contact,
+        gv.voucher_email,
+        gv.user_id,
+        gv.created
+      FROM gift_voucher gv
+      WHERE gv.id = ? AND (gv.user_id = ? OR gv.voucher_email = ?)
+      LIMIT 1`,
+      [voucherId, userId, userEmail]
+    );
+
+    return vouchers[0] || null;
   }
 
   async createVoucher(req, res) {
@@ -62,9 +87,11 @@ class GiftVoucherController {
 
         console.log(`✅ Inserted into gift_voucher_copieds with bid ${bid}, row ID: ${insertResult.insertId}`);
 
-        // Calculate total with VAT
-        const vat = voucher_value * 0.2;
-        const totalAmount = voucher_value + vat;
+        // Gift vouchers should be charged at face value only.
+        // Do not add VAT at purchase time.
+        const voucherValueNumeric = Number(voucher_value) || 0;
+        const vat = 0;
+        const totalAmount = voucherValueNumeric;
 
         // Create Stripe PaymentIntent for inline payment
         const paymentIntent = await stripe.paymentIntents.create({
@@ -92,7 +119,7 @@ class GiftVoucherController {
           bid,
           client_secret: paymentIntent.client_secret,
           payment_intent_id: paymentIntent.id,
-          voucher_value,
+          voucher_value: voucherValueNumeric,
           vat,
           total_amount: totalAmount
         });
@@ -116,6 +143,144 @@ class GiftVoucherController {
         success: false,
         error: 'Failed to create gift voucher',
         details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+
+  async getVoucherById(req, res) {
+    try {
+      const { id } = req.params;
+      const user_id = req.user.id;
+      const user_email = req.user.email;
+
+      const [vouchers] = await this.pool.query(
+        `SELECT
+          gv.id,
+          gv.voucher_ref,
+          gv.voucher_date,
+          gv.subject as course_name,
+          gv.voucher_person as recipient_name,
+          gv.voucher_free_text as message,
+          gv.voucher_value as value,
+          gv.purchased_by,
+          gv.voucher_contact as contact_number,
+          gv.voucher_email as email,
+          gv.user_id,
+          gv.template_id,
+          gv.created,
+          DATE_ADD(gv.created, INTERVAL 12 MONTH) as valid_till,
+          CASE
+            WHEN gv.user_id = ? THEN 'purchased'
+            ELSE 'received'
+          END as voucher_type,
+          CASE
+            WHEN gv.redeem_note != '' THEN 'redeemed'
+            WHEN DATE_ADD(gv.created, INTERVAL 12 MONTH) < NOW() THEN 'expired'
+            ELSE 'active'
+          END as status
+        FROM gift_voucher gv
+        WHERE gv.id = ? AND (gv.user_id = ? OR gv.voucher_email = ?)`,
+        [user_id, id, user_id, user_email]
+      );
+
+      if (vouchers.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Gift voucher not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: vouchers[0]
+      });
+
+    } catch (error) {
+      console.error('Error fetching gift voucher:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch gift voucher'
+      });
+    }
+  }
+
+  async getVoucherConfirmationPreview(req, res) {
+    try {
+      const voucherId = Number.parseInt(req.params.id, 10);
+      const userId = req.user.id;
+      const userEmail = req.user.email;
+
+      const voucher = await this.getVoucherEmailPayload(voucherId, userId, userEmail);
+      if (!voucher) {
+        return res.status(404).json({
+          success: false,
+          error: 'Gift voucher not found'
+        });
+      }
+
+      const previewResult = await sendGiftVoucherEmail({
+        ...voucher,
+        targetEmail: userEmail,
+        previewOnly: true
+      }, this.pool);
+
+      return res.json({
+        success: true,
+        data: {
+          subject: previewResult.subject,
+          to: previewResult.to,
+          html: previewResult.html
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching gift voucher confirmation preview:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to fetch gift voucher confirmation preview'
+      });
+    }
+  }
+
+  async sendVoucherConfirmationEmail(req, res) {
+    try {
+      const voucherId = Number.parseInt(req.params.id, 10);
+      const userId = req.user.id;
+      const userEmail = req.user.email;
+      const forwardEmail = String(req.body?.email || '').trim();
+
+      if (forwardEmail && !/^\S+@\S+\.\S+$/.test(forwardEmail)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please provide a valid email address'
+        });
+      }
+
+      const voucher = await this.getVoucherEmailPayload(voucherId, userId, userEmail);
+      if (!voucher) {
+        return res.status(404).json({
+          success: false,
+          error: 'Gift voucher not found'
+        });
+      }
+
+      const recipientEmail = forwardEmail || userEmail;
+      await sendGiftVoucherEmail({
+        ...voucher,
+        targetEmail: recipientEmail,
+        previewOnly: false
+      }, this.pool);
+
+      return res.json({
+        success: true,
+        message: forwardEmail
+          ? `Gift voucher confirmation forwarded to ${recipientEmail}`
+          : `Gift voucher confirmation sent to ${recipientEmail}`
+      });
+    } catch (error) {
+      console.error('Error sending gift voucher confirmation email:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to send gift voucher confirmation email'
       });
     }
   }

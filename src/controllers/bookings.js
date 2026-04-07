@@ -1,9 +1,115 @@
 // src/controllers/bookings.js
 const { validationResult } = require('express-validator');
 const { formatMySQLDateToDDMMYYYY, formatDateToDDMMYYYY } = require('../utils/dateFormat');
+const { sendBookingConfirmation } = require('../utils/emailService');
 class BookingController {
   constructor(pool) {
     this.pool = pool;
+  }
+
+  async getBookingConfirmationPayload(connection, bookingId, userId, userEmail) {
+    const [bookings] = await connection.query(`
+      SELECT
+        b.id,
+        b.course_id,
+        b.course_event_id,
+        b.total_amount,
+        b.payment_due,
+        b.vat,
+        b.total_fees,
+        b.refundable,
+        b.type_of_book,
+        (
+          SELECT ba2.booking_ref
+          FROM booking_attendees ba2
+          WHERE ba2.booking_id = b.id
+          ORDER BY ba2.primary DESC, ba2.id ASC
+          LIMIT 1
+        ) AS booking_ref
+      FROM bookings b
+      WHERE b.id = ?
+        AND (
+          b.user_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM booking_attendees ba
+            WHERE ba.booking_id = b.id AND ba.email = ?
+          )
+        )
+      LIMIT 1
+    `, [bookingId, userId, userEmail]);
+
+    if (bookings.length === 0) {
+      return null;
+    }
+
+    const booking = bookings[0];
+
+    const [attendees] = await connection.query(`
+      SELECT first_name, sur_name, email, contact1, contact2, contact3, vehicle_type
+      FROM booking_attendees
+      WHERE booking_id = ?
+      ORDER BY \`primary\` DESC, id ASC
+    `, [bookingId]);
+
+    const [courseData] = await connection.query(`
+      SELECT email_content, course_name
+      FROM courses
+      WHERE id = ?
+      LIMIT 1
+    `, [booking.course_id]);
+
+    const [locationData] = await connection.query(`
+      SELECT location_name, address1, address2, address3, address4,
+             postcode, direction_map, direction_content
+      FROM locations
+      WHERE id = (SELECT location_id FROM course_events WHERE id = ?)
+      LIMIT 1
+    `, [booking.course_event_id]);
+
+    const [eventDates] = await connection.query(`
+      SELECT event_date, event_start_time
+      FROM course_event_dates
+      WHERE course_event_id = ?
+      ORDER BY event_date ASC, event_start_time ASC
+    `, [booking.course_event_id]);
+
+    const [franchiseData] = await connection.query(`
+      SELECT f.email_header, f.email_footer, f.email_logo, f.website,
+             f.telephone, f.freephone, f.franchise_email
+      FROM franchise f
+      JOIN course_events ce ON ce.franchise_id = f.id
+      WHERE ce.id = ?
+      LIMIT 1
+    `, [booking.course_event_id]);
+
+    const [settingsData] = await connection.query(`
+      SELECT booking_bcc
+      FROM settings
+      LIMIT 1
+    `);
+
+    const computedBookingRef = booking.booking_ref || `1SRC${booking.id}`;
+
+    return {
+      course_name: courseData[0]?.course_name || 'Course',
+      booking_ref: computedBookingRef,
+      booking_type: booking.type_of_book || 'o',
+      refundable: Number(booking.refundable || 0),
+      attendees,
+      location: locationData[0] || {},
+      event_dates: eventDates,
+      booking: {
+        total_amount: booking.total_amount,
+        payment_due: Math.max(0, Number(booking.payment_due || 0)),
+        vat: booking.vat,
+        total_fees: booking.total_fees
+      },
+      course_email_content: courseData[0]?.email_content || '',
+      franchise: franchiseData[0] || {},
+      bcc: settingsData[0]?.booking_bcc || process.env.BOOKING_BCC || '',
+      ip: 'dashboard'
+    };
   }
 
   /**
@@ -25,7 +131,6 @@ class BookingController {
         course_id,
         course_event_id,
         spaces = 1,
-        customer_notes = '',
         emergency_contact_name = '',
         emergency_contact_phone = '',
         special_requirements = ''
@@ -102,11 +207,11 @@ class BookingController {
             course_id,
             course_event_id,
             spaces,
-            base_amount,
-            booking_fee,
+            payment_due,
             total_amount,
+            admin_payment_received,
+            total_fees,
             status,
-            customer_notes,
             emergency_contact_name,
             emergency_contact_phone,
             special_requirements,
@@ -121,7 +226,6 @@ class BookingController {
           base_amount,
           booking_fee,
           total_amount,
-          customer_notes,
           emergency_contact_name,
           emergency_contact_phone,
           special_requirements
@@ -144,11 +248,8 @@ class BookingController {
             b.course_id,
             b.course_event_id,
             b.spaces,
-            b.base_amount,
-            b.booking_fee,
             b.total_amount,
             b.status,
-            b.customer_notes,
             b.emergency_contact_name,
             b.emergency_contact_phone,
             b.special_requirements,
@@ -408,11 +509,8 @@ class BookingController {
           b.course_id,
           b.course_event_id,
           b.spaces,
-          b.base_amount,
-          b.booking_fee,
           b.total_amount,
           b.status,
-          b.customer_notes,
           b.emergency_contact_name,
           b.emergency_contact_phone,
           b.special_requirements,
@@ -427,7 +525,6 @@ class BookingController {
           l.location_name,
           l.address as location_address,
           l.post_code,
-          l.phone as location_phone,
           CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
@@ -500,6 +597,7 @@ class BookingController {
     try {
       const { id } = req.params;
       const user_id = req.user.id;
+      const user_email = req.user.email;
 
       const [bookings] = await this.pool.query(`
         SELECT
@@ -508,32 +606,32 @@ class BookingController {
           b.course_id,
           b.course_event_id,
           b.spaces,
-          b.base_amount,
-          b.booking_fee,
           b.total_amount,
+          b.payment_due,
+          b.admin_payment_received,
+          b.type_of_book,
           b.status,
-          b.customer_notes,
-          b.emergency_contact_name,
-          b.emergency_contact_phone,
-          b.special_requirements,
+          NULL as emergency_contact_name,
+          NULL as emergency_contact_phone,
+          NULL as special_requirements,
           b.created,
           b.modified,
           c.course_name,
           c.course_abb,
           c.description,
           c.dsa_fees,
-          ce.event_date,
-          ce.event_time,
+          MIN(ced.event_date) as event_date,
+          ced.event_start_time,
           l.id as location_id,
           l.location_name,
-          l.address as location_address,
-          l.post_code,
-          l.phone as location_phone,
-          l.email as location_email,
+          l.address1,
+          l.address2,
+          l.postcode,
           u.first_name,
           u.sur_name,
           u.email,
-          u.mobile,
+          u.contact1,
+          bp.transation_id as transaction_id,
           CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
@@ -543,17 +641,25 @@ class BookingController {
             ELSE 'Unknown'
           END as status_text,
           CASE
-            WHEN ce.event_date > CURDATE() THEN 'upcoming'
-            WHEN ce.event_date = CURDATE() THEN 'today'
+            WHEN MIN(ced.event_date) > CURDATE() THEN 'upcoming'
+            WHEN MIN(ced.event_date) = CURDATE() THEN 'today'
             ELSE 'past'
           END as timing_status
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id AND ced.event_date > '1800-01-01'
         JOIN locations l ON ce.location_id = l.id
         JOIN users u ON b.user_id = u.id
-        WHERE b.id = ? AND b.user_id = ?
-      `, [id, user_id]);
+        LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        WHERE b.id = ? AND (b.user_id = ? OR ba.email = ?)
+        GROUP BY b.id, b.user_id, b.course_id, b.course_event_id, b.spaces, b.total_amount, b.payment_due,
+                 b.admin_payment_received, b.type_of_book, b.status,
+                 b.created, b.modified, c.course_name, c.course_abb, c.description, c.dsa_fees,
+                 ced.event_start_time, l.id, l.location_name, l.address1, l.address2, l.postcode,
+                 u.first_name, u.sur_name, u.email, u.contact1, bp.transation_id
+      `, [id, user_id, user_email]);
 
       if (bookings.length === 0) {
         return res.status(404).json({
@@ -562,9 +668,20 @@ class BookingController {
         });
       }
 
+      // Fetch all attendees for this booking
+      const [attendees] = await this.pool.query(`
+        SELECT id, first_name, sur_name, email, vehicle_type, \`primary\`
+        FROM booking_attendees
+        WHERE booking_id = ?
+        ORDER BY \`primary\` DESC, id ASC
+      `, [id]);
+
       res.json({
         success: true,
-        data: bookings[0]
+        data: {
+          ...bookings[0],
+          attendees
+        }
       });
 
     } catch (error) {
@@ -574,6 +691,113 @@ class BookingController {
         message: 'Failed to fetch booking',
         error: error.message
       });
+    }
+  }
+
+  async getBookingConfirmationPreview(req, res) {
+    const connection = await this.pool.getConnection();
+    try {
+      const bookingId = Number.parseInt(req.params.id, 10);
+      const userId = req.user.id;
+      const userEmail = req.user.email;
+
+      const payload = await this.getBookingConfirmationPayload(connection, bookingId, userId, userEmail);
+      if (!payload) {
+        return res.status(404).json({
+          success: false,
+          message: 'Booking not found'
+        });
+      }
+
+      const previewEmail = String(userEmail || payload.attendees?.[0]?.email || '').trim();
+      if (!previewEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'No email available for preview'
+        });
+      }
+
+      const previewResult = await sendBookingConfirmation({
+        ...payload,
+        targetEmails: [previewEmail],
+        previewOnly: true
+      }, this.pool);
+
+      const firstPreview = previewResult?.previews?.[0] || null;
+
+      return res.json({
+        success: true,
+        data: {
+          subject: previewResult?.subject || `${payload.course_name} Booking confirmation`,
+          to: firstPreview?.to || previewEmail,
+          html: firstPreview?.html || ''
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching booking confirmation preview:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch booking confirmation preview',
+        error: error.message
+      });
+    } finally {
+      connection.release();
+    }
+  }
+
+  async sendBookingConfirmationEmail(req, res) {
+    const connection = await this.pool.getConnection();
+    try {
+      const bookingId = Number.parseInt(req.params.id, 10);
+      const userId = req.user.id;
+      const userEmail = req.user.email;
+      const forwardEmail = String(req.body?.email || '').trim();
+
+      if (forwardEmail && !/^\S+@\S+\.\S+$/.test(forwardEmail)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid email address'
+        });
+      }
+
+      const payload = await this.getBookingConfirmationPayload(connection, bookingId, userId, userEmail);
+      if (!payload) {
+        return res.status(404).json({
+          success: false,
+          message: 'Booking not found'
+        });
+      }
+
+      const targetEmail = forwardEmail || String(userEmail || '').trim();
+      if (!targetEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'No recipient email available'
+        });
+      }
+
+      await sendBookingConfirmation({
+        ...payload,
+        targetEmails: [targetEmail],
+        previewOnly: false,
+        ip: req.ip || req.clientIp || 'dashboard'
+      }, this.pool);
+
+      return res.json({
+        success: true,
+        message: forwardEmail
+          ? `Booking confirmation forwarded to ${targetEmail}`
+          : `Booking confirmation sent to ${targetEmail}`
+      });
+    } catch (error) {
+      console.error('Error sending booking confirmation email:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send booking confirmation email',
+        error: error.message
+      });
+    } finally {
+      connection.release();
     }
   }
 
@@ -595,7 +819,6 @@ class BookingController {
       const { id } = req.params;
       const user_id = req.user.id;
       const {
-        customer_notes,
         emergency_contact_name,
         emergency_contact_phone,
         special_requirements
@@ -641,14 +864,12 @@ class BookingController {
       await this.pool.query(`
         UPDATE bookings
         SET
-          customer_notes = ?,
           emergency_contact_name = ?,
           emergency_contact_phone = ?,
           special_requirements = ?,
           modified = NOW()
         WHERE id = ?
       `, [
-        customer_notes || '',
         emergency_contact_name || '',
         emergency_contact_phone || '',
         special_requirements || '',
@@ -659,7 +880,6 @@ class BookingController {
       const [updatedBooking] = await this.pool.query(`
         SELECT
           b.id,
-          b.customer_notes,
           b.emergency_contact_name,
           b.emergency_contact_phone,
           b.special_requirements,
@@ -909,7 +1129,7 @@ class BookingController {
           u.first_name,
           u.sur_name,
           u.email,
-          u.mobile,
+          u.contact1,
           CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'

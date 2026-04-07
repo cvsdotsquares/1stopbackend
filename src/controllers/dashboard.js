@@ -8,15 +8,16 @@ class DashboardController {
     try {
       const userId = req.user.id;
 
+      // Previous bookings
       const [bookings] = await this.pool.query(`
-        SELECT DISTINCT b.id, b.total_amount, b.status, b.created,
+        SELECT DISTINCT b.id, b.total_amount, b.status, b.created, b.payment_due, b.admin_payment_received, b.type_of_book,
                c.course_name, MIN(ced.event_date) as event_date,
                l.location_name, l.address1, l.address2, l.postcode,
-               bp.transation_id as transaction_id
+               bp.transation_id as transaction_id, ced.event_start_time, ba.first_name, ba.sur_name
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
-        JOIN course_event_dates ced ON ce.id = ced.course_event_id
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id and ced.event_date < CURDATE() and ced.event_date > '1800-01-01'
         JOIN locations l ON ce.location_id = l.id
         LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
         LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
@@ -71,6 +72,7 @@ class DashboardController {
           gv.voucher_person as recipient_name,
           gv.purchased_by,
           gv.voucher_email,
+          gv.redeemed,
           gv.created as purchased_on,
           DATE_ADD(gv.created, INTERVAL 12 MONTH) as valid_till,
           CASE
@@ -78,8 +80,7 @@ class DashboardController {
             ELSE 'received'
           END as voucher_type,
           CASE
-            WHEN gv.redeem_note != '' THEN 'redeemed'
-            WHEN DATE_ADD(gv.created, INTERVAL 12 MONTH) < NOW() THEN 'expired'
+            WHEN LOWER(TRIM(COALESCE(gv.redeemed, 'No'))) = 'yes' THEN 'redeemed'
             ELSE 'active'
           END as status
         FROM gift_voucher gv

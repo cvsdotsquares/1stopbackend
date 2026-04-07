@@ -801,15 +801,20 @@ class StripeWebhookController {
   async sendBookingConfirmationEmail(booking_id) {
     const connection = await this.pool.getConnection();
     try {
-      // Get booking details
+      // Get booking details.
+      // NOTE: In multi-attendee checkout each attendee can be created as a separate booking,
+      // and only the first booking may have `primary = 1` in booking_attendees.
+      // So do not require `primary = 1` here; select the best attendee row per booking.
       const [bookings] = await connection.query(`
         SELECT
           b.id, b.course_id, b.course_event_id, b.total_amount,
           b.payment_due, b.vat, b.total_fees,
           ba.booking_ref, ba.email
         FROM bookings b
-        JOIN booking_attendees ba ON b.id = ba.booking_id AND ba.primary = 1
+        JOIN booking_attendees ba ON b.id = ba.booking_id
         WHERE b.id = ?
+        ORDER BY ba.primary DESC, ba.id ASC
+        LIMIT 1
       `, [booking_id]);
 
       if (bookings.length === 0) {

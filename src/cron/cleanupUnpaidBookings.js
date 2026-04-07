@@ -8,7 +8,7 @@ class BookingCleanupCron {
 
   async cleanupUnpaidBookings() {
     const connection = await this.pool.getConnection();
-    
+
     try {
       console.log('[CLEANUP CRON] Starting cleanup of unpaid bookings...');
 

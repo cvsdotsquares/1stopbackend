@@ -50,13 +50,34 @@ function createBookingRoutes(pool) {
   /**
    * @route   GET /api/bookings/:id
    * @desc    Get booking by ID
-   * @access  Private (authenticated users, own bookings only)
+   * @access  Private (authenticated users, own bookings or as attendee)
    */
   router.get('/:id',
     authenticateToken,
     BookingValidation.getBookingById(),
-    BookingValidation.validateBookingOwnership,
     (req, res) => bookingController.getBookingById(req, res)
+  );
+
+  /**
+   * @route   GET /api/bookings/:id/confirmation/preview
+   * @desc    Get booking confirmation HTML preview
+   * @access  Private (authenticated users, own bookings or as attendee)
+   */
+  router.get('/:id/confirmation/preview',
+    authenticateToken,
+    BookingValidation.getBookingById(),
+    (req, res) => bookingController.getBookingConfirmationPreview(req, res)
+  );
+
+  /**
+   * @route   POST /api/bookings/:id/confirmation/send
+   * @desc    Resend booking confirmation to self or forward to another email
+   * @access  Private (authenticated users, own bookings or as attendee)
+   */
+  router.post('/:id/confirmation/send',
+    authenticateToken,
+    BookingValidation.getBookingById(),
+    (req, res) => bookingController.sendBookingConfirmationEmail(req, res)
   );
 
   /**

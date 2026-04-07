@@ -46,7 +46,7 @@ exports.sendRegistrationEmail = async (userData, pool) => {
   <div align="center">
     <table width="800" border="0" align="center" style="background: #f5f5f5; border: 1px solid #e0e0e0; padding: 5px;">
       <tr>
-        <td><img src="https://1stopinstruction.com/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
+        <td><img src="${process.env.PHP_SITE_URL}/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
       </tr>
       <tr>
         <td style="background: #ffffff; padding: 20px;">
@@ -75,7 +75,7 @@ exports.sendRegistrationEmail = async (userData, pool) => {
       <tr>
         <td style="text-align:center;background:#e6e6e8;padding:10px;">
           <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
-          <img src="https://1stopinstruction.com/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
+          <img src="${process.env.PHP_SITE_URL}/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
         </td>
       </tr>
     </table>
@@ -131,7 +131,7 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
   <div align="center">
     <table width="800" border="0" align="center" style="background: #f5f5f5; border: 1px solid #e0e0e0; padding: 5px;">
       <tr>
-        <td><img src="https://1stopinstruction.com/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
+        <td><img src="${process.env.PHP_SITE_URL}/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
       </tr>
       <tr>
         <td style="background: #ffffff; padding: 20px;">
@@ -160,7 +160,7 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
       <tr>
         <td style="text-align:center;background:#e6e6e8;padding:10px;">
           <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
-          <img src="https://1stopinstruction.com/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
+          <img src="${process.env.PHP_SITE_URL}/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
         </td>
       </tr>
     </table>
@@ -264,6 +264,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    booking_type = 'O',
    refundable = 0,
    attendees = [],
+    targetEmails = [],
+    previewOnly = false,
    location = {},
    event_dates = [],
    booking = {},
@@ -273,23 +275,33 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    ip
   } = bookingData;
 
-  const attendeeEmailList = attendees
-    .map(a => String(a?.email || '').trim())
-    .filter(Boolean);
-  const attendeeEmails = attendeeEmailList.join(', ');
+  const normalizedTargetEmails = Array.isArray(targetEmails)
+    ? targetEmails.map((email) => String(email || '').trim()).filter(Boolean)
+    : [];
+
+  const attendeeEmailList = Array.from(new Set(
+    (normalizedTargetEmails.length > 0
+      ? normalizedTargetEmails
+      : attendees.map(a => String(a?.email || '').trim()))
+      .filter(Boolean)
+  ));
   if (attendeeEmailList.length === 0) {
     throw new Error('No attendee email found for booking confirmation');
   }
-  const firstAttendee = attendees[0] || {};
-  const firstName = firstAttendee.first_name || 'Customer';
-  const pupil = `${firstAttendee.first_name || ''} ${firstAttendee.sur_name || ''}`.trim();
-
   const vehicleTypeMap = {
    0: 'Manual',
    1: 'Automatic',
    3: 'I will be using my own vehicle'
   };
-  const pupilVehicle = vehicleTypeMap[firstAttendee.vehicle_type] || '';
+
+  const getAttendeeForRecipient = (recipientEmail) => {
+    const normalizedRecipient = String(recipientEmail || '').trim().toLowerCase();
+    const exactMatch = attendees.find((attendee) =>
+      String(attendee?.email || '').trim().toLowerCase() === normalizedRecipient
+    );
+
+    return exactMatch || attendees[0] || {};
+  };
 
   const paidAmount = (Number.parseFloat(booking.total_amount || 0) - Number.parseFloat(booking.payment_due || 0));
   const balanceAmount = Number.parseFloat(booking.payment_due || 0);
@@ -345,12 +357,12 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
 
   const resolvedBcc = String(bcc || process.env.BOOKING_BCC || '').trim() || undefined;
 
-  const mailOptions = {
-   from: process.env.SMTP_USER,
-   to: attendeeEmailList,
-   bcc: resolvedBcc,
-   subject: `${course_name} Booking confirmation`,
-   html: `<!Doctype html>
+  const createBookingEmailHtml = (recipientAttendee) => {
+   const recipientFirstName = recipientAttendee.first_name || 'Customer';
+   const recipientPupil = `${recipientAttendee.first_name || ''} ${recipientAttendee.sur_name || ''}`.trim();
+   const recipientVehicle = vehicleTypeMap[recipientAttendee.vehicle_type] || '';
+
+   return `<!Doctype html>
 <html>
   <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
@@ -380,7 +392,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                   <tr>
                     <td style="font-size:9.0pt;font-family:Arial,sans-serif">
                       <span style=" float:left;">
-                      Dear ${escapeHtml(firstName)},
+                      Dear ${escapeHtml(recipientFirstName)},
                       </span>
                       ${Number(refundable) === 1
       ? '<br><br><p style="color:red"><strong><i class="icon fa fa-ban"></i> You have taken longer than expected to make payment & complete your booking, so your reserved places have not been booked. Please contact to the website administrator to arrange a refund.<strong></p>'
@@ -405,13 +417,13 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                               </p>
                             </td>
                             <td width="56%" style="width:56.0%;padding:0in 0in 0in 0in;height:48.75pt">
-                              <p class="MsoNormal"><span><span style="font-size:9.0pt;font-family:Arial,sans-serif">${escapeHtml(pupil)}</span></span><span style="font-size:9.0pt;font-family:Arial,sans-serif"><br>
+                              <p class="MsoNormal"><span><span style="font-size:9.0pt;font-family:Arial,sans-serif">${escapeHtml(recipientPupil)}</span></span><span style="font-size:9.0pt;font-family:Arial,sans-serif"><br>
                                 <span>${escapeHtml(course_name)}</span><br>
-                                <span>${escapeHtml(pupilVehicle)} </span></span>
+                                <span>${escapeHtml(recipientVehicle)} </span></span>
                               </p>
                             </td>
                             <td width="20%" style="width:20.0%;padding:0in 0in 0in 0in;height:48.75pt">
-                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Payment Received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
+                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Deposit/Payment Received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
                                 <strong><span style="font-family:Arial,sans-serif">Balance Outstanding: </span></strong><u></u><u></u></span>
                               </p>
                             </td>
@@ -558,21 +570,75 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     </div>
     <div style="display:none">Booking IP: ${escapeHtml(ip || '')}</div>
   </body>
-</html>`
+</html>`;
   };
 
-  let emailStatus = 0;
-  let deliveryMeta = null;
-  try {
-    const sentInfo = await transporter.sendMail(mailOptions);
-    deliveryMeta = {
-      messageId: sentInfo?.messageId || null,
-      accepted: sentInfo?.accepted || [],
-      rejected: sentInfo?.rejected || [],
-      response: sentInfo?.response || null
+  const mailOptions = {
+   from: process.env.SMTP_USER,
+   to: attendeeEmailList[0],
+   bcc: resolvedBcc,
+   subject: `${course_name} Booking confirmation`
+  };
+
+  if (previewOnly) {
+    const previews = attendeeEmailList.map((recipientEmail) => {
+      const recipientAttendee = getAttendeeForRecipient(recipientEmail);
+      return {
+        to: recipientEmail,
+        html: createBookingEmailHtml(recipientAttendee)
+      };
+    });
+
+    return {
+      success: true,
+      status: 1,
+      subject: mailOptions.subject,
+      previews
     };
+  }
+
+  let emailStatus = 0;
+  let deliveryMeta = [];
+  const failedRecipients = [];
+  const deliveryMetaByRecipient = new Map();
+  const emailHtmlByRecipient = new Map();
+  try {
+    for (const recipientEmail of attendeeEmailList) {
+      const recipientAttendee = getAttendeeForRecipient(recipientEmail);
+      const recipientEmailHtml = createBookingEmailHtml(recipientAttendee);
+      emailHtmlByRecipient.set(recipientEmail, recipientEmailHtml);
+
+      try {
+        const sentInfo = await transporter.sendMail({
+          ...mailOptions,
+          to: recipientEmail,
+          html: recipientEmailHtml
+        });
+
+        const recipientDeliveryMeta = {
+          to: recipientEmail,
+          messageId: sentInfo?.messageId || null,
+          accepted: sentInfo?.accepted || [],
+          rejected: sentInfo?.rejected || [],
+          response: sentInfo?.response || null
+        };
+
+        deliveryMeta.push(recipientDeliveryMeta);
+        deliveryMetaByRecipient.set(recipientEmail, recipientDeliveryMeta);
+      } catch (recipientError) {
+        failedRecipients.push(recipientEmail);
+        const recipientErrorMeta = {
+          to: recipientEmail,
+          error: recipientError?.message || 'Unknown email send error'
+        };
+        deliveryMeta.push(recipientErrorMeta);
+        deliveryMetaByRecipient.set(recipientEmail, recipientErrorMeta);
+        console.error(`Error sending booking confirmation email to ${recipientEmail}:`, recipientError);
+      }
+    }
+
     console.log('Booking email delivery info:', deliveryMeta);
-    emailStatus = 1;
+    emailStatus = failedRecipients.length === 0 ? 1 : 0;
   } catch (error) {
     console.error('Error sending booking confirmation email:', error);
     if (error?.response) {
@@ -584,28 +650,42 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     emailStatus = 0;
   } finally {
     if (pool) {
-      try {
-        await pool.query(`
-          INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, ip, created)
-          VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-        `, [
-          attendeeEmails,
-          resolvedBcc || '',
-          process.env.SMTP_USER,
-          mailOptions.subject,
-          `${mailOptions.html}\n\n<!-- delivery_meta: ${escapeHtml(JSON.stringify(deliveryMeta || {}))} -->`,
-          emailStatus,
-          'Booking Mail',
-          booking_ref,
-          ip || ''
-        ]);
-      } catch (logError) {
-        console.error('Error logging email to database:', logError);
+      for (const recipientEmail of attendeeEmailList) {
+        const recipientMeta = deliveryMetaByRecipient.get(recipientEmail) || {
+          to: recipientEmail,
+          error: 'No delivery metadata captured'
+        };
+        const recipientStatus = failedRecipients.includes(recipientEmail) ? 0 : 1;
+
+        try {
+          const recipientEmailHtml = emailHtmlByRecipient.get(recipientEmail)
+            || createBookingEmailHtml(getAttendeeForRecipient(recipientEmail));
+
+          await pool.query(`
+            INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, ip, created)
+            VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          `, [
+            recipientEmail,
+            resolvedBcc || '',
+            process.env.SMTP_USER,
+            mailOptions.subject,
+            `${recipientEmailHtml}\n\n<!-- delivery_meta: ${escapeHtml(JSON.stringify(recipientMeta || {}))} -->`,
+            recipientStatus,
+            'Booking Mail',
+            booking_ref,
+            ip || ''
+          ]);
+        } catch (logError) {
+          console.error(`Error logging email to database for ${recipientEmail}:`, logError);
+        }
       }
     }
   }
 
   if (emailStatus === 0) {
+    if (failedRecipients.length > 0) {
+      throw new Error(`Failed to send booking confirmation email to: ${failedRecipients.join(', ')}`);
+    }
     throw new Error('Failed to send booking confirmation email');
   }
 
@@ -613,7 +693,23 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
 };
 
 exports.sendGiftVoucherEmail = async (voucherData, pool) => {
-  const { voucher_ref, voucher_person, voucher_email, subject, voucher_value, voucher_free_text, purchased_by, voucher_date, created } = voucherData;
+  const {
+    voucher_ref,
+    voucher_person,
+    voucher_email,
+    subject,
+    voucher_value,
+    voucher_free_text,
+    purchased_by,
+    created,
+    targetEmail,
+    previewOnly = false
+  } = voucherData;
+
+  const resolvedRecipientEmail = String(targetEmail || voucher_email || '').trim();
+  if (!resolvedRecipientEmail) {
+    throw new Error('No recipient email found for gift voucher email');
+  }
 
   // Format the issue date (DD/MM/YYYY)
   const issueDate = created ? formatDateToDDMMYYYY(created) : formatDateToDDMMYYYY(new Date());
@@ -631,12 +727,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
     }
   }
 
-  const mailOptions = {
-    from: process.env.SMTP_USER,
-    to: voucher_email,
-    bcc: 'bookings.testds@yopmail.com',
-    subject: `1 Stop Instruction Gift Voucher - Ref: ${voucher_ref}`,
-    html: `<!DOCTYPE html>
+  const createGiftVoucherEmailHtml = () => `<!DOCTYPE html>
 <html>
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
@@ -646,7 +737,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
   <div align="center">
     <table width="800" border="0" align="center" style="background: #f5f5f5; border: 1px solid #e0e0e6; padding: 5px;">
       <tr>
-        <td><img src="https://1stopinstruction.com/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
+        <td><img src="${process.env.PHP_SITE_URL}/images/header-img.jpg" width="784" height="177" alt="1stopinstruction"/></td>
       </tr>
       <tr>
         <td style="background: #ffffff; padding: 20px;">
@@ -659,7 +750,6 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
               <td align="right" valign="top">
                 <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0;">
                   <strong>Issue Date:</strong> <span style="color: #FF6347;">${issueDate}</span><br>
-                  <span style="font-size:9pt; color: #666;">Date Voucher was Issued (DD/MM/YYYY)</span>
                 </p>
               </td>
             </tr>
@@ -693,14 +783,31 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
       <tr>
         <td style="text-align:center;background:#e6e6e8;padding:10px;">
           <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
-          <img src="https://1stopinstruction.com/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
+          <img src="${process.env.PHP_SITE_URL}/images/footer-img.jpg" width="786" height="55" alt="1stopinstruction"/>
         </td>
       </tr>
     </table>
   </div>
 </body>
-</html>`
+</html>`;
+
+  const mailOptions = {
+    from: process.env.SMTP_USER,
+    to: resolvedRecipientEmail,
+    bcc: process.env.BOOKING_BCC,
+    subject: `1 Stop Instruction Gift Voucher - Ref: ${voucher_ref}`,
+    html: createGiftVoucherEmailHtml()
   };
+
+  if (previewOnly) {
+    return {
+      success: true,
+      status: 1,
+      subject: mailOptions.subject,
+      to: resolvedRecipientEmail,
+      html: mailOptions.html
+    };
+  }
 
   let emailStatus = 0;
   try {
@@ -716,7 +823,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
           INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, created)
           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
-          voucher_email,
+          resolvedRecipientEmail,
           'bookings.testds@yopmail.com',
           process.env.SMTP_USER,
           mailOptions.subject,
