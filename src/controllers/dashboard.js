@@ -17,7 +17,7 @@ class DashboardController {
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
-        JOIN course_event_dates ced ON ce.id = ced.course_event_id and ced.event_date < CURDATE() and ced.event_date > '1800-01-01'
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id and ced.event_date < CURDATE() and ced.event_date > '1900-01-01'
         JOIN locations l ON ce.location_id = l.id
         LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
         LEFT JOIN booking_attendees ba ON b.id = ba.booking_id

@@ -249,9 +249,9 @@ const normalizeUrl = (url, fallback) => {
 const isTbcDate = (dateValue) => {
   const raw = String(dateValue || '').trim();
   return (
-    // Return true if the date is empty, null, undefined or before 1800
+    // Return true if the date is empty, null, undefined or before 1900
     $date = new Date(raw),
-    isNaN($date.getTime()) || $date.getFullYear() < 1800
+    isNaN($date.getTime()) || $date.getFullYear() < 1900
   );
 };
 
