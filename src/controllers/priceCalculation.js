@@ -41,13 +41,12 @@ class PriceCalculationController {
       const amountToDiscount = depositRequired ? depositTotal : subtotal;
       const promoResult = this.applyPromoDiscount(amountToDiscount, promoData, attendees.length);
 
-      // Calculate VAT
-      const vatSettings = await this.getVATRate();
+      // VAT disabled for current pricing flow
       const vatResult = this.calculateVAT(
         promoResult.discounted_amount,
         courseEvent.franchise,
         courseEvent.course,
-        vatSettings.vat_rate
+        0
       );
 
       // Final amount calculation
@@ -241,23 +240,11 @@ class PriceCalculationController {
   }
 
   calculateVAT(amount, franchise, course, vatRate) {
-    if (!franchise.vat || vatRate <= 0) {
-      return { vat_amount: 0, vat_rate: 0 };
-    }
-
-    // DSA fees are VAT exempt
-    const vatableAmount = amount >= course.dsa_fees
-      ? (amount - course.dsa_fees)
-      : amount;
-
-    const vatMultiplier = (100 + vatRate) / 100;
-    const vatAmount = vatableAmount - (vatableAmount / vatMultiplier);
-
     return {
-      vat_amount: Math.round(vatAmount * 100) / 100,
-      vat_rate: vatRate,
-      vatable_amount: vatableAmount,
-      dsa_exempt: course.dsa_fees
+      vat_amount: 0,
+      vat_rate: 0,
+      vatable_amount: 0,
+      dsa_exempt: course?.dsa_fees || 0
     };
   }
 

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendBookingConfirmation } = require('../utils/emailService');
 const { replaceTokens } = require('../utils/tokenReplacer');
+const e = require('express');
 
 class BookingFlowController {
   constructor(pool) {
@@ -168,6 +169,7 @@ class BookingFlowController {
       // Build calendar data with "X Day Course" logic
       const availability = [];
       Object.values(groupedEvents).forEach(eventGroup => {
+
         const availableSpaces = eventGroup.booking_limit - eventGroup.bookings_done - eventGroup.current_locks;
         const isFullyBooked = (eventGroup.bookings_done + eventGroup.current_locks) >= eventGroup.booking_limit;
 
@@ -1268,17 +1270,9 @@ class BookingFlowController {
         const discountedTotalFees = Math.max(0, totalFees - promoDiscountOnTotal);
         const discountedPayableNowFees = Math.max(0, payableNowFees - promoDiscountOnPayableNow);
 
-        // Calculate VAT (DSA fees are VAT exempt)
-        const vatRate = 0.20;
-        let vat = 0;
-
-        if (courseData[0].franchise_vat === 1) {
-          const dsaFees = courseData[0].dsa_fees * attendees_count;
-          const vatableAmount = discountedTotalFees > dsaFees ? (discountedTotalFees - dsaFees) : 0;
-          const vatMultiplier = (100 + (vatRate * 100)) / 100;
-          vat = vatableAmount - (vatableAmount / vatMultiplier);
-          vat = Math.round(vat * 100) / 100;
-        }
+        // VAT disabled for current booking flow
+        const vatRate = 0;
+        const vat = 0;
 
         const totalAmount = discountedTotalFees + vat;
 
@@ -1304,11 +1298,7 @@ class BookingFlowController {
         const discountedPerAttendeePayableNow = perAttendeeAmounts.map(({ payableNow }, index) =>
           roundCurrency(Math.max(0, payableNow - (promoDiscountsPerAttendeePayableNow[index] || 0)))
         );
-        const perAttendeeVatableNet = courseData[0].franchise_vat === 1
-          ? discountedPerAttendeeNetTotals.map((attendeeNetTotal) =>
-              roundCurrency(Math.max(0, attendeeNetTotal - (Number(courseData[0].dsa_fees) || 0)))
-            )
-          : discountedPerAttendeeNetTotals.map(() => 0);
+        const perAttendeeVatableNet = discountedPerAttendeeNetTotals.map(() => 0);
         const perAttendeeVat = allocateProportionalAmounts(perAttendeeVatableNet, vat);
 
         for (let i = 0; i < attendees.length; i++) {
