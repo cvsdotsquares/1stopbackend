@@ -1,7 +1,7 @@
 // src/middleware/bookingStatusManager.js
 
 class BookingStatusManager {
-  
+
   /**
    * Booking status definitions
    */
@@ -90,11 +90,11 @@ class BookingStatusManager {
       try {
         // Run cleanup more frequently for timeout bookings
         const shouldRunStatusUpdate = req.path.includes('/bookings') || req.path.includes('/payment');
-        
+
         if (shouldRunStatusUpdate) {
           await this.updateExpiredBookings(pool);
         }
-        
+
         next();
       } catch (error) {
         console.error('Status update middleware error:', error);
@@ -115,7 +115,7 @@ class BookingStatusManager {
         console.error('Cleanup job error:', error);
       }
     }, 60000); // Run every minute
-    
+
     console.log('Booking cleanup job started - runs every minute');
   }
 
@@ -124,7 +124,7 @@ class BookingStatusManager {
    */
   static async updateExpiredBookings(pool) {
     const connection = await pool.getConnection();
-    
+
     try {
       await connection.beginTransaction();
 
@@ -132,7 +132,7 @@ class BookingStatusManager {
       const [timeoutBookings] = await connection.query(`
         UPDATE bookings b
         SET b.status = ?, b.modified = NOW()
-        WHERE b.status = ? 
+        WHERE b.status = ?
           AND b.created <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
       `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
 
@@ -142,30 +142,44 @@ class BookingStatusManager {
           UPDATE course_events ce
           JOIN bookings b ON ce.id = b.course_event_id
           SET ce.current_locks = GREATEST(0, ce.current_locks - b.spaces)
-          WHERE b.status = ? 
+          WHERE b.status = ?
             AND b.modified >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
         `, [this.STATUS.CANCELLED]);
       }
 
-      // Mark confirmed bookings as completed if event date has passed
+      // Mark confirmed bookings as completed only when ALL real event dates have passed.
+      // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
+      // TBC dates the subquery returns NULL, which evaluates to false and prevents premature completion.
       const [completedBookings] = await connection.query(`
         UPDATE bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
-        JOIN course_event_dates ced ON ce.id = ced.course_event_id
         SET b.status = ?, b.modified = NOW()
-        WHERE b.status = ? 
-          AND ced.event_date < CURDATE()
+        WHERE b.status = ?
+          AND (
+            SELECT MAX(ced.event_date)
+            FROM course_event_dates ced
+            WHERE ced.course_event_id = ce.id
+              AND ced.event_date > '1900-01-01'
+              AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+          ) < CURDATE()
       `, [this.STATUS.COMPLETED, this.STATUS.CONFIRMED]);
 
-      // Mark pending payment bookings as cancelled if event is tomorrow or sooner
+      // Cancel pending payment bookings when the first real event date is tomorrow or sooner.
+      // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
+      // TBC dates the subquery returns NULL, which evaluates to false and prevents erroneous cancellation.
       const [cancelledBookings] = await connection.query(`
         UPDATE bookings b
         JOIN course_events ce ON b.course_event_id = ce.id
-        JOIN course_event_dates ced ON ce.id = ced.course_event_id
-        SET b.status = ?, 
+        SET b.status = ?,
             b.modified = NOW()
-        WHERE b.status = ? 
-          AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+        WHERE b.status = ?
+          AND (
+            SELECT MIN(ced.event_date)
+            FROM course_event_dates ced
+            WHERE ced.course_event_id = ce.id
+              AND ced.event_date > '1900-01-01'
+              AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+          ) <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
       `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
 
       await connection.commit();
@@ -200,26 +214,26 @@ class BookingStatusManager {
       bookingChange = -spaces; // Remove from bookings_done
     }
     // From pending (0) to cancelled/no-show (3,4)
-    else if (oldStatus === this.STATUS.PENDING_PAYMENT && 
+    else if (oldStatus === this.STATUS.PENDING_PAYMENT &&
              (newStatus === this.STATUS.CANCELLED || newStatus === this.STATUS.NO_SHOW)) {
       lockChange = -spaces; // Release locks
     }
     // From confirmed (1) to cancelled/no-show/completed (2,3,4)
-    else if (oldStatus === this.STATUS.CONFIRMED && 
-             (newStatus === this.STATUS.COMPLETED || 
-              newStatus === this.STATUS.CANCELLED || 
+    else if (oldStatus === this.STATUS.CONFIRMED &&
+             (newStatus === this.STATUS.COMPLETED ||
+              newStatus === this.STATUS.CANCELLED ||
               newStatus === this.STATUS.NO_SHOW)) {
       bookingChange = -spaces; // Remove from bookings_done
     }
     // From cancelled/no-show back to pending
-    else if ((oldStatus === this.STATUS.CANCELLED || oldStatus === this.STATUS.NO_SHOW) && 
+    else if ((oldStatus === this.STATUS.CANCELLED || oldStatus === this.STATUS.NO_SHOW) &&
              newStatus === this.STATUS.PENDING_PAYMENT) {
       lockChange = spaces; // Add to locks
     }
     // From cancelled/no-show/completed back to confirmed
-    else if ((oldStatus === this.STATUS.CANCELLED || 
-              oldStatus === this.STATUS.NO_SHOW || 
-              oldStatus === this.STATUS.COMPLETED) && 
+    else if ((oldStatus === this.STATUS.CANCELLED ||
+              oldStatus === this.STATUS.NO_SHOW ||
+              oldStatus === this.STATUS.COMPLETED) &&
              newStatus === this.STATUS.CONFIRMED) {
       bookingChange = spaces; // Add to bookings_done
     }
@@ -233,8 +247,8 @@ class BookingStatusManager {
   static async updateEventSpaces(pool, courseEventId, lockChange, bookingChange) {
     if (lockChange !== 0 || bookingChange !== 0) {
       await pool.query(`
-        UPDATE course_events 
-        SET 
+        UPDATE course_events
+        SET
           current_locks = GREATEST(0, current_locks + ?),
           bookings_done = GREATEST(0, bookings_done + ?),
           modified = NOW()
@@ -248,7 +262,7 @@ class BookingStatusManager {
    */
   static async getEventBookingSummary(pool, courseEventId) {
     const [summary] = await pool.query(`
-      SELECT 
+      SELECT
         ce.booking_limit,
         ce.bookings_done,
         ce.current_locks,
@@ -274,7 +288,7 @@ class BookingStatusManager {
    */
   static async validateEventCapacity(pool, courseEventId, requiredSpaces, excludeBookingId = null) {
     let query = `
-      SELECT 
+      SELECT
         ce.booking_limit,
         ce.bookings_done,
         ce.current_locks,
@@ -287,7 +301,7 @@ class BookingStatusManager {
     `;
 
     const [result] = await pool.query(query, [excludeBookingId || 0, courseEventId]);
-    
+
     if (!result.length) {
       throw new Error('Course event not found');
     }
