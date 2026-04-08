@@ -493,7 +493,7 @@ class BookingFlowController {
         booking_bcc: settings[0].booking_bcc
       } : {
         vat_rate: 0.20,
-        credit_card_surcharge: 0.025,
+        credit_card_surcharge: 0.0125,
         booking_bcc: "bookings@1stopinstruction.com"
       };
 
@@ -1368,6 +1368,31 @@ class BookingFlowController {
         const primaryAttendee = attendees[0];
 
         try {
+          const formatStripeDate = (dateValue) => {
+            if (!dateValue) return '';
+            const dateObj = new Date(dateValue);
+            if (Number.isNaN(dateObj.getTime())) return '';
+            const day = dateObj.getDate();
+            const month = dateObj.getMonth() + 1;
+            const yearShort = String(dateObj.getFullYear()).slice(-2);
+            return `${day}/${month}/${yearShort}`;
+          };
+
+          const courseDateText = formatStripeDate(selected_date);
+          const attendeeParts = attendees.map((attendee, index) => {
+            const fullName = `${attendee.first_name || ''} ${attendee.sur_name || ''}`.trim();
+            const attendeeRef = bookingRefs[index] || '';
+            return `${fullName} (${attendeeRef})`;
+          });
+
+          const attendeeSummary = attendeeParts.join(' & ');
+          const stripeDescriptionParts = [
+            attendeeSummary,
+            '-',
+            courseData[0]?.course_name || 'Course',
+            courseDateText
+          ].filter(Boolean);
+          const stripeDescription = stripeDescriptionParts.join(' ').replace(/\s+/g, ' ').trim();
 
           const paymentIntent = await stripe.paymentIntents.create({
             amount: Math.round(amountToChargeNow * 100),
@@ -1381,9 +1406,14 @@ class BookingFlowController {
               course_id: course_id.toString(),
               course_event_id: course_event_id.toString(),
               user_id: userIds[0].toString(),
-              attendees_count: attendees_count.toString()
+              attendees_count: attendees_count.toString(),
+              first_attendee_name: `${primaryAttendee?.first_name || ''} ${primaryAttendee?.sur_name || ''}`.trim(),
+              first_attendee_phone: String(primaryAttendee?.contact1 || ''),
+              first_attendee_email: String(primaryAttendee?.email || ''),
+              first_attendee_driving_licence: String(primaryAttendee?.license_number || ''),
+              course_date: courseDateText
             },
-            description: `Course: ${courseData[0]?.course_name || 'Course'} - ${attendees_count} attendee(s)`,
+            description: stripeDescription,
             receipt_email: attendees[0].email
           });
 

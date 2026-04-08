@@ -197,7 +197,7 @@ class BookingController {
 
         // 5. Calculate total amount
         const base_amount = course.dsa_fees * spaces;
-        const booking_fee = Math.round(base_amount * 0.025); // 2.5% booking fee
+        const booking_fee = Math.round(((base_amount * 0.0125) + 0.2) * 100) / 100; // 1.25% + £0.20
         const total_amount = base_amount + booking_fee;
 
         // 6. Create booking
