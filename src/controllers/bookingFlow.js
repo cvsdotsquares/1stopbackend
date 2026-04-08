@@ -514,8 +514,7 @@ class BookingFlowController {
       const { courseId, locationId, courseEventId } = req.params;
 
       const [rows] = await this.pool.query(`
-        SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own,
-               automatic_lock_done, manual_lock_done
+        SELECT vehicle_type_automatic, vehicle_type_manual, vehicle_type_own
         FROM course_events
         WHERE course_id = ? AND location_id = ? AND id   = ? AND status = '1'
       `, [courseId, locationId, courseEventId]);
@@ -525,19 +524,32 @@ class BookingFlowController {
       }
 
       const event = rows[0];
+      const [vehicleUsageRows] = await this.pool.query(`
+        SELECT
+          SUM(CASE WHEN ba.vehicle_type = 0 THEN 1 ELSE 0 END) AS manual_used,
+          SUM(CASE WHEN ba.vehicle_type = 1 THEN 1 ELSE 0 END) AS automatic_used
+        FROM booking_attendees ba
+        INNER JOIN bookings b ON b.id = ba.booking_id
+        WHERE b.course_event_id = ?
+          AND b.status IN (0, 1, 2)
+      `, [courseEventId]);
+
+      const manualUsed = Number(vehicleUsageRows?.[0]?.manual_used || 0);
+      const automaticUsed = Number(vehicleUsageRows?.[0]?.automatic_used || 0);
+      const manualAvailable = Math.max(0, Number(event.vehicle_type_manual || 0) - manualUsed);
+      const automaticAvailable = Math.max(0, Number(event.vehicle_type_automatic || 0) - automaticUsed);
+
       const vTypeSelect = {};
 
-      if (event.vehicle_type_automatic > 0 &&
-        event.vehicle_type_automatic > event.automatic_lock_done) {
+      if (automaticAvailable > 0) {
         vTypeSelect['1'] = 'Automatic';
       }
 
-      if (event.vehicle_type_manual > 0 &&
-        event.vehicle_type_manual > event.manual_lock_done) {
+      if (manualAvailable > 0) {
         vTypeSelect['0'] = 'Manual';
       }
 
-      if (event.vehicle_type_own == 1) {
+      if (Number(event.vehicle_type_own) === 1) {
         vTypeSelect['3'] = 'I will be using my own vehicle';
       }
 
@@ -1089,7 +1101,11 @@ class BookingFlowController {
 
         // Check availability with row lock to prevent race conditions
         const [event] = await connection.query(`
-          SELECT booking_limit, bookings_done, current_locks FROM course_events WHERE id = ? FOR UPDATE
+          SELECT booking_limit, bookings_done, current_locks,
+                 vehicle_type_manual, vehicle_type_automatic, vehicle_type_own
+          FROM course_events
+          WHERE id = ?
+          FOR UPDATE
         `, [course_event_id]);
 
         if (!event.length) {
@@ -1105,6 +1121,55 @@ class BookingFlowController {
             success: false,
             message: `Sorry, this course is now fully booked. Only ${availableSpaces} space(s) available, but you requested ${attendees_count}.`,
             available_spaces: availableSpaces
+          });
+        }
+
+        // Validate vehicle-type capacity for this specific event
+        const requestedVehicleCounts = attendees.reduce((acc, attendee) => {
+          const vehicleType = Number.parseInt(attendee.vehicle_type, 10);
+          if (vehicleType === 0) acc.manual += 1;
+          if (vehicleType === 1) acc.automatic += 1;
+          if (vehicleType === 3) acc.own += 1;
+          return acc;
+        }, { manual: 0, automatic: 0, own: 0 });
+
+        if (requestedVehicleCounts.own > 0 && Number(event[0].vehicle_type_own) !== 1) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: 'Own-vehicle option is not available for this event.'
+          });
+        }
+
+        const [vehicleUsageRows] = await connection.query(`
+          SELECT
+            SUM(CASE WHEN ba.vehicle_type = 0 THEN 1 ELSE 0 END) AS manual_used,
+            SUM(CASE WHEN ba.vehicle_type = 1 THEN 1 ELSE 0 END) AS automatic_used
+          FROM booking_attendees ba
+          INNER JOIN bookings b ON b.id = ba.booking_id
+          WHERE b.course_event_id = ?
+            AND b.status IN (0, 1, 2)
+        `, [course_event_id]);
+
+        const manualUsed = Number(vehicleUsageRows?.[0]?.manual_used || 0);
+        const automaticUsed = Number(vehicleUsageRows?.[0]?.automatic_used || 0);
+
+        const manualAvailable = Math.max(0, Number(event[0].vehicle_type_manual || 0) - manualUsed);
+        const automaticAvailable = Math.max(0, Number(event[0].vehicle_type_automatic || 0) - automaticUsed);
+
+        if (requestedVehicleCounts.manual > manualAvailable) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Manual vehicle slots unavailable. Requested ${requestedVehicleCounts.manual}, available ${manualAvailable}. Please reduce manual attendees or choose another vehicle type.`
+          });
+        }
+
+        if (requestedVehicleCounts.automatic > automaticAvailable) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Automatic vehicle slots unavailable. Requested ${requestedVehicleCounts.automatic}, available ${automaticAvailable}. Please reduce automatic attendees or choose another vehicle type.`
           });
         }
 
