@@ -339,13 +339,13 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
       return tsA - tsB;
     })
    .map((d) => {
-    const meeting = formatTime12h(minusMinutes(d.event_start_time, 15));
     const start = formatTime12h(d.event_start_time);
+    const end = formatTime12h(d.event_end_time);
     return `
     <tr>
       <td>${escapeHtml(formatMySQLDateToDDMMYYYY(d.event_date))}</td>
-      <td><span class="aQJ">${escapeHtml(meeting)}</span></td>
       <td><span class="aQJ">${escapeHtml(start)}</span></td>
+      <td><span class="aQJ">${escapeHtml(end)}</span></td>
     </tr>`;
    }).join('');
 
@@ -460,8 +460,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                             <table width="98%" border="0" cellspacing="0" cellpadding="0">
                               <tr>
                                 <td width="24%"><strong><u>Date</u></strong></td>
-                                <td width="36%"><strong><u>Meeting Time</u></strong></td>
-                                <td width="33%"><strong><u>Start Time</u></strong></td>
+                                <td width="36%"><strong><u>Start Time</u></strong></td>
+                                <td width="33%"><strong><u>End Time</u></strong></td>
                               </tr>
                               ${dateRows}
                               ${hasTbc

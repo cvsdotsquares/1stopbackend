@@ -846,7 +846,7 @@ class StripeWebhookController {
 
       // Get event dates
       const [eventDates] = await connection.query(`
-        SELECT event_date, event_start_time
+        SELECT event_date, event_start_time, event_end_time
         FROM course_event_dates
         WHERE course_event_id = ?
         ORDER BY event_date ASC, event_start_time ASC
