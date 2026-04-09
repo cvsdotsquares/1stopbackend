@@ -708,6 +708,9 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
     throw new Error('No recipient email found for gift voucher email');
   }
 
+  const normalizedVoucherSubject = String(subject || voucherData?.course_name || '').trim();
+  const voucherSubjectLabel = normalizedVoucherSubject || 'Motorcycle Training, CBT, Driving Lessons';
+
   // Format the issue date (DD/MM/YYYY)
   const issueDate = created ? formatDateToDDMMYYYY(created) : formatDateToDDMMYYYY(new Date());
   const baseIssueDate = created ? new Date(created) : new Date();
@@ -745,12 +748,12 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
           <table width="100%" border="0">
             <tr>
               <td>
-                <h2 style="color: #333; font-family: Arial, sans-serif; margin: 0;">Gift Voucher For ${subject || 'Motorcycle Training, CBT, Driving Lessons'}</h2>
+                <h2 style="color: #333; font-family: Arial, sans-serif; margin: 0;">Gift Voucher For ${escapeHtml(voucherSubjectLabel)}</h2>
               </td>
               <td align="right" valign="top">
                 <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0;">
                   <strong>Issue Date:</strong> <span style="color: #333;">${issueDate}</span><br>
-                  <strong><span style="color: #FF0000;">Expiry Date:</span></strong> <span style="color: #FF0000;">${expiryDate}</span>
+                  <strong><span style="color: #333;">Expiry Date:</span></strong> <span style="color: #FF0000;">${expiryDate}</span>
                 </p>
               </td>
             </tr>
