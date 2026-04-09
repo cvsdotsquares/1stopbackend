@@ -127,12 +127,11 @@ class CMSPagesController {
 
       // Get hero/slider data
       const [sliders] = await this.pool.query(`
-        SELECT ps.title, ps.next_available_text, sbd.title as box_title, sbd.subtitle, sbd.promocode,
+        SELECT ps.title, ps.next_available_text, ps.page_course_id, sbd.title as box_title, sbd.subtitle, sbd.promocode,
                sbd.book_online_button_title, sbd.book_online_button_link,
                sbd.find_cbt_button_title, sbd.find_cbt_button_link
         FROM pageSliders ps
         LEFT JOIN sliderBoxData sbd ON ps.id = sbd.pageSliders_id
-        LEFT JOIN course_events ce ON ps.page_course_id = ce.course_id
         WHERE ps.page_id = ?
       `, [page.id]);
 
@@ -144,6 +143,54 @@ class CMSPagesController {
         WHERE ps.page_id = ? AND ps.page_type = 'page' AND psi.slider_image IS NOT NULL
       `, [page.id]);
 
+      // Helper: format a YYYY-MM-DD string as 'DDD Do MMM' (e.g. 'Thu 23rd Apr')
+      // Parses components directly to avoid timezone off-by-one (BST/UTC shift from new Date())
+      const formatNextCourseDate = (dateStr) => {
+        if (!dateStr || typeof dateStr !== 'string') return null;
+        const parts = dateStr.split('-');
+        if (parts.length !== 3) return null;
+        const year = Number.parseInt(parts[0], 10);
+        const month = Number.parseInt(parts[1], 10) - 1; // 0-based
+        const day = Number.parseInt(parts[2], 10);
+        if (Number.isNaN(year) || Number.isNaN(month) || Number.isNaN(day)) return null;
+        // Build date at noon UTC to be fully immune to any timezone shift
+        const date = new Date(Date.UTC(year, month, day, 12, 0, 0));
+        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const suffix = day > 3 && day < 21 ? 'th' : ['th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th'][day % 10];
+        return `${dayNames[date.getUTCDay()]} ${day}${suffix} ${monthNames[month]}`;
+      };
+
+      // Fetch next available (non-frozen, not full) date for the course linked to this page's slider
+      let nextCourseDateFormatted = null;
+      if (sliders.length > 0 && sliders[0].page_course_id) {
+        const [nextDateRows] = await this.pool.query(`
+          SELECT DATE_FORMAT(ced.event_date, '%Y-%m-%d') as event_date
+          FROM course_event_dates ced
+          JOIN course_events ce ON ced.course_event_id = ce.id
+          JOIN courses c ON ce.course_id = c.id
+          LEFT JOIN (
+            SELECT course_event_id, COUNT(*) as freeze_count
+            FROM freeze
+            GROUP BY course_event_id
+          ) f ON f.course_event_id = ced.course_event_id
+          WHERE ce.course_id = ?
+            AND c.status = '1'
+            AND ce.status = '1'
+            AND ced.event_date > CURDATE()
+            AND ced.event_date <= DATE_ADD(CURDATE(), INTERVAL 3 MONTH)
+            AND ced.event_date > '1900-01-01'
+            AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+            AND (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) > 0
+            AND COALESCE(f.freeze_count, 0) = 0
+          ORDER BY ced.event_date ASC
+          LIMIT 1
+        `, [sliders[0].page_course_id]);
+        if (nextDateRows.length > 0) {
+          nextCourseDateFormatted = formatNextCourseDate(nextDateRows[0].event_date);
+        }
+      }
+
       let heroData = null;
       if (sliders.length > 0) {
         heroData = {
@@ -153,7 +200,8 @@ class CMSPagesController {
             title: img.image_caption
           })),
           nextCourse: {
-            label: sliders[0].next_available_text || "Our Next Available CBT Course Is"
+            label: sliders[0].next_available_text || "Our Next Available CBT Course Is",
+            date: nextCourseDateFormatted
           },
           promotion: {
             title: sliders[0].box_title || null,

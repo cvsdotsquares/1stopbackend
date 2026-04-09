@@ -422,7 +422,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                             </td>
                             <td width="20%" style="width:20.0%;padding:0in 0in 0in 0in;height:48.75pt">
                               <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Deposit/Payment Received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
-                                <strong><span style="font-family:Arial,sans-serif">Balance Outstanding: </span></strong><u></u><u></u></span>
+                                <strong><span style="font-family:Arial,sans-serif">Outstanding Balance: </span></strong><u></u><u></u></span>
                               </p>
                             </td>
                             <td width="12%" style="text-align: right;width:12.0%;padding:0in 0in 0in 0in;height:48.75pt">
@@ -698,7 +698,6 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
     subject,
     voucher_value,
     voucher_free_text,
-    purchased_by,
     created,
     targetEmail,
     previewOnly = false
@@ -711,6 +710,10 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
 
   // Format the issue date (DD/MM/YYYY)
   const issueDate = created ? formatDateToDDMMYYYY(created) : formatDateToDDMMYYYY(new Date());
+  const baseIssueDate = created ? new Date(created) : new Date();
+  const expiryDateObject = new Date(baseIssueDate);
+  expiryDateObject.setFullYear(expiryDateObject.getFullYear() + 1);
+  const expiryDate = formatDateToDDMMYYYY(expiryDateObject);
 
   // Get voucher terms from database
   let voucherTerms = '';
@@ -742,18 +745,16 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
           <table width="100%" border="0">
             <tr>
               <td>
-                <h2 style="color: #333; font-family: Arial, sans-serif; margin: 0;">Gift Voucher For</h2>
-                <h3 style="color: #333; font-family: Arial, sans-serif; margin: 5px 0;">${subject || 'Motorcycle Training, CBT, Driving Lessons'}</h3>
+                <h2 style="color: #333; font-family: Arial, sans-serif; margin: 0;">Gift Voucher For ${subject || 'Motorcycle Training, CBT, Driving Lessons'}</h2>
               </td>
               <td align="right" valign="top">
                 <p style="font-size:10pt;font-family:Arial,sans-serif; margin: 0;">
-                  <strong>Issue Date:</strong> <span style="color: #FF6347;">${issueDate}</span><br>
+                  <strong>Issue Date:</strong> <span style="color: #333;">${issueDate}</span><br>
+                  <strong><span style="color: #FF0000;">Expiry Date:</span></strong> <span style="color: #FF0000;">${expiryDate}</span>
                 </p>
               </td>
             </tr>
           </table>
-
-          <p style="font-size:10pt;font-family:Arial,sans-serif; margin-top: 15px;">You have received a gift voucher from <strong>${purchased_by}</strong> for 1 Stop Instruction training.</p>
 
           <table width="100%" style="margin: 20px 0; border: 2px solid #333; padding: 15px; background: #f9f9f9;">
             <tr>
@@ -766,7 +767,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
             </tr>
           </table>
 
-          <p style="font-size:10pt;font-family:Arial,sans-serif">To redeem this voucher, please contact us on <a href="tel:08008597333" style="color: #00CED1; text-decoration: none;"><strong>0800 8597 7333</strong></a> and provide your voucher reference number.</p>
+          <p style="font-size:10pt;font-family:Arial,sans-serif">To redeem this voucher, please contact us on <a href="tel:02085977333"><strong>020 8597 7333</strong></a> and provide your voucher reference number.</p>
 
           ${voucherTerms ? `
           <div style="margin: 20px 0; padding: 15px; background: #f9f9f9; border-left: 4px solid #333;">
