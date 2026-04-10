@@ -243,15 +243,15 @@ class HomepageController {
       `, [pageId]);
 
       if (cbtLondon.length > 0) {
-        homepage.cbtAcrossLondon = {
-          title: cbtLondon[0].title || null,
-          subtitle: cbtLondon[0].subtitle || null,
-          description: cbtLondon[0].description || null,
-          bg_color: !!cbtLondon[0].bg_color,
-          image: cbtLondon[0].cbt_image ? `/uploads/cbt_across_london/${cbtLondon[0].cbt_image}` : null
-        };
+        // add multiple entries
+          homepage.cbtAcrossLondon = cbtLondon.map((item, index) => ({
+            title: item.title || null,
+            subtitle: item.subtitle || null,
+            description: item.description || null,
+            bg_color: !!item.bg_color,
+            image: item.cbt_image ? `/uploads/cbt_across_london/${item.cbt_image}` : null
+          }));
       }
-
       // Get CBT test London data
       const [cbtTestLondon] = await this.pool.query(`
         SELECT title, subtitle, description, cbt_image, bg_color
