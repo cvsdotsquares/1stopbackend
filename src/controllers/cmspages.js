@@ -163,9 +163,18 @@ class CMSPagesController {
 
       // Fetch next available (non-frozen, not full) date for the course linked to this page's slider
       let nextCourseDateFormatted = null;
+      let nextCourseLocationId = null;
+      let nextCourseEventId = null;
+      let unformattedDate = null;
       if (sliders.length > 0 && sliders[0].page_course_id) {
         const [nextDateRows] = await this.pool.query(`
-          SELECT DATE_FORMAT(ced.event_date, '%Y-%m-%d') as event_date
+          SELECT
+            DATE_FORMAT(ced.event_date, '%Y-%m-%d') as event_date,
+            ce.location_id,
+            ced.course_event_id,
+            ce.booking_limit,
+            ce.bookings_done,
+            ce.current_locks
           FROM course_event_dates ced
           JOIN course_events ce ON ced.course_event_id = ce.id
           JOIN courses c ON ce.course_id = c.id
@@ -183,11 +192,14 @@ class CMSPagesController {
             AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
             AND (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) > 0
             AND COALESCE(f.freeze_count, 0) = 0
-          ORDER BY ced.event_date ASC
+          ORDER BY ced.event_date ASC, (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) DESC, ce.location_id ASC
           LIMIT 1
         `, [sliders[0].page_course_id]);
         if (nextDateRows.length > 0) {
           nextCourseDateFormatted = formatNextCourseDate(nextDateRows[0].event_date);
+          nextCourseLocationId = nextDateRows[0].location_id;
+          nextCourseEventId = nextDateRows[0].course_event_id;
+          unformattedDate = nextDateRows[0].event_date
         }
       }
 
@@ -201,7 +213,11 @@ class CMSPagesController {
           })),
           nextCourse: {
             label: sliders[0].next_available_text || "Our Next Available CBT Course Is",
-            date: nextCourseDateFormatted
+            date: nextCourseDateFormatted,
+            course_id: sliders[0].page_course_id || null,
+            location_id: nextCourseLocationId,
+            course_event_id: nextCourseEventId,
+            url: nextCourseDateFormatted ? `/bookings?course_id=${sliders[0].page_course_id || ''}&location_id=${nextCourseLocationId || ''}&course_event_id=${nextCourseEventId || ''}&date=${unformattedDate}` : null
           },
           promotion: {
             title: sliders[0].box_title || null,

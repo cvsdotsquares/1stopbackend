@@ -626,6 +626,8 @@ class BookingController {
           l.location_name,
           l.address1,
           l.address2,
+          l.address3,
+          l.address4,
           l.postcode,
           u.first_name,
           u.sur_name,
@@ -657,7 +659,7 @@ class BookingController {
         GROUP BY b.id, b.user_id, b.course_id, b.course_event_id, b.spaces, b.total_amount, b.payment_due,
                  b.admin_payment_received, b.type_of_book, b.status,
                  b.created, b.modified, c.course_name, c.course_abb, c.description, c.dsa_fees,
-                 ced.event_start_time, l.id, l.location_name, l.address1, l.address2, l.postcode,
+                 ced.event_start_time, l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode,
                  u.first_name, u.sur_name, u.email, u.contact1, bp.transation_id
       `, [id, user_id, user_email]);
 
@@ -720,7 +722,9 @@ class BookingController {
       const previewResult = await sendBookingConfirmation({
         ...payload,
         targetEmails: [previewEmail],
-        previewOnly: true
+        previewOnly: true,
+        bookingRefSuffix: 'R',
+        disableBcc: true
       }, this.pool);
 
       const firstPreview = previewResult?.previews?.[0] || null;
@@ -780,7 +784,9 @@ class BookingController {
         ...payload,
         targetEmails: [targetEmail],
         previewOnly: false,
-        ip: req.ip || req.clientIp || 'dashboard'
+        ip: req.ip || req.clientIp || 'dashboard',
+        bookingRefSuffix: 'R',
+        disableBcc: true
       }, this.pool);
 
       return res.json({

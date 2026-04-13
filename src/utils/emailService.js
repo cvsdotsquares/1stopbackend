@@ -260,10 +260,12 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    course_name,
    booking_ref,
    booking_type = 'O',
+  bookingRefSuffix = '',
    refundable = 0,
    attendees = [],
     targetEmails = [],
     previewOnly = false,
+  disableBcc = false,
    location = {},
    event_dates = [],
    booking = {},
@@ -340,12 +342,13 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     })
    .map((d) => {
     const start = formatTime12h(d.event_start_time);
-    const end = formatTime12h(d.event_end_time);
+    const meetingTimeRaw = minusMinutes(d.event_start_time, 15);
+    const meeting = formatTime12h(meetingTimeRaw);
     return `
     <tr>
       <td>${escapeHtml(formatMySQLDateToDDMMYYYY(d.event_date))}</td>
+      <td><span class="aQJ">${escapeHtml(meeting)}</span></td>
       <td><span class="aQJ">${escapeHtml(start)}</span></td>
-      <td><span class="aQJ">${escapeHtml(end)}</span></td>
     </tr>`;
    }).join('');
 
@@ -353,7 +356,11 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    ? `${siteUrl}maps/${location.direction_map}`
    : `${siteUrl}images/no-map.jpg`;
 
-  const resolvedBcc = String(bcc || process.env.BOOKING_BCC || '').trim() || undefined;
+  const resolvedBcc = disableBcc
+    ? undefined
+    : (String(bcc || process.env.BOOKING_BCC || '').trim() || undefined);
+
+  const bookingTypeLabel = `${String(booking_type).charAt(0).toUpperCase()}${String(bookingRefSuffix || '').trim().toUpperCase()}`;
 
   const createBookingEmailHtml = (recipientAttendee) => {
    const recipientFirstName = recipientAttendee.first_name || 'Customer';
@@ -383,7 +390,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                   <tr>
                     <td style="font-size:9.0pt;font-family:Arial,sans-serif">
                       <span style="float:right;">
-                      <strong>Booking Ref</strong>: ${escapeHtml(booking_ref)} - ${escapeHtml(String(booking_type).charAt(0).toUpperCase())}
+                      <strong>Booking Ref</strong>: ${escapeHtml(booking_ref)} - ${escapeHtml(bookingTypeLabel)}
                       </span>
                     </td>
                   </tr>
@@ -421,8 +428,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                               </p>
                             </td>
                             <td width="20%" style="width:20.0%;padding:0in 0in 0in 0in;height:48.75pt">
-                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Deposit/Payment Received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
-                                <strong><span style="font-family:Arial,sans-serif">Outstanding Balance: </span></strong><u></u><u></u></span>
+                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Payment received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
+                                <strong><span style="font-family:Arial,sans-serif">Balance Outstanding: </span></strong><u></u><u></u></span>
                               </p>
                             </td>
                             <td width="12%" style="text-align: right;width:12.0%;padding:0in 0in 0in 0in;height:48.75pt">
@@ -460,8 +467,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                             <table width="98%" border="0" cellspacing="0" cellpadding="0">
                               <tr>
                                 <td width="24%"><strong><u>Date</u></strong></td>
-                                <td width="36%"><strong><u>Start Time</u></strong></td>
-                                <td width="33%"><strong><u>End Time</u></strong></td>
+                                <td width="36%"><strong><u>Meeting Time</u></strong></td>
+                                <td width="33%"><strong><u>Start Time</u></strong></td>
                               </tr>
                               ${dateRows}
                               ${hasTbc

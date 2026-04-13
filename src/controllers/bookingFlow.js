@@ -386,7 +386,7 @@ class BookingFlowController {
           AND DATE(ced.event_date) <= DATE_ADD(DATE(NOW()), INTERVAL 3 MONTH)
           AND (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) > 0
           AND COALESCE(f.freeze_count, 0) = 0
-        ORDER BY ced.event_date ASC, l.location_name ASC
+        ORDER BY ced.event_date ASC, (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) DESC, l.id ASC
         LIMIT 1
       `, [courseId]);
 
