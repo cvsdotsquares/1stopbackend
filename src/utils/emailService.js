@@ -306,7 +306,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const paidAmount = (Number.parseFloat(booking.total_amount || 0) - Number.parseFloat(booking.payment_due || 0));
   const balanceAmount = Number.parseFloat(booking.payment_due || 0);
 
-  const normalizedSiteUrl = normalizeUrl(process.env.SITE_URL, 'https://1stopinstruction.com/');
+  const normalizedSiteUrl = normalizeUrl(process.env.PHP_SITE_URL, 'https://1stopinstruction.com/');
   const siteUrl = normalizedSiteUrl.endsWith('/') ? normalizedSiteUrl : `${normalizedSiteUrl}/`;
   const headerPath = franchise.email_header
    ? `${siteUrl}admin/uploads/${franchise.email_header}`
@@ -330,6 +330,16 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     }
   }
 
+  // process the location.direction_content to replace tokens as well, since it may contain image src that needs normalization
+  let processedLocationDirectionContent = location.direction_content;
+  if (pool) {
+    try {
+      processedLocationDirectionContent = await replaceTokens(pool, location.direction_content);
+    } catch (error) {
+      console.error('Error replacing tokens in location.direction_content:', error);
+      processedLocationDirectionContent = location.direction_content;
+    }
+  }
   const hasTbc = event_dates.some(d => isTbcDate(d.event_date));
   const dateRows = event_dates
     .filter(d => !isTbcDate(d.event_date))
@@ -380,7 +390,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
         <tbody>
           <tr>
             <td class="header">
-              <img src="${escapeHtml(headerPath)}" width="784" height="177" alt="1stopinstruction"/>
+              <img src="${escapeHtml(headerPath)}" width="784" height="177" alt="1stopinstruction" style="display:block;border:0;outline:none;text-decoration:none;"/>
             </td>
           </tr>
           <tr>
@@ -507,7 +517,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                           </td>
                         </tr>
                         <tr>
-                          <td colspan="2"  valign="top" style="text-align:left;"><img src="${escapeHtml(directionMapImage)}" width="350" style="float:right; margin:10px 0 10px 10px;" alt="Direction Map"/>${location.direction_content || ''} </td>
+                          <td colspan="2"  valign="top" style="text-align:left;"><img src="${escapeHtml(directionMapImage)}" width="350" style="display:block;border:0;outline:none;text-decoration:none;float:right; margin:10px 0 10px 10px;" alt="Direction Map"/>${processedLocationDirectionContent || ''} </td>
                         </tr>
                         <tr>
                           <td colspan="2">Finally, we trust that all the information you require is listed in this email, and we hope that you enjoy your course, but should you have any questions in the meantime, please do not hesitate to contact us.</td>
@@ -538,7 +548,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                                 <tbody>
                                   <tr>
                                     <td align="left" valign="middle">
-                                      <a href="${escapeHtml(logoWebPath)}"><img src="${escapeHtml(logoPath)}" width="90"  alt="1stopinstruction" /></a>
+                                      <a href="${escapeHtml(logoWebPath)}"><img src="${escapeHtml(logoPath)}" width="90"  alt="1stopinstruction" style="display:block;border:0;outline:none;text-decoration:none;" /></a>
                                     </td>
                                     <td width="45%" valign="top" style="width:45.0%;padding:0in 0in 0in 0in">
                                       <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:navy">Contact:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:#09016e"><br>
@@ -566,7 +576,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
               <p align="center" style="text-align:center;background:#e6e6e8" class="MsoNormal"><span><b><i><span style="font-size:10.0pt;font-family:Arial,sans-serif">"Roadcraft professionals for all categories of driving"</span></i></b></span><b><span style="font-size:9.5pt;font-family:Arial, sans-serif"><u></u><u></u></span></b></p>
               <p style="font-family: Arial, sans-serif; text-align:center; font-size:9.5pt;">Please visit our website for <a href="${escapeHtml(`${siteUrl}contactus.php`)}">directions</a> and our <a href="${escapeHtml(`${siteUrl}termsandconditions.php`)}">terms &amp; conditions </a></p>
               <p style="margin-bottom:0;">
-                <img src="${escapeHtml(footerPath)}" width="786" height="55" alt="1stopinstruction"/>
+                <img src="${escapeHtml(footerPath)}" width="786" height="55" alt="1stopinstruction" style="display:block;border:0;outline:none;text-decoration:none;"/>
               </p>
             </td>
           </tr>
@@ -642,7 +652,6 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
       }
     }
 
-    console.log('Booking email delivery info:', deliveryMeta);
     emailStatus = failedRecipients.length === 0 ? 1 : 0;
   } catch (error) {
     console.error('Error sending booking confirmation email:', error);
