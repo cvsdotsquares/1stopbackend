@@ -428,7 +428,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                               </p>
                             </td>
                             <td width="20%" style="width:20.0%;padding:0in 0in 0in 0in;height:48.75pt">
-                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Payment received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
+                              <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black">Payment Received:</span></strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:black"><br>
                                 <strong><span style="font-family:Arial,sans-serif">Balance Outstanding: </span></strong><u></u><u></u></span>
                               </p>
                             </td>
