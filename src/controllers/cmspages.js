@@ -147,6 +147,10 @@ class CMSPagesController {
       // Parses components directly to avoid timezone off-by-one (BST/UTC shift from new Date())
       const formatNextCourseDate = (dateStr) => {
         if (!dateStr || typeof dateStr !== 'string') return null;
+        // if date is of next day return "Tomorrow"
+        const today = new Date();        const tomorrow = new Date(today);
+        tomorrow.setDate(today.getDate() + 1);
+        if (dateStr === tomorrow.toISOString().split('T')[0]) return 'Tomorrow';
         const parts = dateStr.split('-');
         if (parts.length !== 3) return null;
         const year = Number.parseInt(parts[0], 10);
