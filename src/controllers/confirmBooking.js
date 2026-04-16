@@ -41,7 +41,7 @@ const validateRequest = (body) => {
   if (!body.finish_time) errors.finish_time = ['Finish time is required field'];
   else if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(body.finish_time)) errors.finish_time = ['Time has wrong format. Use one of these formats instead: hh:mm.'];
 
-  if (!body.bike_hire) errors.bike_hire = ['Bike hire is required field'];
+  if (!body.bike_hire && !body.bike_hire_type) errors.bike_hire = ['Bike hire is required field'];
   if (!body.course_event_id) errors.course_event_id = ['This field may not be blank.'];
   if (!body.space_hold_id) errors.space_hold_id = ['This field may not be blank.'];
   if (!body.rideto_order_number) errors.rideto_order_number = ['This field may not be blank.'];
@@ -85,6 +85,8 @@ const normalizeUrl = (value, fallback = '') => {
 const mapBikeHireToVehicleType = (bikeHire) => {
   const normalizedBikeHire = String(bikeHire || '').trim().toLowerCase();
 
+  if (normalizedBikeHire === '1') return 1;
+  if (normalizedBikeHire === '3') return 3;
   if (normalizedBikeHire === 'automatic' || normalizedBikeHire === 'auto') return 1;
   if (normalizedBikeHire === 'own' || normalizedBikeHire === 'own_vehicle' || normalizedBikeHire === 'own vehicle') return 3;
   return 0;
@@ -247,9 +249,12 @@ const confirmBooking = (pool) => async (req, res) => {
     email,
     driving_licence,
     bike_hire,
+    bike_hire_type,
     course_type,
     location
   } = req.body;
+
+  const resolvedBikeHire = bike_hire || bike_hire_type || '';
 
   const connection = await pool.getConnection();
 
@@ -295,7 +300,14 @@ const confirmBooking = (pool) => async (req, res) => {
 
     const bookingId = bookingResult.insertId;
     const booking_ref = `1SRC${bookingId}`;
-    const vehicleType = mapBikeHireToVehicleType(bike_hire);
+    const vehicleType = mapBikeHireToVehicleType(resolvedBikeHire);
+    logRequest(200, 'Bike hire mapping resolved', {
+      rideto_order_number,
+      bike_hire,
+      bike_hire_type,
+      resolvedBikeHire,
+      vehicleType
+    });
 
     // Step 5 & 6: Save Attendee to dropdown
     const cleanedPhone = (phone || '').replace(/\s+/g, '');
@@ -361,6 +373,7 @@ const confirmBooking = (pool) => async (req, res) => {
       booking_ref,
       first_name,
       last_name: last_name || '',
+      bike_hire: resolvedBikeHire,
       course_type,
       location,
       courseId,
