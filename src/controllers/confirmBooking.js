@@ -190,7 +190,9 @@ const buildBookingEmailData = async (connection, {
 
   return {
     booking_ref,
-    booking_type: String(booking.type_of_book || 'R2').toUpperCase(),
+    booking_type: String(booking.type_of_book || '').trim().toLowerCase() === 'r'
+      ? 'R2'
+      : String(booking.type_of_book || 'R2').toUpperCase(),
     first_name,
     sur_name: last_name || '',
     course_name: course.course_name || course_type || 'Course',
