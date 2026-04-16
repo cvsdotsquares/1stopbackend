@@ -21,6 +21,14 @@ const logRequest = (status, message, data = null, logFile = LOG_FILE) => {
   }).replace(',', '');
   const logEntry = `[${timestamp}] :: Status:${status} -- ${message} >> ${data ? JSON.stringify(data) : 'N/A'}\n`;
   fs.appendFileSync(logFile, logEntry);
+
+  // Mirror key request logs to PM2 stdout/stderr for easier live debugging
+  const consoleMessage = `[confirmBooking] Status:${status} -- ${message}`;
+  if (status >= 400) {
+    console.error(consoleMessage, data || 'N/A');
+  } else {
+    console.log(consoleMessage, data || 'N/A');
+  }
 };
 
 const validateRequest = (body) => {

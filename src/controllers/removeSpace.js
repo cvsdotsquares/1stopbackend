@@ -28,6 +28,7 @@ const logMessage = (message) => {
 const removeSpaceInDb = async (pool, eventId, lockId) => {
   const conn = await pool.getConnection();
   try {
+    console.log(`Attempting to remove space: eventId=${eventId}, lockId=${lockId}`);
     await conn.beginTransaction();
 
     const [parentRows] = await conn.query(
