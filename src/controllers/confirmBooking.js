@@ -1,6 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
+const {
+  buildSubject,
+  buildBookingConfirmationHtml,
+  buildBookingConfirmationText
+} = require('../utils/bookingConfirmTemplates');
 
 const LOG_FILE = path.join(__dirname, '../../confirm_booking.log');
 const ALREADY_CONFIRMED_LOG = path.join(__dirname, '../../confirm_already_confirm.log');
@@ -63,26 +68,124 @@ const removeCurLock = async (pool, space_hold_id) => {
   }
 };
 
+const parseBooleanEnv = (value, fallback = false) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+};
+
+const normalizeUrl = (value, fallback = '') => {
+  const url = String(value || '').trim();
+  if (!url) return fallback;
+  if (/^https?:\/\//i.test(url)) return url.replace(/^http:\/\//i, 'https://');
+  return `https://${url}`;
+};
+
+const buildBookingEmailData = async (connection, {
+  bookingId,
+  booking_ref,
+  first_name,
+  last_name,
+  course_type,
+  location,
+  courseId,
+  course_event_id
+}) => {
+  const [bookingTotals] = await connection.query('SELECT total_amount, payment_due, type_of_book FROM bookings WHERE id = ? LIMIT 1', [bookingId]);
+  const [courseData] = await connection.query('SELECT course_name, email_content FROM courses WHERE id = ? LIMIT 1', [courseId]);
+  const [locationData] = await connection.query(`
+    SELECT l.location_name, l.address1, l.address2, l.address3, l.address4,
+           l.postcode, l.direction_map, l.direction_content
+    FROM locations l
+    JOIN course_events ce ON ce.location_id = l.id
+    WHERE ce.id = ?
+    LIMIT 1
+  `, [course_event_id]);
+  const [eventDates] = await connection.query(`
+    SELECT event_date, event_start_time
+    FROM course_event_dates
+    WHERE course_event_id = ?
+    ORDER BY event_date ASC, event_start_time ASC
+  `, [course_event_id]);
+  const [franchiseData] = await connection.query(`
+    SELECT f.email_header, f.email_footer, f.email_logo, f.website,
+           f.telephone, f.freephone, f.franchise_email
+    FROM franchise f
+    JOIN course_events ce ON ce.franchise_id = f.id
+    WHERE ce.id = ?
+    LIMIT 1
+  `, [course_event_id]);
+
+  const booking = bookingTotals[0] || {};
+  const course = courseData[0] || {};
+  const locationInfo = locationData[0] || {};
+  const franchise = franchiseData[0] || {};
+
+  const siteUrl = normalizeUrl(process.env.PHP_SITE_URL || process.env.SITE_URL, 'https://1stopinstruction.com').replace(/\/$/, '');
+  const defaultHeader = `${siteUrl}/images/email-header.jpg`;
+  const defaultFooter = `${siteUrl}/images/email-footer.jpg`;
+  const defaultLogo = `${siteUrl}/images/logo.png`;
+  const defaultNoMap = `${siteUrl}/images/no_map.jpg`;
+
+  return {
+    booking_ref,
+    booking_type: String(booking.type_of_book || 'r').toUpperCase(),
+    first_name,
+    sur_name: last_name || '',
+    course_name: course.course_name || course_type || 'Course',
+    vehicle_type_label: course_type || '',
+    total_amount: Number(booking.total_amount || 0),
+    payment_due: Math.max(0, Number(booking.payment_due || 0)),
+    location_name: locationInfo.location_name || location || '',
+    address1: locationInfo.address1 || '',
+    address2: locationInfo.address2 || '',
+    address3: locationInfo.address3 || '',
+    address4: locationInfo.address4 || '',
+    postcode: locationInfo.postcode || '',
+    email_content_html: course.email_content || '',
+    direction_content_html: locationInfo.direction_content || '',
+    direction_map_url: normalizeUrl(locationInfo.direction_map),
+    no_map_url: process.env.BOOKING_NO_MAP_URL || defaultNoMap,
+    email_header_url: normalizeUrl(franchise.email_header, defaultHeader),
+    email_footer_url: normalizeUrl(franchise.email_footer, defaultFooter),
+    email_logo_url: normalizeUrl(franchise.email_logo, defaultLogo),
+    website_url: normalizeUrl(franchise.website, siteUrl),
+    telephone: franchise.telephone || '',
+    freephone: franchise.freephone || '',
+    franchise_email: franchise.franchise_email || process.env.CONTACT_FROM || process.env.SMTP_USER || '',
+    site_url: siteUrl,
+    contactus_url: `${siteUrl}/contactus`,
+    terms_url: `${siteUrl}/terms-and-conditions`,
+    eventDates
+  };
+};
+
 const sendBookingEmail = async (bookingData) => {
   const transporter = nodemailer.createTransport({
-    host: 'smtp.postmarkapp.com',
-    port: 587,
-    secure: false,
-    auth: {
-      user: 'b39d5268-a4be-49ac-8f23-27c74d9126bf',
-      pass: 'b39d5268-a4be-49ac-8f23-27c74d9126bf'
-    }
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: parseBooleanEnv(process.env.SMTP_SECURE, false),
+    auth: process.env.SMTP_USER && process.env.SMTP_PASS
+      ? {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+      : undefined
   });
 
+  const fromAddress = process.env.CONTACT_FROM;
+  const toAddress = process.env.CONTACT_TO;
+
+  if (!fromAddress || !toAddress) {
+    console.error('Booking email config missing: CONTACT_FROM/BOOKING_BCC');
+    return false;
+  }
+
   const mailOptions = {
-    from: 'info@1stopinstruction.com',
-    to: 'bookings@1stopinstruction.com',
-    subject: `${bookingData.course_name} Booking Confirmation - ${bookingData.booking_ref}`,
-    html: `<p>New booking confirmed:</p>
-           <p><strong>Booking Ref:</strong> ${bookingData.booking_ref}</p>
-           <p><strong>Name:</strong> ${bookingData.first_name} ${bookingData.last_name}</p>
-           <p><strong>Course:</strong> ${bookingData.course_name}</p>
-           <p><strong>RideTo Order:</strong> ${bookingData.rideto_order_number}</p>`
+    from: fromAddress,
+    to: toAddress,
+    subject: buildSubject(bookingData),
+    html: buildBookingConfirmationHtml(bookingData),
+    text: buildBookingConfirmationText(bookingData)
   };
 
   try {
@@ -106,7 +209,19 @@ const confirmBooking = (pool) => async (req, res) => {
     return res.status(400).json(validationErrors);
   }
 
-  const { school_course_id, course_event_id, space_hold_id, rideto_order_number, first_name, last_name, phone, email, driving_licence } = req.body;
+  const {
+    school_course_id,
+    course_event_id,
+    space_hold_id,
+    rideto_order_number,
+    first_name,
+    last_name,
+    phone,
+    email,
+    driving_licence,
+    course_type,
+    location
+  } = req.body;
 
   const connection = await pool.getConnection();
 
@@ -211,19 +326,25 @@ const confirmBooking = (pool) => async (req, res) => {
       logRequest(200, 'Bookings done incremented', { parent: eventParent[0].parent }, ADD_BOOKINGS_DONE_LOG);
     }
 
+    // Step 10.5: Build booking confirmation email payload
+    const bookingEmailData = await buildBookingEmailData(connection, {
+      bookingId,
+      booking_ref,
+      first_name,
+      last_name: last_name || '',
+      course_type,
+      location,
+      courseId,
+      course_event_id
+    });
+
     // Step 11: Remove Lock
     await removeCurLock(connection, space_hold_id);
 
     await connection.commit();
 
     // Step 12: Send Email
-    await sendBookingEmail({
-      booking_ref,
-      course_name: bookingStatus[0].course_name || 'Course',
-      first_name,
-      last_name: last_name || '',
-      rideto_order_number
-    });
+    await sendBookingEmail(bookingEmailData);
 
     logRequest(200, 'Course is confirmed', { school_course_id, booking_ref });
     return res.status(200).json({ message: 'Course is confirmed', school_course_id, booking_ref });
