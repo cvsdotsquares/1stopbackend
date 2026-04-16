@@ -92,11 +92,36 @@ const normalizeUrl = (value, fallback = '') => {
 
 const mapBikeHireToVehicleType = (bikeHire) => {
   const normalizedBikeHire = String(bikeHire || '').trim().toLowerCase();
+  const compactBikeHire = normalizedBikeHire.replace(/[^a-z0-9]+/g, '_');
 
-  if (normalizedBikeHire === '1') return 1;
-  if (normalizedBikeHire === '3') return 3;
-  if (normalizedBikeHire === 'automatic' || normalizedBikeHire === 'auto') return 1;
-  if (normalizedBikeHire === 'own' || normalizedBikeHire === 'own_vehicle' || normalizedBikeHire === 'own vehicle') return 3;
+  if (normalizedBikeHire === '1' || compactBikeHire === '1') return 1;
+  if (normalizedBikeHire === '3' || compactBikeHire === '3') return 3;
+
+  // Known explicit values
+  if (
+    normalizedBikeHire === 'automatic'
+    || normalizedBikeHire === 'auto'
+    || compactBikeHire === 'bike_type_auto'
+    || compactBikeHire === 'bike_type_automatic'
+  ) {
+    return 1;
+  }
+
+  if (
+    normalizedBikeHire === 'own'
+    || normalizedBikeHire === 'own_vehicle'
+    || normalizedBikeHire === 'own vehicle'
+    || compactBikeHire === 'bike_type_own'
+    || compactBikeHire === 'bike_type_own_vehicle'
+  ) {
+    return 3;
+  }
+
+  // Defensive keyword fallbacks for third-party enum variants
+  if (compactBikeHire.includes('auto')) return 1;
+  if (compactBikeHire.includes('own')) return 3;
+  if (compactBikeHire.includes('manual')) return 0;
+
   return 0;
 };
 
