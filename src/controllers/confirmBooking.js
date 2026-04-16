@@ -82,11 +82,26 @@ const normalizeUrl = (value, fallback = '') => {
   return `https://${url}`;
 };
 
+const mapBikeHireToVehicleType = (bikeHire) => {
+  const normalizedBikeHire = String(bikeHire || '').trim().toLowerCase();
+
+  if (normalizedBikeHire === 'automatic' || normalizedBikeHire === 'auto') return 1;
+  if (normalizedBikeHire === 'own' || normalizedBikeHire === 'own_vehicle' || normalizedBikeHire === 'own vehicle') return 3;
+  return 0;
+};
+
+const getVehicleTypeLabel = (vehicleType) => {
+  if (vehicleType === 1) return 'Automatic';
+  if (vehicleType === 3) return 'I will be using my own vehicle';
+  return 'Manual';
+};
+
 const buildBookingEmailData = async (connection, {
   bookingId,
   booking_ref,
   first_name,
   last_name,
+  bike_hire,
   course_type,
   location,
   courseId,
@@ -121,6 +136,7 @@ const buildBookingEmailData = async (connection, {
   const course = courseData[0] || {};
   const locationInfo = locationData[0] || {};
   const franchise = franchiseData[0] || {};
+  const vehicleType = mapBikeHireToVehicleType(bike_hire);
 
   const siteUrl = normalizeUrl(process.env.PHP_SITE_URL || process.env.SITE_URL, 'https://1stopinstruction.com').replace(/\/$/, '');
   const directionMapImage = locationInfo.direction_map
@@ -143,7 +159,7 @@ const buildBookingEmailData = async (connection, {
     first_name,
     sur_name: last_name || '',
     course_name: course.course_name || course_type || 'Course',
-    vehicle_type_label: booking.vehicle_type == 1 ? 'Automatic' : booking.vehicle_type == 2 ? 'Manual' : booking.vehicle_type == 3 ? 'Own Vehicle' : '',
+    vehicle_type_label: getVehicleTypeLabel(vehicleType),
     total_amount: Number(booking.total_amount || 0),
     payment_due: Math.max(0, Number(booking.payment_due || 0)),
     location_name: locationInfo.location_name || location || '',
@@ -230,6 +246,7 @@ const confirmBooking = (pool) => async (req, res) => {
     phone,
     email,
     driving_licence,
+    bike_hire,
     course_type,
     location
   } = req.body;
@@ -278,6 +295,7 @@ const confirmBooking = (pool) => async (req, res) => {
 
     const bookingId = bookingResult.insertId;
     const booking_ref = `1SRC${bookingId}`;
+    const vehicleType = mapBikeHireToVehicleType(bike_hire);
 
     // Step 5 & 6: Save Attendee to dropdown
     const cleanedPhone = (phone || '').replace(/\s+/g, '');
@@ -307,8 +325,8 @@ const confirmBooking = (pool) => async (req, res) => {
       INSERT INTO booking_attendees (booking_ref, booking_id, first_name, sur_name, contact1, contact2, contact3, email,
         vehicle_type, license_type, license_number, theory_number, admin_notes, notes, \`primary\`, created, previousparent,
         rideto_orderid, contact_card_id)
-      VALUES (?, ?, ?, ?, ?, '', '', ?, 1, 1, ?, '', '', '', 1, NOW(), '', ?, ?)
-    `, [booking_ref, bookingId, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, contactCardId]);
+      VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 1, ?, '', '', '', 1, NOW(), '', ?, ?)
+    `, [booking_ref, bookingId, first_name, fullName, cleanedPhone, email || '', vehicleType, upperLicence, rideto_order_number, contactCardId]);
 
     logRequest(200, 'Attendee saved', { booking_ref, bookingId }, AFTER_SAVE_ATTENDEE_LOG);
 
