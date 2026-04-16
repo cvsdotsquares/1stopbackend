@@ -4,7 +4,7 @@ const confirmBooking = require('../controllers/confirmBooking');
 
 const createConfirmBookingRoutes = (pool) => {
   const router = express.Router();
-  router.post('/confirm-booking', basicAuth, confirmBooking(pool));
+  router.post(['/confirm-booking', '/confirm'], basicAuth, confirmBooking(pool));
   return router;
 };
 
