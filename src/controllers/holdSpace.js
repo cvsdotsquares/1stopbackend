@@ -201,7 +201,7 @@ const holdSpace = (pool) => async (req, res) => {
 
   try {
     const availability = await checkAvailability(pool, params);
-
+    console.log('Availability check result:', availability);
     if (!availability) {
       return res.status(404).json({ message: 'Course id not found.' });
     }
