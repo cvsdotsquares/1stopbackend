@@ -35,6 +35,7 @@ const createRemoveSpaceRoutes = require('./routes/removeSpace');
 const createFAQRoutes = require('./routes/faq');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
+const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -281,4 +282,8 @@ app.listen(PORT, () => {
   // Start unpaid bookings cleanup cron
   const cleanupCron = new BookingCleanupCron(pool);
   cleanupCron.start();
+
+  // Start expired lock cleanup cron
+  const expiredLockCleanupCron = new ExpiredLockCleanupCron(pool);
+  expiredLockCleanupCron.start();
 });
