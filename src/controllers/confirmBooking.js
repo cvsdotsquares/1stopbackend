@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
+const { replaceTokens } = require('../utils/tokenReplacer');
+
 const {
   buildSubject,
   buildBookingConfirmationHtml,
@@ -121,18 +123,27 @@ const buildBookingEmailData = async (connection, {
   const franchise = franchiseData[0] || {};
 
   const siteUrl = normalizeUrl(process.env.PHP_SITE_URL || process.env.SITE_URL, 'https://1stopinstruction.com').replace(/\/$/, '');
-  const defaultHeader = `${siteUrl}/images/email-header.jpg`;
-  const defaultFooter = `${siteUrl}/images/email-footer.jpg`;
-  const defaultLogo = `${siteUrl}/images/logo.png`;
+  const directionMapImage = locationInfo.direction_map
+    ? `${siteUrl}/maps/${locationInfo.direction_map}`
+    : `${siteUrl}/images/no-map.jpg`;
+  const defaultHeader = franchise.email_header
+    ? `${siteUrl}/admin/uploads/${franchise.email_header}`
+    : `${siteUrl}/images/header-img.jpg`;
+  const defaultFooter = franchise.email_footer
+    ? `${siteUrl}/admin/uploads/${franchise.email_footer}`
+    : `${siteUrl}/images/footer-img.jpg`;
+  const defaultLogo = franchise.email_logo
+    ? `${siteUrl}/admin/uploads/${franchise.email_logo}`
+    : `${siteUrl}/images/logo.png`;
   const defaultNoMap = `${siteUrl}/images/no_map.jpg`;
 
   return {
     booking_ref,
-    booking_type: String(booking.type_of_book || 'r').toUpperCase(),
+    booking_type: String(booking.type_of_book || 'R2').toUpperCase(),
     first_name,
     sur_name: last_name || '',
     course_name: course.course_name || course_type || 'Course',
-    vehicle_type_label: course_type || '',
+    vehicle_type_label: booking.vehicle_type == 1 ? 'Automatic' : booking.vehicle_type == 2 ? 'Manual' : booking.vehicle_type == 3 ? 'Own Vehicle' : '',
     total_amount: Number(booking.total_amount || 0),
     payment_due: Math.max(0, Number(booking.payment_due || 0)),
     location_name: locationInfo.location_name || location || '',
@@ -141,13 +152,13 @@ const buildBookingEmailData = async (connection, {
     address3: locationInfo.address3 || '',
     address4: locationInfo.address4 || '',
     postcode: locationInfo.postcode || '',
-    email_content_html: course.email_content || '',
-    direction_content_html: locationInfo.direction_content || '',
-    direction_map_url: normalizeUrl(locationInfo.direction_map),
+    email_content_html: await replaceTokens(connection, course.email_content || ''),
+    direction_content_html: await replaceTokens(connection, locationInfo.direction_content || ''),
+    direction_map_url: normalizeUrl(directionMapImage),
     no_map_url: process.env.BOOKING_NO_MAP_URL || defaultNoMap,
-    email_header_url: normalizeUrl(franchise.email_header, defaultHeader),
-    email_footer_url: normalizeUrl(franchise.email_footer, defaultFooter),
-    email_logo_url: normalizeUrl(franchise.email_logo, defaultLogo),
+    email_header_url: defaultHeader,
+    email_footer_url: defaultFooter,
+    email_logo_url: defaultLogo,
     website_url: normalizeUrl(franchise.website, siteUrl),
     telephone: franchise.telephone || '',
     freephone: franchise.freephone || '',
