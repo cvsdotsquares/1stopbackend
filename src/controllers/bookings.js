@@ -603,6 +603,7 @@ class BookingController {
         SELECT
           b.id,
           b.user_id,
+          b.booking_made_by_id,
           b.course_id,
           b.course_event_id,
           b.spaces,
@@ -656,7 +657,7 @@ class BookingController {
         LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
         LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
         WHERE b.id = ? AND (b.user_id = ? OR ba.email = ?)
-        GROUP BY b.id, b.user_id, b.course_id, b.course_event_id, b.spaces, b.total_amount, b.payment_due,
+        GROUP BY b.id, b.user_id, b.booking_made_by_id, b.course_id, b.course_event_id, b.spaces, b.total_amount, b.payment_due,
                  b.admin_payment_received, b.type_of_book, b.status,
                  b.created, b.modified, c.course_name, c.course_abb, c.description, c.dsa_fees,
                  ced.event_start_time, l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode,
@@ -678,11 +679,56 @@ class BookingController {
         ORDER BY \`primary\` DESC, id ASC
       `, [id]);
 
+      // Fetch secondary attendees (same course_event_id + booking_made_by_id group, excluding primary user)
+      const primaryUserId = bookings[0].booking_made_by_id || bookings[0].user_id;
+      const [secondaryAttendees] = await this.pool.query(`
+        SELECT
+          b2.id as booking_id,
+          b2.payment_due,
+          b2.admin_payment_received,
+          b2.total_fees,
+          (
+            SELECT ba2.booking_ref
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as booking_ref,
+          (
+            SELECT ba2.first_name
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as first_name,
+          (
+            SELECT ba2.sur_name
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as sur_name,
+          (
+            SELECT ba2.email
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as email
+        FROM bookings b2
+        WHERE b2.course_event_id = ?
+          AND b2.booking_made_by_id = ?
+          AND b2.user_id <> ?
+          AND b2.id <> ?
+        ORDER BY b2.id ASC
+      `, [bookings[0].course_event_id, primaryUserId, primaryUserId, id]);
+
       res.json({
         success: true,
         data: {
           ...bookings[0],
-          attendees
+          attendees,
+          secondary_attendees: secondaryAttendees
         }
       });
 

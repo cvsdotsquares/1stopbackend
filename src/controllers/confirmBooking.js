@@ -351,18 +351,25 @@ const confirmBooking = (pool) => async (req, res) => {
 
     let contactCardId;
     if (upperLicence) {
-      const [existingCard] = await connection.query('SELECT id FROM booking_attendees_dropdown WHERE license_number = ?', [upperLicence]);
+      const [existingCard] = await connection.query(
+        'SELECT id FROM booking_attendees_dropdown WHERE UPPER(TRIM(license_number)) = ? ORDER BY id ASC LIMIT 1',
+        [upperLicence]
+      );
       if (existingCard.length > 0) {
         contactCardId = existingCard[0].id;
-        await connection.query(`UPDATE booking_attendees_dropdown SET first_name = ?, sur_name = ?, contact1 = ?, email = ?, rideto_orderid = ? WHERE id = ?`,
-          [first_name, fullName, cleanedPhone, email || '', rideto_order_number, contactCardId]);
+        await connection.query(
+          `UPDATE booking_attendees_dropdown
+           SET first_name = ?, sur_name = ?, contact1 = ?, email = ?, license_number = ?, rideto_orderid = ?, updated = NOW()
+           WHERE id = ?`,
+          [first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, contactCardId]
+        );
       } else {
-        const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (first_name, sur_name, contact1, email, license_number, rideto_orderid, created) VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (first_name, sur_name, contact1, email, license_number, rideto_orderid, created, updated) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
           [first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number]);
         contactCardId = cardResult.insertId;
       }
     } else {
-      const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (first_name, sur_name, contact1, email, license_number, rideto_orderid, created) VALUES (?, ?, ?, ?, '', ?, NOW())`,
+      const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (first_name, sur_name, contact1, email, license_number, rideto_orderid, created, updated) VALUES (?, ?, ?, ?, '', ?, NOW(), NOW())`,
         [first_name, fullName, cleanedPhone, email || '', rideto_order_number]);
       contactCardId = cardResult.insertId;
     }

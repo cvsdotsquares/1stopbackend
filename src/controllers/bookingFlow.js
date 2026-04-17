@@ -1440,41 +1440,82 @@ class BookingFlowController {
 
           const [bookingResult] = await connection.query(`
             INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
-                                 payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id)
-            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?)
-          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, attendeeUserId, attendeeUserId, promoCodeId ? 1 : 0, promoCodeId || 0]);
+                                 payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id, booking_made_by_id)
+            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?, ?)
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, userIds[0], userIds[0], promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
 
           const booking_id = bookingResult.insertId;
           const bookingRef = `1SRC${booking_id}`;
-          let primaryFlag = 0;
-          if (i === 0) {
-            primaryFlag = 1;
-          }
+          // Primary attendee is always enforced server-side by order; frontend cannot control this.
+          const primaryFlag = i === 0 ? 1 : 0;
           bookingIds.push(booking_id);
           bookingRefs.push(bookingRef);
+
+          const normalizedLicenseNumber = String(attendee.license_number || '').trim().toUpperCase();
+          const attendeeVehicleType = String(attendee.vehicle_type || 0);
+
+          let contactCardId = 0;
+          if (normalizedLicenseNumber) {
+            const [existingCards] = await connection.query(`
+              SELECT id FROM booking_attendees_dropdown
+              WHERE UPPER(TRIM(license_number)) = ?
+              ORDER BY id ASC
+              LIMIT 1
+            `, [normalizedLicenseNumber]);
+
+            if (existingCards.length > 0) {
+              contactCardId = existingCards[0].id;
+              await connection.query(`
+                UPDATE booking_attendees_dropdown
+                SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, contact2 = ?, contact3 = ?,
+                    email = ?, vehicle_type = ?, license_type = ?, license_number = ?, theory_number = ?, notes = ?, \
+                    \`primary\` = ?, updated = NOW()
+                WHERE id = ?
+              `, [
+                booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+                attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+                attendeeVehicleType, attendee.license_type || 0, normalizedLicenseNumber,
+                attendee.theory_number || '', attendee.notes || '', primaryFlag, contactCardId
+              ]);
+            } else {
+              const [cardResult] = await connection.query(`
+                INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                                       email, vehicle_type, license_type, license_number, theory_number,
+                                                       notes, \`primary\`, created, updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+              `, [
+                booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+                attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+                attendeeVehicleType, attendee.license_type || 0, normalizedLicenseNumber,
+                attendee.theory_number || '', attendee.notes || '', primaryFlag
+              ]);
+              contactCardId = cardResult.insertId;
+            }
+          } else {
+            const [cardResult] = await connection.query(`
+              INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
+                                                     email, vehicle_type, license_type, license_number, theory_number,
+                                                     notes, \`primary\`, created, updated)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            `, [
+              booking_id, bookingRef, attendee.first_name, attendee.sur_name,
+              attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
+              attendeeVehicleType, attendee.license_type || 0, '',
+              attendee.theory_number || '', attendee.notes || '', primaryFlag
+            ]);
+            contactCardId = cardResult.insertId;
+          }
 
           await connection.query(`
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                          email, vehicle_type, license_type, license_number, theory_number,
                                          admin_notes, notes, contact_card_id, \`primary\`, created)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
-            attendee.vehicle_type || 0, attendee.license_type || 0, attendee.license_number || '',
-            attendee.theory_number || '', primaryFlag
-          ]);
-
-          await connection.query(`
-            INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
-                                                   email, vehicle_type, license_type, license_number, theory_number,
-                                                   notes, \`primary\`, created, updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())
-          `, [
-            booking_id, bookingRef, attendee.first_name, attendee.sur_name,
-            attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
-            String(attendee.vehicle_type || 0), attendee.license_type || 0, attendee.license_number || '',
-            attendee.theory_number || '', attendee.notes || ''
+            attendee.vehicle_type || 0, attendee.license_type || 0, normalizedLicenseNumber,
+            attendee.theory_number || '', contactCardId, primaryFlag
           ]);
         }
 

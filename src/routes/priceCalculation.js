@@ -25,25 +25,25 @@ function createPriceCalculationRoutes(pool) {
     body('course_event_id')
       .isInt({ min: 1 })
       .withMessage('Valid course event ID required'),
-    
+
     body('attendees')
       .isArray({ min: 1 })
       .withMessage('At least one attendee required'),
-    
+
     body('attendees.*.vehicle_type')
       .isIn([0, 1, 3])
       .withMessage('Vehicle type must be 0 (Manual), 1 (Automatic), or 3 (Own Vehicle)'),
-    
+
     body('promo_code_id')
       .optional()
       .isInt({ min: 1 })
       .withMessage('Valid promo code ID required if provided'),
-    
+
     body('promo_eligible_count')
       .optional()
       .isInt({ min: 0 })
       .withMessage('Eligible attendee count must be a non-negative integer'),
-    
+
     body('apply_deposit_logic')
       .optional()
       .isBoolean()
@@ -58,25 +58,25 @@ function createPriceCalculationRoutes(pool) {
   ];
 
   // Routes
-  
+
   // Main price calculation endpoint
-  router.post('/calculate', 
-    priceCalculationValidation, 
-    handleValidationErrors, 
+  router.post('/calculate',
+    priceCalculationValidation,
+    handleValidationErrors,
     priceCalculationController.calculatePrice.bind(priceCalculationController)
   );
 
   // Validate course event
-  router.get('/validate/:course_event_id', 
-    courseEventValidation, 
-    handleValidationErrors, 
+  router.get('/validate/:course_event_id',
+    courseEventValidation,
+    handleValidationErrors,
     priceCalculationController.validateCourseEvent.bind(priceCalculationController)
   );
 
   // Get pricing options for a course event
-  router.get('/options/:course_event_id', 
-    courseEventValidation, 
-    handleValidationErrors, 
+  router.get('/options/:course_event_id',
+    courseEventValidation,
+    handleValidationErrors,
     priceCalculationController.getPricingOptions.bind(priceCalculationController)
   );
 

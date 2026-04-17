@@ -10,7 +10,7 @@ class DashboardController {
 
       // Previous bookings
       const [bookings] = await this.pool.query(`
-        SELECT DISTINCT b.id, b.total_amount, b.status, b.created, b.payment_due, b.admin_payment_received, b.type_of_book,
+        SELECT DISTINCT b.id, b.user_id, b.booking_made_by_id, b.course_event_id, b.total_amount, b.status, b.created, b.payment_due, b.admin_payment_received, b.type_of_book,
                c.course_name, MIN(ced.event_date) as event_date,
                l.location_name, l.address1, l.address2, l.postcode,
                bp.transation_id as transaction_id, ced.event_start_time, ba.first_name, ba.sur_name
@@ -26,6 +26,57 @@ class DashboardController {
         ORDER BY b.created DESC
         LIMIT 5
       `, [userId, req.user.email]);
+
+      const bookingsWithSecondary = await Promise.all((bookings || []).map(async (booking) => {
+        const primaryUserId = booking.booking_made_by_id || booking.user_id;
+
+        const [secondaryRows] = await this.pool.query(`
+          SELECT
+            b2.id as booking_id,
+            b2.payment_due,
+            b2.admin_payment_received,
+            b2.total_fees,
+            (
+              SELECT ba2.booking_ref
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as booking_ref,
+            (
+              SELECT ba2.first_name
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as first_name,
+            (
+              SELECT ba2.sur_name
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as sur_name,
+            (
+              SELECT ba2.email
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as email
+          FROM bookings b2
+          WHERE b2.course_event_id = ?
+            AND b2.booking_made_by_id = ?
+            AND b2.user_id <> ?
+            AND b2.id <> ?
+          ORDER BY b2.id ASC
+        `, [booking.course_event_id, primaryUserId, primaryUserId, booking.id]);
+
+        return {
+          ...booking,
+          secondary_attendees: secondaryRows || []
+        };
+      }));
 
       const [statsResult] = await this.pool.query(`
         SELECT
@@ -49,7 +100,7 @@ class DashboardController {
       stats.confirmed_bookings = stats.pending_bookings;
 
       const [upcomingCourses] = await this.pool.query(`
-        SELECT DISTINCT c.course_name, MIN(ced.event_date) as event_date, b.id as booking_id,
+        SELECT DISTINCT c.course_name, MIN(ced.event_date) as event_date, b.id as booking_id, b.user_id, b.booking_made_by_id, b.course_event_id,
                l.location_name, l.address1, l.address2, l.postcode
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
@@ -62,6 +113,57 @@ class DashboardController {
         ORDER BY event_date ASC
         LIMIT 3
       `, [userId, req.user.email]);
+
+      const upcomingWithSecondary = await Promise.all((upcomingCourses || []).map(async (course) => {
+        const primaryUserId = course.booking_made_by_id || course.user_id;
+
+        const [secondaryRows] = await this.pool.query(`
+          SELECT
+            b2.id as booking_id,
+            b2.payment_due,
+            b2.admin_payment_received,
+            b2.total_fees,
+            (
+              SELECT ba2.booking_ref
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as booking_ref,
+            (
+              SELECT ba2.first_name
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as first_name,
+            (
+              SELECT ba2.sur_name
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as sur_name,
+            (
+              SELECT ba2.email
+              FROM booking_attendees ba2
+              WHERE ba2.booking_id = b2.id
+              ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+              LIMIT 1
+            ) as email
+          FROM bookings b2
+          WHERE b2.course_event_id = ?
+            AND b2.booking_made_by_id = ?
+            AND b2.user_id <> ?
+            AND b2.id <> ?
+          ORDER BY b2.id ASC
+        `, [course.course_event_id, primaryUserId, primaryUserId, course.booking_id]);
+
+        return {
+          ...course,
+          secondary_attendees: secondaryRows || []
+        };
+      }));
 
       const [giftVouchers] = await this.pool.query(`
         SELECT
@@ -97,8 +199,8 @@ class DashboardController {
             email: req.user.email
           },
           stats: stats,
-          recent_bookings: bookings,
-          upcoming_courses: upcomingCourses,
+          recent_bookings: bookingsWithSecondary,
+          upcoming_courses: upcomingWithSecondary,
           gift_vouchers: giftVouchers
         }
       });
