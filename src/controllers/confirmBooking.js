@@ -247,6 +247,7 @@ const sendBookingEmail = async (bookingData) => {
   const mailOptions = {
     from: fromAddress,
     to: toAddress,
+    bcc: process.env.BOOKING_BCC || undefined,
     subject: buildSubject(bookingData),
     html: buildBookingConfirmationHtml(bookingData),
     text: buildBookingConfirmationText(bookingData)
