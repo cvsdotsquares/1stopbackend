@@ -725,7 +725,7 @@ class BookingFlowController {
         FROM promos
         WHERE promo_code = ? AND status = 1 AND isDeleted = 0
       `, [promo_code]);
-
+      console.log(promos.length);
       if (promos.length === 0) {
         return res.json({
           success: true,
@@ -837,9 +837,11 @@ class BookingFlowController {
         });
       }
 
-      // Validate p_c_for - existing customers only check
+      // Validate p_c_for - existing customers only check (Option B: partial eligibility)
+      let eligibleAttendees = Number.parseInt(attendees_count, 10) || 0;
+      let ineligibleAttendees = 0;
+
       if (promo.p_c_for !== 'anyone') {
-        // If license_numbers array is provided, validate existing customers
         const { license_numbers } = req.body;
 
         if (!license_numbers || !Array.isArray(license_numbers) || license_numbers.length === 0) {
@@ -849,24 +851,37 @@ class BookingFlowController {
           });
         }
 
-        // Check if ALL license numbers have previous bookings
-        for (const license of license_numbers) {
-          if (!license || license.trim() === '') {
-            continue; // Skip empty licenses
-          }
+        const normalizedLicenses = license_numbers
+          .map((license) => String(license || '').trim().toUpperCase())
+          .filter((license) => license.length > 0);
 
+        if (normalizedLicenses.length === 0) {
+          return res.json({
+            success: true,
+            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is only valid for existing customers' }
+          });
+        }
+
+        let matchedExistingCount = 0;
+        for (const license of normalizedLicenses) {
           const [bookings] = await this.pool.query(`
             SELECT COUNT(*) as count FROM booking_attendees
-            WHERE license_number = ?
-          `, [license.trim()]);
+            WHERE UPPER(TRIM(license_number)) = ?
+          `, [license]);
 
-          if (bookings[0].count === 0) {
-            // At least one attendee is a new customer
-            return res.json({
-              success: true,
-              data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is only valid for existing customers' }
-            });
+          if (Number(bookings?.[0]?.count || 0) > 0) {
+            matchedExistingCount += 1;
           }
+        }
+
+        eligibleAttendees = matchedExistingCount;
+        ineligibleAttendees = Math.max(0, (Number.parseInt(attendees_count, 10) || 0) - eligibleAttendees);
+
+        if (eligibleAttendees <= 0) {
+          return res.json({
+            success: true,
+            data: { valid: false, discount_amount: 0, discount_type: null, description: 'Promo code is only valid for existing customers' }
+          });
         }
       }
 
@@ -877,8 +892,13 @@ class BookingFlowController {
           valid: true,
           discount_amount: parseFloat(promo.p_c_amount),
           discount_type: promo.p_c_discount_type,
-          description: promo.promo_description,
+          description: ineligibleAttendees > 0
+            ? `${promo.promo_description || 'Promo code applied'}. Discount applied to ${eligibleAttendees} eligible attendee(s).`
+            : promo.promo_description,
           promo_code_id: promo.id,
+          eligible_attendees: eligibleAttendees,
+          ineligible_attendees: ineligibleAttendees,
+          apply_mode: ineligibleAttendees > 0 ? 'partial' : 'full',
           restrictions: {
             course_specific: promo.p_c_course === 0,
             franchise_specific: promo.p_c_franchise === 0,
@@ -1298,7 +1318,7 @@ class BookingFlowController {
         let promoDiscountsPerAttendeePayableNow = perAttendeeAmounts.map(() => 0);
         if (promo_code) {
           const [promos] = await connection.query(`
-            SELECT id, p_c_amount, p_c_discount_type
+            SELECT id, p_c_amount, p_c_discount_type, p_c_for
             FROM promos
             WHERE promo_code = ? AND status = 1 AND isDeleted = 0
           `, [promo_code]);
@@ -1308,27 +1328,68 @@ class BookingFlowController {
             promoCodeId = promo.id;
             const promoAmount = Number(promo.p_c_amount) || 0;
 
-            if (promo.p_c_discount_type === 'pounds_off') {
-              promoDiscountsPerAttendeeTotal = perAttendeeAmounts.map(({ total }) => Math.min(roundCurrency(total), promoAmount));
-              promoDiscountsPerAttendeePayableNow = perAttendeeAmounts.map(({ payableNow }) => Math.min(roundCurrency(payableNow), promoAmount));
+            // Determine which attendees are eligible for the promo (Option B: partial eligibility)
+            let eligibleIndices = [];
+            if (promo.p_c_for === 'anyone') {
+              // All attendees are eligible
+              eligibleIndices = Array.from({ length: attendees.length }, (_, i) => i);
+            } else {
+              // Check license numbers for existing customers
+              for (let i = 0; i < attendees.length; i++) {
+                const normalizedLicense = String(attendees[i]?.license_number || '').trim().toUpperCase();
+                const [bookings] = await connection.query(`
+                  SELECT COUNT(*) as count FROM booking_attendees
+                  WHERE UPPER(TRIM(license_number)) = ?
+                `, [normalizedLicense]);
 
-              promoDiscountOnTotal = roundCurrency(
-                promoDiscountsPerAttendeeTotal.reduce((sum, amount) => sum + amount, 0)
-              );
-              promoDiscountOnPayableNow = roundCurrency(
-                promoDiscountsPerAttendeePayableNow.reduce((sum, amount) => sum + amount, 0)
-              );
-            } else if (promo.p_c_discount_type === 'percent_off') {
-              promoDiscountOnTotal = roundCurrency((totalFees * promoAmount) / 100);
-              promoDiscountOnPayableNow = roundCurrency((payableNowFees * promoAmount) / 100);
-              promoDiscountsPerAttendeeTotal = allocateProportionalAmounts(
-                perAttendeeAmounts.map(({ total }) => total),
-                promoDiscountOnTotal
-              );
-              promoDiscountsPerAttendeePayableNow = allocateProportionalAmounts(
-                perAttendeeAmounts.map(({ payableNow }) => payableNow),
-                promoDiscountOnPayableNow
-              );
+                if (Number(bookings?.[0]?.count || 0) > 0) {
+                  eligibleIndices.push(i);
+                }
+              }
+            }
+
+
+            // Only apply discount to eligible attendees
+            if (eligibleIndices.length > 0) {
+              if (promo.p_c_discount_type === 'pounds_off') {
+                promoDiscountsPerAttendeeTotal = perAttendeeAmounts.map(({ total }, index) =>
+                  eligibleIndices.includes(index) ? Math.min(roundCurrency(total), promoAmount) : 0
+                );
+                promoDiscountsPerAttendeePayableNow = perAttendeeAmounts.map(({ payableNow }, index) =>
+                  eligibleIndices.includes(index) ? Math.min(roundCurrency(payableNow), promoAmount) : 0
+                );
+
+                promoDiscountOnTotal = roundCurrency(
+                  promoDiscountsPerAttendeeTotal.reduce((sum, amount) => sum + amount, 0)
+                );
+                promoDiscountOnPayableNow = roundCurrency(
+                  promoDiscountsPerAttendeePayableNow.reduce((sum, amount) => sum + amount, 0)
+                );
+              } else if (promo.p_c_discount_type === 'percent_off') {
+                // Calculate discount on eligible attendees' amounts only
+                const eligibleTotalFees = eligibleIndices.reduce((sum, i) => sum + (perAttendeeAmounts[i]?.total || 0), 0);
+                const eligiblePayableNowFees = eligibleIndices.reduce((sum, i) => sum + (perAttendeeAmounts[i]?.payableNow || 0), 0);
+
+                promoDiscountOnTotal = roundCurrency((eligibleTotalFees * promoAmount) / 100);
+                promoDiscountOnPayableNow = roundCurrency((eligiblePayableNowFees * promoAmount) / 100);
+
+                // Allocate discount proportionally only among eligible attendees
+                const eligibleAmountsTotal = eligibleIndices.map(i => perAttendeeAmounts[i]?.total || 0);
+                const eligibleAmountsPayableNow = eligibleIndices.map(i => perAttendeeAmounts[i]?.payableNow || 0);
+
+                const allocatedDiscountTotal = allocateProportionalAmounts(eligibleAmountsTotal, promoDiscountOnTotal);
+                const allocatedDiscountPayableNow = allocateProportionalAmounts(eligibleAmountsPayableNow, promoDiscountOnPayableNow);
+
+                // Map back to all attendees (only eligible indices get discount)
+                promoDiscountsPerAttendeeTotal = perAttendeeAmounts.map((_, index) => {
+                  const eligibleIndex = eligibleIndices.indexOf(index);
+                  return eligibleIndex >= 0 ? allocatedDiscountTotal[eligibleIndex] : 0;
+                });
+                promoDiscountsPerAttendeePayableNow = perAttendeeAmounts.map((_, index) => {
+                  const eligibleIndex = eligibleIndices.indexOf(index);
+                  return eligibleIndex >= 0 ? allocatedDiscountPayableNow[eligibleIndex] : 0;
+                });
+              }
             }
           }
         }

@@ -6,7 +6,7 @@ class PriceCalculationController {
 
   async calculatePrice(req, res) {
     try {
-      const { course_event_id, attendees, promo_code_id, apply_deposit_logic = true } = req.body;
+      const { course_event_id, attendees, promo_code_id, promo_eligible_count, apply_deposit_logic = true } = req.body;
 
       // Fetch course event with related data
       const courseEvent = await this.getCourseEventWithRelations(course_event_id);
@@ -36,10 +36,11 @@ class PriceCalculationController {
       const subtotal = attendeePrices.reduce((sum, price) => sum + price.total, 0);
       const depositTotal = attendeePrices.reduce((sum, price) => sum + price.deposit, 0);
 
-      // Apply promo discount
+      // Apply promo discount (with support for partial eligibility)
       const promoData = promo_code_id ? await this.getPromoCode(promo_code_id) : null;
       const amountToDiscount = depositRequired ? depositTotal : subtotal;
-      const promoResult = this.applyPromoDiscount(amountToDiscount, promoData, attendees.length);
+      const eligibleCount = promo_eligible_count !== undefined ? promo_eligible_count : attendees.length;
+      const promoResult = this.applyPromoDiscount(amountToDiscount, promoData, attendees.length, eligibleCount);
 
       // VAT disabled for current pricing flow
       const vatResult = this.calculateVAT(
@@ -64,7 +65,9 @@ class PriceCalculationController {
             applied: !!promoData,
             type: promoData?.p_c_discount_type || null,
             amount: promoData?.p_c_amount || 0,
-            total_discount: promoResult.discount
+            total_discount: promoResult.discount,
+            eligible_attendee_count: eligibleCount,
+            attendee_count: attendees.length
           },
           vat_calculation: vatResult,
           final_totals: {
@@ -215,18 +218,25 @@ class PriceCalculationController {
     }
   }
 
-  applyPromoDiscount(baseAmount, promoData, attendeeCount) {
+  applyPromoDiscount(baseAmount, promoData, attendeeCount, eligibleAttendeeCount = null) {
     if (!promoData || !promoData.status) {
       return { discounted_amount: baseAmount, discount: 0 };
     }
 
+    // Use eligible count if provided, otherwise use all attendees
+    const safeEligibleCount = Math.max(0, eligibleAttendeeCount !== null ? eligibleAttendeeCount : attendeeCount);
+    const safeAttendeeCount = Math.max(1, attendeeCount);
+
     let totalDiscount = 0;
 
     if (promoData.p_c_discount_type === 'pounds_off') {
-      totalDiscount = attendeeCount * promoData.p_c_amount;
+      // Apply discount amount for each eligible attendee
+      totalDiscount = safeEligibleCount * promoData.p_c_amount;
     } else if (promoData.p_c_discount_type === 'percent_off') {
-      const discountPerAttendee = (baseAmount * promoData.p_c_amount) / 100;
-      totalDiscount = attendeeCount * discountPerAttendee;
+      // Calculate percent discount based on eligible attendees' proportion
+      const eligibleRatio = safeAttendeeCount > 0 ? (safeEligibleCount / safeAttendeeCount) : 0;
+      const eligibleBaseAmount = baseAmount * eligibleRatio;
+      totalDiscount = (eligibleBaseAmount * promoData.p_c_amount) / 100;
     }
 
     const discountedAmount = Math.max(0, baseAmount - totalDiscount);

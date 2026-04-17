@@ -39,6 +39,11 @@ function createPriceCalculationRoutes(pool) {
       .isInt({ min: 1 })
       .withMessage('Valid promo code ID required if provided'),
     
+    body('promo_eligible_count')
+      .optional()
+      .isInt({ min: 0 })
+      .withMessage('Eligible attendee count must be a non-negative integer'),
+    
     body('apply_deposit_logic')
       .optional()
       .isBoolean()

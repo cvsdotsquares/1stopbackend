@@ -44,7 +44,7 @@ class GiftVoucherController {
       } = req.body;
 
       // Validate
-      if (!recipient_name || !voucher_value || !purchased_by || !email_address) {
+      if (!recipient_name || !voucher_value || !purchased_by || !email_address || !subject) {
         return res.status(400).json({
           success: false,
           error: 'Missing required fields'
