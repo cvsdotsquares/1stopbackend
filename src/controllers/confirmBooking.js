@@ -78,6 +78,14 @@ const removeCurLock = async (pool, space_hold_id) => {
   }
 };
 
+/** Converts dd/mm/yyyy → yyyy-mm-dd for MySQL DATE columns. Returns null if not parseable. */
+const parseDobToMysql = (dob) => {
+  if (!dob) return null;
+  const match = String(dob).trim().match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+  if (!match) return null;
+  return `${match[3]}-${match[2]}-${match[1]}`;
+};
+
 const parseBooleanEnv = (value, fallback = false) => {
   if (value === undefined || value === null || value === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
@@ -284,6 +292,7 @@ const confirmBooking = (pool) => async (req, res) => {
     phone,
     email,
     driving_licence,
+    date_of_birth,
     bike_hire,
     bike_hire_type,
     course_type,
@@ -349,6 +358,7 @@ const confirmBooking = (pool) => async (req, res) => {
     const cleanedPhone = (phone || '').replace(/\s+/g, '');
     const upperLicence = (driving_licence || '').trim().toUpperCase();
     const fullName = `${first_name} ${last_name || ''} (rt#${rideto_order_number})`.trim();
+    const dobMysql = parseDobToMysql(date_of_birth);
 
     let contactCardId;
     if (upperLicence) {
@@ -360,28 +370,28 @@ const confirmBooking = (pool) => async (req, res) => {
         contactCardId = existingCard[0].id;
         await connection.query(
           `UPDATE booking_attendees_dropdown
-           SET first_name = ?, sur_name = ?, contact1 = ?, email = ?, license_number = ?, rideto_orderid = ?, updated = NOW()
+           SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, email = ?, license_number = ?, rideto_orderid = ?, date_of_birth = ?, updated = NOW()
            WHERE id = ?`,
-          [first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, contactCardId]
+          [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql, contactCardId]
         );
       } else {
-        const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (first_name, sur_name, contact1, email, license_number, rideto_orderid, created, updated) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-          [first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number]);
+        const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql]);
         contactCardId = cardResult.insertId;
       }
     } else {
-      const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (first_name, sur_name, contact1, email, license_number, rideto_orderid, created, updated) VALUES (?, ?, ?, ?, '', ?, NOW(), NOW())`,
-        [first_name, fullName, cleanedPhone, email || '', rideto_order_number]);
+      const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, NOW(), NOW())`,
+        [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', rideto_order_number, dobMysql]);
       contactCardId = cardResult.insertId;
     }
 
     // Step 7: Insert into booking_attendees
     await connection.query(`
       INSERT INTO booking_attendees (booking_ref, booking_id, first_name, sur_name, contact1, contact2, contact3, email,
-        vehicle_type, license_type, license_number, theory_number, admin_notes, notes, \`primary\`, created, previousparent,
+        vehicle_type, license_type, license_number, theory_number, admin_notes, notes, date_of_birth, \`primary\`, created, previousparent,
         rideto_orderid, contact_card_id)
-      VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 1, ?, '', '', '', 1, NOW(), '', ?, ?)
-    `, [booking_ref, bookingId, first_name, fullName, cleanedPhone, email || '', vehicleType, upperLicence, rideto_order_number, contactCardId]);
+      VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 1, ?, '', '', '', ?, 1, NOW(), '', ?, ?)
+    `, [booking_ref, bookingId, first_name, fullName, cleanedPhone, email || '', vehicleType, upperLicence, dobMysql, rideto_order_number, contactCardId]);
 
     logRequest(200, 'Attendee saved', { booking_ref, bookingId }, AFTER_SAVE_ATTENDEE_LOG);
 

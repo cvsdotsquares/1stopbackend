@@ -7,7 +7,7 @@ class UserController {
   async getProfile(req, res) {
     try {
       const [users] = await this.pool.query(`
-        SELECT id, first_name, sur_name, email, contact1, contact2, contact3, add1, add2, postcode, created
+        SELECT id, first_name, sur_name, email, contact1, contact2, contact3, add1, add2, postcode, created, date_of_birth, license_number, license_type, theory_number
         FROM users WHERE id = ?
       `, [req.user.id]);
 
@@ -26,14 +26,16 @@ class UserController {
           phone: user.contact1,
           phone2: user.contact2,
           phone3: user.contact3,
-          date_of_birth: null,
+          date_of_birth: user.date_of_birth,
           address: {
             street: user.add1,
             city: user.add2,
             postcode: user.postcode,
             country: 'United Kingdom'
           },
-          license_number: null,
+          license_number: user.license_number,
+          license_type: user.license_type,
+          theory_number: user.theory_number,
           created_at: user.created
         }
       });

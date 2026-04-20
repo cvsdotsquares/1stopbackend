@@ -6,6 +6,21 @@ const { generateToken, generateRefreshToken } = require('../middleware/auth');
 const { sendOTPEmail, sendRegistrationEmail, sendPasswordUpdateEmail } = require('../utils/emailService');
 const { decryptPassword } = require('../utils/encryption');
 
+const parseDobToMysql = (dob) => {
+  if (!dob) return null;
+  const value = String(dob).trim();
+
+  // Already in YYYY-MM-DD
+  const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) return value;
+
+  // dd/mm/yyyy or dd-mm-yyyy
+  const ukMatch = value.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+  if (ukMatch) return `${ukMatch[3]}-${ukMatch[2]}-${ukMatch[1]}`;
+
+  return null;
+};
+
 class AuthController {
   constructor(pool) {
     this.pool = pool;
@@ -36,8 +51,10 @@ class AuthController {
         postcode,
         contactNumber1,
         contactNumber2,
-        contactNumber3,
-        reg_type = 'm'
+        date_of_birth: inputDateOfBirth,
+        license_number: inputLicenseNumber,
+        license_type: inputLicenseType,
+        theory_number: inputTheoryNumber
       } = req.body;
 
       const password = decryptPassword(encryptedPassword);
@@ -56,7 +73,12 @@ class AuthController {
       const add3 = addressLine3;
       const contact1 = contactNumber1;
       const contact2 = contactNumber2;
-      const contact3 = contactNumber3;
+      const date_of_birth = parseDobToMysql(inputDateOfBirth);
+      const license_number = inputLicenseNumber ? String(inputLicenseNumber).trim().toUpperCase() : null;
+      const license_type = inputLicenseType !== undefined && inputLicenseType !== null && inputLicenseType !== ''
+        ? Number(inputLicenseType)
+        : null;
+      const theory_number = inputTheoryNumber || null;
 
       // Check if user already exists
       const [existingUsers] = await this.pool.query(
@@ -71,6 +93,32 @@ class AuthController {
         });
       }
 
+      if (license_number) {
+        const [existingUserLicense, existingDropdownLicense] = await Promise.all([
+          this.pool.query(
+            'SELECT id FROM users WHERE UPPER(TRIM(license_number)) = ? LIMIT 1',
+            [license_number]
+          ),
+          this.pool.query(
+            'SELECT id FROM booking_attendees_dropdown WHERE UPPER(TRIM(license_number)) = ? LIMIT 1',
+            [license_number]
+          )
+        ]);
+
+        if (existingUserLicense[0].length > 0 || existingDropdownLicense[0].length > 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'Validation errors',
+            errors: [
+              {
+                path: 'license_number',
+                msg: 'this licence already in use with another user'
+              }
+            ]
+          });
+        }
+      }
+
       // Hash password
       const saltRounds = 12;
       const hashedPassword = await bcrypt.hash(password, saltRounds);
@@ -79,8 +127,9 @@ class AuthController {
       const [result] = await this.pool.execute(
         `INSERT INTO users (
           first_name, sur_name, email, password, password_type, add1, add2, add3,
-          postcode, contact1, contact2, contact3, reg_type, status, created
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())`,
+          postcode, contact1, contact2, contact3, date_of_birth, license_number,
+          license_type, theory_number, status, created
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NOW())`,
         [
           first_name,
           sur_name,
@@ -93,40 +142,30 @@ class AuthController {
           postcode || null,
           contact1,
           contact2 || null,
-          contact3 || null,
-          reg_type
+          null,
+          date_of_birth,
+          license_number,
+          license_type,
+          theory_number
         ]
       );
 
-      // Get the created user (without password)
-      const [newUser] = await this.pool.query(
-        `SELECT id, first_name, sur_name, email, add1, add2, add3,
-         postcode, contact1, contact2, contact3, reg_type, status, created
-         FROM users WHERE id = ?`,
-        [result.insertId]
+      // Send OTP for email verification
+      const otp = crypto.randomInt(100000, 999999).toString();
+      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      await this.pool.query(
+        'INSERT INTO email_verification_otps (user_id, email, otp, purpose, expires_at) VALUES (?, ?, ?, ?, ?)',
+        [result.insertId, email, otp, 'email_verification', otpExpiresAt]
       );
 
-      // Generate tokens
-      const token = generateToken(newUser[0]);
-      const refreshToken = generateRefreshToken(newUser[0]);
-
-      // Send registration email (async, don't wait)
-      sendRegistrationEmail({
-        email: newUser[0].email,
-        first_name: newUser[0].first_name,
-        sur_name: newUser[0].sur_name
-      }, this.pool).catch(err => {
-        console.error('Failed to send registration email:', err);
-      });
+      await sendOTPEmail(email, first_name, otp);
 
       res.status(201).json({
         success: true,
-        message: 'User registered successfully',
-        data: {
-          user: newUser[0],
-          token,
-          refreshToken
-        }
+        requiresVerification: true,
+        email,
+        message: 'Account created! Please check your email for a 6-digit verification code.'
       });
 
     } catch (error) {
@@ -136,6 +175,84 @@ class AuthController {
         message: 'Failed to register user',
         error: error.message
       });
+    }
+  }
+
+  /**
+   * Verify OTP after registration and return tokens for auto-login
+   */
+  async verifyRegistrationOTP(req, res) {
+    try {
+      const { email, otp } = req.body;
+
+      if (!email || !otp) {
+        return res.status(400).json({ success: false, message: 'Email and OTP are required' });
+      }
+
+      const [otpRecords] = await this.pool.query(
+        `SELECT id, user_id FROM email_verification_otps
+         WHERE email = ? AND otp = ? AND purpose = 'email_verification' AND is_used = 0 AND expires_at > NOW()
+         ORDER BY created_at DESC LIMIT 1`,
+        [email, otp]
+      );
+
+      if (otpRecords.length === 0) {
+        // Check if expired
+        const [anyOtp] = await this.pool.query(
+          `SELECT id, is_used, expires_at FROM email_verification_otps WHERE email = ? AND otp = ? ORDER BY created_at DESC LIMIT 1`,
+          [email, otp]
+        );
+        if (anyOtp.length > 0) {
+          return res.status(400).json({ success: false, message: 'OTP has expired or already been used' });
+        }
+        return res.status(400).json({ success: false, message: 'Invalid OTP. Please check and try again.' });
+      }
+
+      const otpRecord = otpRecords[0];
+
+      // Mark OTP as used
+      await this.pool.query(
+        'UPDATE email_verification_otps SET is_used = 1, verified_at = NOW() WHERE id = ?',
+        [otpRecord.id]
+      );
+
+      // Mark user as email verified and activate account
+      await this.pool.query(
+        'UPDATE users SET is_email_verified = 1, email_verified_at = NOW(), status = 1 WHERE id = ?',
+        [otpRecord.user_id]
+      );
+
+      // Fetch user and return tokens for auto-login
+      const [users] = await this.pool.query(
+        `SELECT id, first_name, sur_name, email, add1, add2, add3,
+         postcode, contact1, contact2, contact3, date_of_birth, license_number,
+         license_type, theory_number, reg_type, status, created
+         FROM users WHERE id = ?`,
+        [otpRecord.user_id]
+      );
+
+      const user = users[0];
+      const token = generateToken(user);
+      const refreshToken = generateRefreshToken(user);
+
+      // Send registration welcome email
+      sendRegistrationEmail({
+        email: user.email,
+        first_name: user.first_name,
+        sur_name: user.sur_name
+      }, this.pool).catch(err => {
+        console.error('Failed to send registration email:', err);
+      });
+
+      return res.json({
+        success: true,
+        message: 'Email verified successfully! Welcome aboard.',
+        data: { user, token, refreshToken }
+      });
+
+    } catch (error) {
+      console.error('Verify registration OTP error:', error);
+      res.status(500).json({ success: false, message: 'Verification failed' });
     }
   }
 
@@ -515,7 +632,7 @@ class AuthController {
 
       const [users] = await this.pool.query(
         `SELECT id, first_name, sur_name, email, add1, add2, add3,
-         postcode, contact1, contact2, contact3, reg_type, status, created, modified
+         postcode, contact1, contact2, contact3, reg_type, status, created, modified, date_of_birth, license_number, license_type, theory_number
          FROM users WHERE id = ?`,
         [userId]
       );

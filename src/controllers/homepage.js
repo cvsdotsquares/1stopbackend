@@ -216,7 +216,7 @@ class HomepageController {
       // Get why us data
       const [whyUs] = await this.pool.query(`
         SELECT w1s.why_title, w1s.why_subtitle, w1s.why_content, w1s.why_footer_content,
-               w1si.icon_title, w1si.icon_img, w1si.icon_content
+               w1si.icon_title, w1si.icon_img, w1si.icon_content, w1si.icon_link, w1si.icon_link
         FROM why_1stop w1s
         LEFT JOIN why_1stop_images w1si ON w1s.id = w1si.why_id
         WHERE w1s.page_id = ?
@@ -231,7 +231,9 @@ class HomepageController {
           id: index + 1,
           title: item.icon_title,
           description: item.icon_content || null,
-          icon: '/uploads/why_1stop/' + item.icon_img || null
+          icon: '/uploads/why_1stop/' + item.icon_img || null,
+          linkUrl: item.icon_link || null,
+          linkText: item.icon_link ? "Learn More" : null
         }));
       }
 

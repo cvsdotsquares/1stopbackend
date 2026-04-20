@@ -14,18 +14,18 @@ function createAuthRoutes(pool) {
       .trim()
       .isLength({ min: 2, max: 50 })
       .withMessage('First name must be between 2 and 50 characters'),
-    
+
     body('surname')
       .trim()
       .isLength({ min: 2, max: 50 })
       .withMessage('Surname must be between 2 and 50 characters'),
-    
+
     body('email')
       .trim()
       .isEmail()
       .normalizeEmail()
       .withMessage('Please provide a valid email address'),
-    
+
     body('confirmEmail')
       .trim()
       .isEmail()
@@ -37,49 +37,73 @@ function createAuthRoutes(pool) {
         }
         return true;
       }),
-    
+
     body('password')
       .notEmpty()
       .withMessage('Password is required'),
-    
+
     body('contactNumber1')
       .trim()
-      .isMobilePhone('en-GB')
-      .withMessage('Please provide a valid UK mobile phone number'),
-    
+      .matches(/^\+?[0-9\s()-]+$/)
+      .withMessage('Please provide a valid phone number'),
+
     body('addressLine1')
+      .optional({ values: 'falsy' })
       .trim()
-      .isLength({ min: 1, max: 255 })
-      .withMessage('Address line 1 is required and must not exceed 255 characters'),
-    
+      .isLength({ max: 255 })
+      .withMessage('Address line 1 must not exceed 255 characters'),
+
     body('postcode')
+      .optional({ values: 'falsy' })
       .trim()
       .matches(/^[A-Z]{1,2}[0-9RCHNQ][0-9A-Z]?\s?[0-9][ABD-HJLNP-UW-Z]{2}$/i)
       .withMessage('Please provide a valid UK postcode'),
-    
+
     body('addressLine2')
       .optional({ values: 'falsy' })
       .trim()
       .isLength({ max: 255 })
       .withMessage('Address line 2 must not exceed 255 characters'),
-    
+
     body('addressLine3')
       .optional({ values: 'falsy' })
       .trim()
       .isLength({ max: 255 })
       .withMessage('Address line 3 must not exceed 255 characters'),
-    
+
     body('contactNumber2')
       .optional({ values: 'falsy' })
       .trim()
-      .isMobilePhone('en-GB')
-      .withMessage('Contact 2 must be a valid UK phone number'),
-    
-    body('contactNumber3')
+      .matches(/^\+?[0-9\s()-]+$/)
+      .withMessage('Contact 2 must be a valid phone number'),
+
+    body('date_of_birth')
       .optional({ values: 'falsy' })
       .trim()
-      .isMobilePhone('en-GB')
-      .withMessage('Contact 3 must be a valid UK phone number')
+      .custom((value) => {
+        if (!value) return true;
+        const str = String(value).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return true; // ISO format
+        if (/^\d{2}[/-]\d{2}[/-]\d{4}$/.test(str)) return true; // booking-form style
+        throw new Error('Date of birth must be in dd/mm/yyyy or yyyy-mm-dd format');
+      }),
+
+    body('license_number')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isLength({ min: 2, max: 32 })
+      .withMessage('License number must be between 2 and 32 characters'),
+
+    body('license_type')
+      .optional({ values: 'falsy' })
+      .isInt({ min: 1 })
+      .withMessage('License type must be a valid licence type id'),
+
+    body('theory_number')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isLength({ max: 64 })
+      .withMessage('Theory number must not exceed 64 characters')
   ];
 
   const loginValidation = [
@@ -88,7 +112,7 @@ function createAuthRoutes(pool) {
       .isEmail()
       .normalizeEmail()
       .withMessage('Please provide a valid email address'),
-    
+
     body('password')
       .notEmpty()
       .withMessage('Password is required')
@@ -100,49 +124,49 @@ function createAuthRoutes(pool) {
       .trim()
       .isLength({ min: 2, max: 50 })
       .withMessage('First name must be between 2 and 50 characters'),
-    
+
     body('sur_name')
       .optional()
       .trim()
       .isLength({ min: 2, max: 50 })
       .withMessage('Surname must be between 2 and 50 characters'),
-    
+
     body('contact1')
       .optional()
       .trim()
       .isMobilePhone('en-GB')
       .withMessage('Contact 1 must be a valid UK phone number'),
-    
+
     body('add1')
       .optional()
       .trim()
       .isLength({ max: 255 })
       .withMessage('Address line 1 must not exceed 255 characters'),
-    
+
     body('add2')
       .optional()
       .trim()
       .isLength({ max: 255 })
       .withMessage('Address line 2 must not exceed 255 characters'),
-    
+
     body('add3')
       .optional()
       .trim()
       .isLength({ max: 255 })
       .withMessage('Address line 3 must not exceed 255 characters'),
-    
+
     body('postcode')
       .optional()
       .trim()
       .matches(/^[A-Z]{1,2}[0-9RCHNQ][0-9A-Z]?\s?[0-9][ABD-HJLNP-UW-Z]{2}$/i)
       .withMessage('Please provide a valid UK postcode'),
-    
+
     body('contact2')
       .optional()
       .trim()
       .isMobilePhone('en-GB')
       .withMessage('Contact 2 must be a valid UK phone number'),
-    
+
     body('contact3')
       .optional()
       .trim()
@@ -154,7 +178,7 @@ function createAuthRoutes(pool) {
     body('currentPassword')
       .notEmpty()
       .withMessage('Current password is required'),
-    
+
     body('newPassword')
       .isLength({ min: 8 })
       .withMessage('New password must be at least 8 characters long')
@@ -207,6 +231,10 @@ function createAuthRoutes(pool) {
       .withMessage('Password must contain at least one lowercase letter, one uppercase letter, and one number')
   ];
 
+  // Registration OTP verification
+  router.post('/verify-registration-otp', otpValidation, authController.verifyRegistrationOTP.bind(authController));
+  router.post('/resend-registration-otp', emailValidation, authController.sendVerificationOTP.bind(authController));
+
   // New login flow routes
   router.post('/check-email', emailValidation, authController.checkEmail.bind(authController));
   router.post('/check-user-exists', emailValidation, authController.checkUserExists.bind(authController));
@@ -243,11 +271,11 @@ function createAuthRoutes(pool) {
         'SELECT id, email, status, password_type, is_email_verified FROM users WHERE email = ?',
         [email]
       );
-      
+
       if (users.length === 0) {
         return res.json({ success: false, message: 'User not found' });
       }
-      
+
       res.json({ success: true, data: users[0] });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

@@ -6,6 +6,14 @@ const { sendBookingConfirmation } = require('../utils/emailService');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const e = require('express');
 
+/** Converts dd/mm/yyyy → yyyy-mm-dd for MySQL DATE columns. Returns null if not parseable. */
+const parseDobToMysql = (dob) => {
+  if (!dob) return null;
+  const match = String(dob).trim().match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+  if (!match) return null;
+  return `${match[3]}-${match[2]}-${match[1]}`;
+};
+
 class BookingFlowController {
   constructor(pool) {
     this.pool = pool;
@@ -95,6 +103,7 @@ class BookingFlowController {
           ce.own_total_price,
           c.course_name,
           c.deposit_days,
+          c.cancel_days,
           COALESCE(f.freeze_count, 0) as freeze_count
         FROM course_event_dates ced
         JOIN course_events ce ON ced.course_event_id = ce.id
@@ -147,7 +156,7 @@ class BookingFlowController {
             own_one_off_price: event.own_one_off_price,
             own_deposit_price: event.own_deposit_price,
             own_total_price: event.own_total_price,
-            deposit_days: event.deposit_days,
+            deposit_days: event.cancel_days, // Assuming deposit_days is stored in courses table as cancel_days
             dates: []
           };
         }
@@ -1442,7 +1451,7 @@ class BookingFlowController {
             INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                  payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id, booking_made_by_id)
             VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?, ?)
-          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, userIds[0], userIds[0], promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, userIds[0], 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
 
           const booking_id = bookingResult.insertId;
           const bookingRef = `1SRC${booking_id}`;
@@ -1469,25 +1478,26 @@ class BookingFlowController {
                 UPDATE booking_attendees_dropdown
                 SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, contact2 = ?, contact3 = ?,
                     email = ?, vehicle_type = ?, license_type = ?, license_number = ?, theory_number = ?, notes = ?, \
-                    \`primary\` = ?, updated = NOW()
+                    date_of_birth = ?, \`primary\` = ?, updated = NOW()
                 WHERE id = ?
               `, [
                 booking_id, bookingRef, attendee.first_name, attendee.sur_name,
                 attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
                 attendeeVehicleType, attendee.license_type || 0, normalizedLicenseNumber,
-                attendee.theory_number || '', attendee.notes || '', primaryFlag, contactCardId
+                attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth),
+                primaryFlag, contactCardId
               ]);
             } else {
               const [cardResult] = await connection.query(`
                 INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                        email, vehicle_type, license_type, license_number, theory_number,
-                                                       notes, \`primary\`, created, updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                                                       notes, date_of_birth, \`primary\`, created, updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
               `, [
                 booking_id, bookingRef, attendee.first_name, attendee.sur_name,
                 attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
                 attendeeVehicleType, attendee.license_type || 0, normalizedLicenseNumber,
-                attendee.theory_number || '', attendee.notes || '', primaryFlag
+                attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth), primaryFlag
               ]);
               contactCardId = cardResult.insertId;
             }
@@ -1495,13 +1505,13 @@ class BookingFlowController {
             const [cardResult] = await connection.query(`
               INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                      email, vehicle_type, license_type, license_number, theory_number,
-                                                     notes, \`primary\`, created, updated)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                                                     notes, date_of_birth, \`primary\`, created, updated)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
             `, [
               booking_id, bookingRef, attendee.first_name, attendee.sur_name,
               attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
               attendeeVehicleType, attendee.license_type || 0, '',
-              attendee.theory_number || '', attendee.notes || '', primaryFlag
+              attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth), primaryFlag
             ]);
             contactCardId = cardResult.insertId;
           }
@@ -1509,13 +1519,13 @@ class BookingFlowController {
           await connection.query(`
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                          email, vehicle_type, license_type, license_number, theory_number,
-                                         admin_notes, notes, contact_card_id, \`primary\`, created)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, NOW())
+                                         admin_notes, notes, date_of_birth, contact_card_id, \`primary\`, created)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, NOW())
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             attendee.vehicle_type || 0, attendee.license_type || 0, normalizedLicenseNumber,
-            attendee.theory_number || '', contactCardId, primaryFlag
+            attendee.theory_number || '', parseDobToMysql(attendee.date_of_birth), contactCardId, primaryFlag
           ]);
         }
 
