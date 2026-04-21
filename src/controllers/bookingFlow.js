@@ -1451,7 +1451,7 @@ class BookingFlowController {
             INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                  payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id, booking_made_by_id)
             VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?, ?)
-          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, userIds[0], 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, attendeeUserId, 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
 
           const booking_id = bookingResult.insertId;
           const bookingRef = `1SRC${booking_id}`;

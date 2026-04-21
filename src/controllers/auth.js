@@ -839,7 +839,7 @@ class AuthController {
 
       // Update password
       await this.pool.execute(
-        'UPDATE users SET password = ?, modified = NOW() WHERE id = ?',
+        "UPDATE users SET password = ?, password_type = 'user_chosen', modified = NOW() WHERE id = ?",
         [hashedNewPassword, userId]
       );
 

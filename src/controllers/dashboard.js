@@ -111,7 +111,6 @@ class DashboardController {
         WHERE (b.user_id = ? OR ba.email = ?) AND ced.event_date >= CURDATE() AND b.status IN (0, 1)
         GROUP BY b.id, c.course_name, l.location_name, l.address1, l.address2, l.postcode
         ORDER BY event_date ASC
-        LIMIT 3
       `, [userId, req.user.email]);
 
       const upcomingWithSecondary = await Promise.all((upcomingCourses || []).map(async (course) => {
