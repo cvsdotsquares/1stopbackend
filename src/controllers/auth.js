@@ -151,6 +151,32 @@ class AuthController {
         ]
       );
 
+      // Create contact card entry in booking_attendees_dropdown so this user
+      // appears in the admin attendee dropdown without having booked yet.
+      try {
+        await this.pool.query(
+          `INSERT INTO booking_attendees_dropdown (
+            booking_id, booking_ref, first_name, sur_name, date_of_birth,
+            contact1, contact2, contact3, email,
+            license_type, license_number, theory_number, created, updated
+          ) VALUES (0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            first_name,
+            sur_name,
+            date_of_birth,
+            contact1 || '',
+            contact2 || '',
+            '',
+            email,
+            license_type || 0,
+            license_number || '',
+            theory_number || ''
+          ]
+        );
+      } catch (dropdownError) {
+        console.error('Failed to create booking_attendees_dropdown entry for new user:', dropdownError);
+      }
+
       // Send OTP for email verification
       const otp = crypto.randomInt(100000, 999999).toString();
       const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -543,7 +569,8 @@ class AuthController {
 
       const [users] = await this.pool.query(
         `SELECT id, first_name, sur_name, email, password, password_type, add1, add2, add3,
-         postcode, contact1, contact2, contact3, reg_type, status, created
+         postcode, contact1, contact2, contact3, date_of_birth, license_number, license_type,
+         theory_number, reg_type, status, created
          FROM users WHERE email = ?`,
         [email]
       );

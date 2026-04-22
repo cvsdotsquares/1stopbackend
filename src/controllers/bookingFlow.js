@@ -319,6 +319,9 @@ class BookingFlowController {
         });
       });
 
+      // Object.values() iteration order is numeric key order (course_event_id), not event_date
+      availability.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+
       res.json({
         success: true,
         data: {
@@ -1579,7 +1582,9 @@ class BookingFlowController {
               first_attendee_phone: String(primaryAttendee?.contact1 || ''),
               first_attendee_email: String(primaryAttendee?.email || ''),
               first_attendee_driving_licence: String(primaryAttendee?.license_number || ''),
-              course_date: courseDateText
+              course_date: courseDateText,
+              // Carried to webhook for email_logs.ip (customer IP, not Stripe's server)
+              client_ip: String((req.clientIp || req.ip || '')).replace(/^::ffff:/, '').trim().slice(0, 500)
             },
             description: stripeDescription,
             receipt_email: attendees[0].email

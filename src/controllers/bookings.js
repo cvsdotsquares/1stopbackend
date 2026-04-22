@@ -826,13 +826,24 @@ class BookingController {
         });
       }
 
+      const resolvedClientIp = String(
+        req.clientIp || req.ip || req.headers['x-forwarded-for'] || ''
+      )
+        .split(',')[0]
+        .replace(/^::ffff:/, '')
+        .trim();
+
       await sendBookingConfirmation({
         ...payload,
         targetEmails: [targetEmail],
         previewOnly: false,
-        ip: req.ip || req.clientIp || 'dashboard',
+        ip: resolvedClientIp,
         bookingRefSuffix: 'R',
-        disableBcc: true
+        disableBcc: true,
+        logType: forwardEmail
+          ? 'Booking Mail (Resend - Forward)'
+          : 'Booking Mail (Resend)',
+        emailBy: userId || 0
       }, this.pool);
 
       return res.json({

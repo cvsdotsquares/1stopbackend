@@ -182,9 +182,15 @@ class StripeWebhookController {
         console.log(`✅ Payment confirmed for bookings: ${allBookingIds.join(', ')}`);
 
         // Send confirmation email for each booking
+        const clientIpFromMetadata = String(
+          session.metadata?.client_ip || session.metadata?.clientIp || ''
+        )
+          .replace(/^::ffff:/, '')
+          .trim();
+
         for (const bid of allBookingIds) {
           try {
-            await this.sendBookingConfirmationEmail(bid);
+            await this.sendBookingConfirmationEmail(bid, { clientIp: clientIpFromMetadata });
           } catch (emailError) {
             console.error(`❌ Failed to send confirmation email for booking ${bid}:`, emailError);
           }
@@ -798,7 +804,9 @@ class StripeWebhookController {
   }
 
   // Send booking confirmation email after payment is confirmed
-  async sendBookingConfirmationEmail(booking_id) {
+  // options.clientIp: customer IP from PaymentIntent metadata (set at checkout); used for email_logs
+  async sendBookingConfirmationEmail(booking_id, options = {}) {
+    const { clientIp = '' } = options;
     const connection = await this.pool.getConnection();
     try {
       // Get booking details.
@@ -886,7 +894,7 @@ class StripeWebhookController {
         course_email_content: courseData[0]?.email_content || '',
         franchise: franchiseData[0] || {},
         bcc: settingsData[0]?.booking_bcc || 'bookings@1stopinstruction.com',
-        ip: 'webhook'
+        ip: clientIp
       }, this.pool);
 
       console.log(`📧 Booking confirmation email sent for booking ${booking_id} (${booking.booking_ref})`);

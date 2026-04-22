@@ -231,7 +231,9 @@ const buildBookingEmailData = async (connection, {
   };
 };
 
-const sendBookingEmail = async (bookingData) => {
+const sendBookingEmail = async (bookingData, pool, meta = {}) => {
+  const { booking_ref = '', ip = '', attendeeEmail = '' } = meta;
+
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 587),
@@ -244,30 +246,97 @@ const sendBookingEmail = async (bookingData) => {
       : undefined
   });
 
-  const fromAddress = process.env.CONTACT_FROM;
-  const toAddress = process.env.CONTACT_TO;
+  const fromAddress = (process.env.CONTACT_FROM || '').trim();
+  const toAddress = (process.env.CONTACT_TO || '').trim();
+  const bccVal = process.env.BOOKING_BCC || '';
 
-  if (!fromAddress || !toAddress) {
-    console.error('Booking email config missing: CONTACT_FROM/BOOKING_BCC');
-    return false;
+  let subject = 'RestAPI booking confirmation';
+  let html = '';
+  let text = '';
+  const errors = [];
+  let htmlBuildOk = false;
+
+  try {
+    subject = buildSubject(bookingData);
+  } catch (e) {
+    errors.push(`buildSubject: ${e.message}`);
+  }
+
+  try {
+    html = buildBookingConfirmationHtml(bookingData);
+    htmlBuildOk = true;
+  } catch (e) {
+    errors.push(`buildBookingConfirmationHtml: ${e.message}`);
+    html = `<!-- email HTML could not be built: ${String(e.message).replace(/-->/g, '')} -->`;
+  }
+
+  try {
+    text = buildBookingConfirmationText(bookingData);
+  } catch (e) {
+    errors.push(`buildBookingConfirmationText: ${e.message}`);
+    text = '';
+  }
+
+  if (attendeeEmail) {
+    html += `\n\n<!-- attendee_email: ${String(attendeeEmail).replace(/-->/g, '')} -->`;
   }
 
   const mailOptions = {
-    from: fromAddress,
+    from: fromAddress || process.env.SMTP_USER || '',
     to: toAddress,
-    bcc: process.env.BOOKING_BCC || undefined,
-    subject: buildSubject(bookingData),
-    html: buildBookingConfirmationHtml(bookingData),
-    text: buildBookingConfirmationText(bookingData)
+    bcc: bccVal || undefined,
+    subject,
+    html,
+    text: text || undefined
   };
 
-  try {
-    await transporter.sendMail(mailOptions);
-    return true;
-  } catch (error) {
-    console.error('Email error:', error);
-    return false;
+  let emailStatus = 0;
+
+  if (!fromAddress || !toAddress) {
+    console.error('Booking email config missing: CONTACT_FROM/CONTACT_TO');
+    errors.push('Send skipped: CONTACT_FROM and/or CONTACT_TO not set in environment');
+  } else if (!htmlBuildOk) {
+    errors.push('Send skipped: HTML body could not be built');
+  } else {
+    try {
+      await transporter.sendMail(mailOptions);
+      emailStatus = 1;
+    } catch (error) {
+      console.error('Email error:', error);
+      errors.push(`sendMail: ${error?.message || String(error)}`);
+      emailStatus = 0;
+    }
   }
+
+  if (errors.length) {
+    html += `\n\n<!-- restapi_booking_email_errors: ${JSON.stringify(errors).replace(/-->/g, '')} -->`;
+  }
+
+  // Always record email_logs when pool is available — success, SMTP failure, or pre-send error (e.g. missing config / template error)
+  if (pool) {
+    try {
+      const logTo = toAddress || '(not configured)';
+      const logFrom = fromAddress || mailOptions.from || '(not configured)';
+      await pool.query(`
+        INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, ip, created)
+        VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      `, [
+        logTo,
+        bccVal,
+        logFrom,
+        subject,
+        html,
+        emailStatus,
+        'R2 Booking Confirmation',
+        booking_ref,
+        ip || ''
+      ]);
+    } catch (logError) {
+      console.error('Error logging RestAPI confirm booking email:', logError);
+    }
+  }
+
+  return emailStatus === 1;
 };
 
 const confirmBooking = (pool) => async (req, res) => {
@@ -438,8 +507,12 @@ const confirmBooking = (pool) => async (req, res) => {
 
     await connection.commit();
 
-    // Step 12: Send Email
-    await sendBookingEmail(bookingEmailData);
+    // Step 12: Send Email (and persist email_logs for audit; same table shape as other booking mail)
+    await sendBookingEmail(bookingEmailData, pool, {
+      booking_ref,
+      ip: req.clientIp || '',
+      attendeeEmail: email || ''
+    });
 
     logRequest(200, 'Course is confirmed', { school_course_id, booking_ref });
     return res.status(200).json({ message: 'Course is confirmed', school_course_id, booking_ref });

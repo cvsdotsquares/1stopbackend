@@ -668,13 +668,13 @@ class HelperController {
           message: 'Course not found'
         });
       }
-
+      const processedData = await replaceTokensInObject(this.pool, { content: courses[0].course_bullet_points });
       res.json({
         success: true,
         data: {
           course_id: courses[0].id,
           course_name: courses[0].course_name,
-          bullet_points: courses[0].course_bullet_points
+          bullet_points: processedData.content
         }
       });
 

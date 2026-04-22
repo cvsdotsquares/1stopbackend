@@ -272,7 +272,9 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    course_email_content = '',
    franchise = {},
    bcc,
-   ip
+   ip,
+    logType,
+    emailBy
   } = bookingData;
 
   const normalizedTargetEmails = Array.isArray(targetEmails)
@@ -676,16 +678,17 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
             || createBookingEmailHtml(getAttendeeForRecipient(recipientEmail));
 
           await pool.query(`
-            INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, ip, created)
-            VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, book_ref, ip, created)
+            VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
           `, [
             recipientEmail,
             resolvedBcc || '',
             process.env.SMTP_USER,
             mailOptions.subject,
             `${recipientEmailHtml}\n\n<!-- delivery_meta: ${escapeHtml(JSON.stringify(recipientMeta || {}))} -->`,
+            emailBy || 0,
             recipientStatus,
-            'Booking Mail',
+            logType || 'Booking Mail',
             booking_ref,
             ip || ''
           ]);
