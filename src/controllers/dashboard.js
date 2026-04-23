@@ -101,7 +101,7 @@ class DashboardController {
 
       const [upcomingCourses] = await this.pool.query(`
         SELECT DISTINCT c.course_name, MIN(ced.event_date) as event_date, b.id as booking_id, b.user_id, b.booking_made_by_id, b.course_event_id,
-               l.location_name, l.address1, l.address2, l.postcode
+               l.location_name, l.address1, l.address2, l.postcode, ba.first_name, ba.sur_name
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id

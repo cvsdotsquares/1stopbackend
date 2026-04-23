@@ -1,5 +1,6 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendGiftVoucherEmail } = require('../utils/emailService');
+const { findOrCreateStripeCustomerByEmail } = require('../utils/stripeCustomer');
 
 class GiftVoucherController {
   constructor(pool) {
@@ -93,11 +94,25 @@ class GiftVoucherController {
         const vat = 0;
         const totalAmount = voucherValueNumeric;
 
+        // Attach a Stripe Customer keyed by the purchaser's email so each
+        // unique buyer gets a dedicated customer record in the dashboard.
+        const stripeCustomerId = await findOrCreateStripeCustomerByEmail({
+          email: email_address,
+          name: purchased_by,
+          phone: contact_number,
+          metadata: {
+            type: 'gift_voucher',
+            voucher_ref: voucher_ref || '',
+            user_id: String(user_id || '')
+          }
+        });
+
         // Create Stripe PaymentIntent for inline payment
         const paymentIntent = await stripe.paymentIntents.create({
           amount: Math.round(totalAmount * 100),
           currency: 'gbp',
           automatic_payment_methods: { enabled: true },
+          ...(stripeCustomerId ? { customer: stripeCustomerId } : {}),
           metadata: {
             type: 'gift_voucher',
             bid: bid.toString(),

@@ -4,14 +4,22 @@ const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendBookingConfirmation } = require('../utils/emailService');
 const { replaceTokens } = require('../utils/tokenReplacer');
+const { findOrCreateStripeCustomerByEmail } = require('../utils/stripeCustomer');
 const e = require('express');
 
-/** Converts dd/mm/yyyy → yyyy-mm-dd for MySQL DATE columns. Returns null if not parseable. */
 const parseDobToMysql = (dob) => {
   if (!dob) return null;
-  const match = String(dob).trim().match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
-  if (!match) return null;
-  return `${match[3]}-${match[2]}-${match[1]}`;
+  const value = String(dob).trim();
+
+  // Already in YYYY-MM-DD
+  const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) return value;
+
+  // dd/mm/yyyy or dd-mm-yyyy
+  const ukMatch = value.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+  if (ukMatch) return `${ukMatch[3]}-${ukMatch[2]}-${ukMatch[1]}`;
+
+  return null;
 };
 
 class BookingFlowController {
@@ -1119,11 +1127,12 @@ class BookingFlowController {
             const hashedPassword = this.cakephp210Password(plainPassword);
 
             const [userResult] = await connection.query(`
-              INSERT INTO users (first_name, sur_name, email, password, password_type, contact1, contact2, contact3, status, created, modified)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+              INSERT INTO users (first_name, sur_name, email, password, password_type, contact1, contact2, contact3, status, created, modified, date_of_birth, license_number, license_type)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, ?)
             `, [
               attendee.first_name, attendee.sur_name, attendee.email,
-              hashedPassword, passwordType, attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', passwordType === 'user_chosen' ? 1 : 0
+              hashedPassword, passwordType, attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', passwordType === 'user_chosen' ? 1 : 0,
+              parseDobToMysql(attendee.date_of_birth), attendee.license_number, attendee.license_type
             ]);
 
             userId = userResult.insertId;
@@ -1565,10 +1574,26 @@ class BookingFlowController {
           ].filter(Boolean);
           const stripeDescription = stripeDescriptionParts.join(' ').replace(/\s+/g, ' ').trim();
 
+          // Attach a Stripe Customer keyed by the primary attendee's email so
+          // each unique email gets a dedicated customer record instead of
+          // appearing as "Guest" in the Stripe dashboard. Works for both
+          // logged-in users and guest checkouts.
+          const primaryAttendeeName = `${primaryAttendee?.first_name || ''} ${primaryAttendee?.sur_name || ''}`.trim();
+          const stripeCustomerId = await findOrCreateStripeCustomerByEmail({
+            email: primaryAttendee?.email,
+            name: primaryAttendeeName,
+            phone: primaryAttendee?.contact1,
+            metadata: {
+              user_id: String(userIds[0] || ''),
+              first_booking_ref: primaryBookingRef || ''
+            }
+          });
+
           const paymentIntent = await stripe.paymentIntents.create({
             amount: Math.round(amountToChargeNow * 100),
             currency: 'gbp',
             automatic_payment_methods: { enabled: true },
+            ...(stripeCustomerId ? { customer: stripeCustomerId } : {}),
             metadata: {
               booking_id: primaryBookingId.toString(),
               booking_ref: primaryBookingRef,
@@ -1578,7 +1603,7 @@ class BookingFlowController {
               course_event_id: course_event_id.toString(),
               user_id: userIds[0].toString(),
               attendees_count: attendees_count.toString(),
-              first_attendee_name: `${primaryAttendee?.first_name || ''} ${primaryAttendee?.sur_name || ''}`.trim(),
+              first_attendee_name: primaryAttendeeName,
               first_attendee_phone: String(primaryAttendee?.contact1 || ''),
               first_attendee_email: String(primaryAttendee?.email || ''),
               first_attendee_driving_licence: String(primaryAttendee?.license_number || ''),
