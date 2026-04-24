@@ -101,7 +101,9 @@ const getCourse = (pool) => async (req, res) => {
         RidetoCourseId: row.rideto_course_id,
         course_name: row.course_name,
         location_name: row.location_name,
-        event_date: row.event_date ? row.event_date.toISOString().split('T')[0] : null,
+        event_date: row.event_date instanceof Date
+          ? `${row.event_date.getFullYear()}-${String(row.event_date.getMonth() + 1).padStart(2, '0')}-${String(row.event_date.getDate()).padStart(2, '0')}`
+          : (row.event_date || null),
         event_start_time: row.event_start_time,
         event_end_time: row.event_end_time,
         AvailSeatCount: availSeatCount,

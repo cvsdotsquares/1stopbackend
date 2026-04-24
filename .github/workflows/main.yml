@@ -57,6 +57,9 @@ jobs:
             AES_SECRET_KEY=${{ secrets.AES_SECRET_KEY }}
             PHP_SITE_URL=${{ secrets.PHP_SITE_URL }}
             UNIVERSAL_PASSWORD_KEY=${{ secrets.UNIVERSAL_PASSWORD_KEY }}
+            BOOKING_TIMEOUT_MINUTES=${{ secrets.BOOKING_TIMEOUT_MINUTES }}
+            LOCK_EXPIRE_API_MINUTES=${{ secrets.LOCK_EXPIRE_API_MINUTES }}
+            LOCK_EXPIRE_ONLINE_MINUTES=${{ secrets.LOCK_EXPIRE_ONLINE_MINUTES }}
             EOF
 
             echo "Setting .env file permissions..."
