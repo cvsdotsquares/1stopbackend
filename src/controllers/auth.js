@@ -28,6 +28,103 @@ class AuthController {
   }
 
   /**
+   * Most recent booking's first attendee contact card (for booking-form prefill
+   * when users.license_number is still empty on legacy accounts).
+   */
+  async _getBookingPrefillFallback(userId) {
+    const [rows] = await this.pool.query(
+      `SELECT
+        bad.first_name,
+        bad.sur_name,
+        bad.date_of_birth,
+        bad.email,
+        bad.license_type,
+        bad.license_number
+      FROM bookings b
+      JOIN booking_attendees ba
+        ON ba.booking_id = b.id
+      JOIN booking_attendees_dropdown bad
+        ON bad.id = ba.contact_card_id
+      WHERE b.id = (
+        SELECT id FROM bookings WHERE user_id = ? ORDER BY id DESC LIMIT 1
+      )
+      ORDER BY ba.id ASC
+      LIMIT 1`,
+      [userId]
+    );
+    if (!rows || rows.length === 0) return null;
+    return rows[0];
+  }
+
+  /**
+   * GET /auth/booking-prefill — prefill for booking attendee[0] only (does not alter /profile).
+   * Returns has_fallback: true with six fields from booking_attendees_dropdown when
+   * the logged-in user has no license_number on the users row and a past booking row exists.
+   */
+  async bookingPrefill(req, res) {
+    try {
+      const userId = req.user.id;
+
+      const [users] = await this.pool.query(
+        'SELECT license_number FROM users WHERE id = ?',
+        [userId]
+      );
+
+      if (users.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found'
+        });
+      }
+
+      const rawLic = users[0].license_number;
+      const hasLicense = rawLic != null && String(rawLic).trim() !== '';
+      if (hasLicense) {
+        return res.json({ success: true, data: { has_fallback: false } });
+      }
+
+      const row = await this._getBookingPrefillFallback(userId);
+      if (!row) {
+        return res.json({ success: true, data: { has_fallback: false } });
+      }
+
+      let dateOfBirth = row.date_of_birth;
+      if (dateOfBirth instanceof Date) {
+        const y = dateOfBirth.getFullYear();
+        const m = String(dateOfBirth.getMonth() + 1).padStart(2, '0');
+        const d = String(dateOfBirth.getDate()).padStart(2, '0');
+        dateOfBirth = `${y}-${m}-${d}`;
+      } else if (dateOfBirth != null) {
+        dateOfBirth = String(dateOfBirth);
+      } else {
+        dateOfBirth = null;
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          has_fallback: true,
+          prefill: {
+            first_name: row.first_name,
+            sur_name: row.sur_name,
+            email: row.email,
+            date_of_birth: dateOfBirth,
+            license_type: row.license_type,
+            license_number: row.license_number
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Booking prefill error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to load booking prefill',
+        error: error.message
+      });
+    }
+  }
+
+  /**
    * Register new user
    */
   async register(req, res) {

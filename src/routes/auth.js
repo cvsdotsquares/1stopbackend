@@ -251,6 +251,7 @@ function createAuthRoutes(pool) {
 
   // Protected routes (require authentication)
   router.get('/profile', authenticateToken, authController.getProfile.bind(authController));
+  router.get('/booking-prefill', authenticateToken, authController.bookingPrefill.bind(authController));
   router.put('/profile', authenticateToken, updateProfileValidation, authController.updateProfile.bind(authController));
   router.post('/change-password', authenticateToken, changePasswordValidation, authController.changePassword.bind(authController));
 
