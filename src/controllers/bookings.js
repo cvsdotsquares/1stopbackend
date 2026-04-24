@@ -2,6 +2,8 @@
 const { validationResult } = require('express-validator');
 const { formatMySQLDateToDDMMYYYY, formatDateToDDMMYYYY } = require('../utils/dateFormat');
 const { sendBookingConfirmation } = require('../utils/emailService');
+const { replaceTokensInObject } = require('../utils/tokenReplacer');
+
 class BookingController {
   constructor(pool) {
     this.pool = pool;
@@ -723,12 +725,16 @@ class BookingController {
         ORDER BY b2.id ASC
       `, [bookings[0].course_event_id, primaryUserId, primaryUserId, id]);
 
+      const processedData = await replaceTokensInObject(this.pool, {
+        ...bookings[0],
+        attendees,
+        secondary_attendees: secondaryAttendees
+      });
+
       res.json({
         success: true,
         data: {
-          ...bookings[0],
-          attendees,
-          secondary_attendees: secondaryAttendees
+          ...processedData
         }
       });
 
