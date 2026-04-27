@@ -3,6 +3,11 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const { replaceTokens } = require('../utils/tokenReplacer');
 
+const isDeadlockError = (err) =>
+  !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
+
+let __cbRunSeq = 0;
+
 const {
   buildSubject,
   buildBookingConfirmationHtml,
@@ -369,162 +374,214 @@ const confirmBooking = (pool) => async (req, res) => {
   } = req.body;
 
   const resolvedBikeHire = bike_hire || bike_hire_type || '';
+  const cbRunId = `cb_${Date.now()}_${++__cbRunSeq}`;
 
-  const connection = await pool.getConnection();
+  // Performs the full booking transaction once. Returns a sentinel result
+  // so the caller can decide what HTTP response to send. Throws on database
+  // errors so the outer retry loop can decide whether to retry.
+  const runTransaction = async () => {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
 
-  try {
-    await connection.beginTransaction();
+      // Step 1: Validate Space Lock
+      const [lockCheck] = await connection.query('SELECT id FROM lock_bookings WHERE event_id = ? AND id = ?', [course_event_id, space_hold_id]);
+      if (lockCheck.length === 0) {
+        await connection.rollback();
+        return { kind: 'lock_missing' };
+      }
 
-    // Step 1: Validate Space Lock
-    const [lockCheck] = await connection.query('SELECT id FROM lock_bookings WHERE event_id = ? AND id = ?', [course_event_id, space_hold_id]);
-    if (lockCheck.length === 0) {
-      await connection.rollback();
-      logRequest(402, 'Course is not locked', { school_course_id });
-      return res.status(400).json({ message: 'Course is not locked', school_course_id });
-    }
+      // Step 2: Check Duplicate Order
+      const [dupCheck1] = await connection.query('SELECT id FROM booking_attendees WHERE rideto_orderid = ?', [rideto_order_number]);
+      const [dupCheck2] = await connection.query('SELECT id FROM booking_attendees_dropdown WHERE rideto_orderid = ?', [rideto_order_number]);
 
-    // Step 2: Check Duplicate Order
-    const [dupCheck1] = await connection.query('SELECT id FROM booking_attendees WHERE rideto_orderid = ?', [rideto_order_number]);
-    const [dupCheck2] = await connection.query('SELECT id FROM booking_attendees_dropdown WHERE rideto_orderid = ?', [rideto_order_number]);
+      if (dupCheck1.length > 0 || dupCheck2.length > 0) {
+        await removeCurLock(connection, space_hold_id);
+        await connection.commit();
+        return { kind: 'duplicate' };
+      }
 
-    if (dupCheck1.length > 0 || dupCheck2.length > 0) {
-      await removeCurLock(connection, space_hold_id);
-      await connection.commit();
-      logRequest(200, 'Course is already confirmed', { school_course_id }, ALREADY_CONFIRMED_LOG);
-      return res.status(200).json({ message: 'Course is confirmed', school_course_id });
-    }
+      // Step 3: Fetch Booking Status
+      const [bookingStatus] = await connection.query('SELECT * FROM booking_status WHERE eventId = ?', [course_event_id]);
+      if (bookingStatus.length === 0) {
+        await connection.rollback();
+        return { kind: 'event_missing' };
+      }
 
-    // Step 3: Fetch Booking Status
-    const [bookingStatus] = await connection.query('SELECT * FROM booking_status WHERE eventId = ?', [course_event_id]);
-    if (bookingStatus.length === 0) {
-      await connection.rollback();
-      logRequest(404, 'Course event not found', { course_event_id });
-      return res.status(400).json({ message: 'Course is not available', school_course_id });
-    }
+      const { courseId, eventId, course_cost } = bookingStatus[0];
 
-    const { courseId, eventId, course_cost } = bookingStatus[0];
+      // Step 4: Create Booking
+      const [bookingResult] = await connection.query(`
+        INSERT INTO bookings (course_id, course_event_id, user_id, booking_made_by_id, booking_made_by, type_of_book, spaces,
+          payment_due, total_fees, vatrate, vat, total_amount, status, lockid, created, modified, admin_payment_received,
+          is_promo_applied, promo_code_id, promo_code_data)
+        VALUES (?, ?, 0, 5, 'admin', 'r', 1, ?, ?, 0, 0, ?, 0, ?, NOW(), NOW(), ?, 0, 0, ?)
+      `, [courseId, eventId, course_cost, course_cost, course_cost, space_hold_id, course_cost, JSON.stringify({original_amount: []})]);
 
-    // Step 4: Create Booking
-    const [bookingResult] = await connection.query(`
-      INSERT INTO bookings (course_id, course_event_id, user_id, booking_made_by_id, booking_made_by, type_of_book, spaces,
-        payment_due, total_fees, vatrate, vat, total_amount, status, lockid, created, modified, admin_payment_received,
-        is_promo_applied, promo_code_id, promo_code_data)
-      VALUES (?, ?, 0, 5, 'admin', 'r', 1, ?, ?, 0, 0, ?, 0, ?, NOW(), NOW(), ?, 0, 0, ?)
-    `, [courseId, eventId, course_cost, course_cost, course_cost, space_hold_id, course_cost, JSON.stringify({original_amount: []})]);
+      const bookingId = bookingResult.insertId;
+      const booking_ref = `1SRC${bookingId}`;
+      const vehicleType = mapBikeHireToVehicleType(resolvedBikeHire);
 
-    const bookingId = bookingResult.insertId;
-    const booking_ref = `1SRC${bookingId}`;
-    const vehicleType = mapBikeHireToVehicleType(resolvedBikeHire);
-    logRequest(200, 'Bike hire mapping resolved', {
-      rideto_order_number,
-      bike_hire,
-      bike_hire_type,
-      resolvedBikeHire,
-      vehicleType
-    });
+      // Step 5 & 6: Save Attendee to dropdown
+      const cleanedPhone = (phone || '').replace(/\s+/g, '');
+      const upperLicence = (driving_licence || '').trim().toUpperCase();
+      const fullName = `${first_name} ${last_name || ''} (rt#${rideto_order_number})`.trim();
+      const dobMysql = parseDobToMysql(date_of_birth);
 
-    // Step 5 & 6: Save Attendee to dropdown
-    const cleanedPhone = (phone || '').replace(/\s+/g, '');
-    const upperLicence = (driving_licence || '').trim().toUpperCase();
-    const fullName = `${first_name} ${last_name || ''} (rt#${rideto_order_number})`.trim();
-    const dobMysql = parseDobToMysql(date_of_birth);
-
-    let contactCardId;
-    if (upperLicence) {
-      const [existingCard] = await connection.query(
-        'SELECT id FROM booking_attendees_dropdown WHERE UPPER(TRIM(license_number)) = ? ORDER BY id ASC LIMIT 1',
-        [upperLicence]
-      );
-      if (existingCard.length > 0) {
-        contactCardId = existingCard[0].id;
-        await connection.query(
-          `UPDATE booking_attendees_dropdown
-           SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, email = ?, license_number = ?, rideto_orderid = ?, date_of_birth = ?, updated = NOW()
-           WHERE id = ?`,
-          [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql, contactCardId]
+      let contactCardId;
+      if (upperLicence) {
+        const [existingCard] = await connection.query(
+          'SELECT id FROM booking_attendees_dropdown WHERE UPPER(TRIM(license_number)) = ? ORDER BY id ASC LIMIT 1',
+          [upperLicence]
         );
+        if (existingCard.length > 0) {
+          contactCardId = existingCard[0].id;
+          await connection.query(
+            `UPDATE booking_attendees_dropdown
+             SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, email = ?, license_number = ?, rideto_orderid = ?, date_of_birth = ?, updated = NOW()
+             WHERE id = ?`,
+            [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql, contactCardId]
+          );
+        } else {
+          const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql]);
+          contactCardId = cardResult.insertId;
+        }
       } else {
-        const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-          [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql]);
+        const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, NOW(), NOW())`,
+          [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', rideto_order_number, dobMysql]);
         contactCardId = cardResult.insertId;
       }
-    } else {
-      const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, NOW(), NOW())`,
-        [bookingId, booking_ref, first_name, fullName, cleanedPhone, email || '', rideto_order_number, dobMysql]);
-      contactCardId = cardResult.insertId;
-    }
 
-    // Step 7: Insert into booking_attendees
-    await connection.query(`
-      INSERT INTO booking_attendees (booking_ref, booking_id, first_name, sur_name, contact1, contact2, contact3, email,
-        vehicle_type, license_type, license_number, theory_number, admin_notes, notes, date_of_birth, \`primary\`, created, previousparent,
-        rideto_orderid, contact_card_id)
-      VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 1, ?, '', '', '', ?, 1, NOW(), '', ?, ?)
-    `, [booking_ref, bookingId, first_name, fullName, cleanedPhone, email || '', vehicleType, upperLicence, dobMysql, rideto_order_number, contactCardId]);
+      // Step 7: Insert into booking_attendees
+      await connection.query(`
+        INSERT INTO booking_attendees (booking_ref, booking_id, first_name, sur_name, contact1, contact2, contact3, email,
+          vehicle_type, license_type, license_number, theory_number, admin_notes, notes, date_of_birth, \`primary\`, created, previousparent,
+          rideto_orderid, contact_card_id)
+        VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 1, ?, '', '', '', ?, 1, NOW(), '', ?, ?)
+      `, [booking_ref, bookingId, first_name, fullName, cleanedPhone, email || '', vehicleType, upperLicence, dobMysql, rideto_order_number, contactCardId]);
 
-    logRequest(200, 'Attendee saved', { booking_ref, bookingId }, AFTER_SAVE_ATTENDEE_LOG);
-
-    // Step 8: Check/Insert User
-    if (email) {
-      const [existingUser] = await connection.query('SELECT id FROM users WHERE email = ?', [email]);
-      let userId;
-      if (existingUser.length === 0) {
-        const [userResult] = await connection.query(`INSERT INTO users (first_name, sur_name, email, contact1, reg_type, status, created) VALUES (?, ?, ?, ?, 'g', 1, NOW())`,
-          [first_name, last_name || '', email, cleanedPhone]);
-        userId = userResult.insertId;
-      } else {
-        userId = existingUser[0].id;
+      // Step 8: Check/Insert User
+      if (email) {
+        const [existingUser] = await connection.query('SELECT id FROM users WHERE email = ?', [email]);
+        let userId;
+        if (existingUser.length === 0) {
+          const [userResult] = await connection.query(`INSERT INTO users (first_name, sur_name, email, contact1, reg_type, status, created) VALUES (?, ?, ?, ?, 'g', 1, NOW())`,
+            [first_name, last_name || '', email, cleanedPhone]);
+          userId = userResult.insertId;
+        } else {
+          userId = existingUser[0].id;
+        }
+        await connection.query('UPDATE bookings SET user_id = ? WHERE id = ?', [userId, bookingId]);
       }
-      await connection.query('UPDATE bookings SET user_id = ? WHERE id = ?', [userId, bookingId]);
+
+      // Step 9: Complete Booking
+      await connection.query('UPDATE bookings SET payment_due = payment_due - admin_payment_received, status = 1 WHERE id = ?', [bookingId]);
+      await connection.query(`INSERT INTO booking_payments (booking_id, payment_type, transation_id, response, amount, created) VALUES (?, 'CASH', '', '', ?, NOW())`, [bookingId, course_cost]);
+
+      // Step 10: Update Course Events
+      const [eventParent] = await connection.query('SELECT parent FROM course_events WHERE id = ?', [course_event_id]);
+      if (eventParent.length > 0) {
+        await connection.query('UPDATE course_events SET bookings_done = bookings_done + 1 WHERE parent = ?', [eventParent[0].parent]);
+      }
+
+      // Step 10.5: Build booking confirmation email payload (still inside txn, read-only joins)
+      const bookingEmailData = await buildBookingEmailData(connection, {
+        bookingId,
+        booking_ref,
+        first_name,
+        last_name: last_name || '',
+        bike_hire: resolvedBikeHire,
+        course_type,
+        location,
+        courseId,
+        course_event_id
+      });
+
+      // Step 11: Remove Lock
+      await removeCurLock(connection, space_hold_id);
+
+      await connection.commit();
+      return {
+        kind: 'committed',
+        bookingId,
+        booking_ref,
+        vehicleType,
+        bookingEmailData,
+        eventParent: eventParent && eventParent[0] ? eventParent[0].parent : null
+      };
+    } catch (error) {
+      try { await connection.rollback(); } catch (_) {}
+      throw error;
+    } finally {
+      connection.release();
     }
+  };
 
-    // Step 9: Complete Booking
-    await connection.query('UPDATE bookings SET payment_due = payment_due - admin_payment_received, status = 1 WHERE id = ?', [bookingId]);
-    await connection.query(`INSERT INTO booking_payments (booking_id, payment_type, transation_id, response, amount, created) VALUES (?, 'CASH', '', '', ?, NOW())`, [bookingId, course_cost]);
-
-    // Step 10: Update Course Events
-    const [eventParent] = await connection.query('SELECT parent FROM course_events WHERE id = ?', [course_event_id]);
-    if (eventParent.length > 0) {
-      await connection.query('UPDATE course_events SET bookings_done = bookings_done + 1 WHERE parent = ?', [eventParent[0].parent]);
-      logRequest(200, 'Bookings done incremented', { parent: eventParent[0].parent }, ADD_BOOKINGS_DONE_LOG);
+  // Retry the whole transaction up to 3 times on MySQL deadlocks
+  // (errno 1213 / sqlState 40001). This is the canonical handling: the
+  // deadlock victim is rolled back to a clean state by InnoDB, so it is safe
+  // (and required) to retry the entire unit of work.
+  const MAX_ATTEMPTS = 3;
+  const cbT0 = Date.now();
+  let result = null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      result = await runTransaction();
+      if (attempt > 1) {
+        console.warn(`[confirmBooking] runId=${cbRunId} succeeded after deadlock retry attempt=${attempt} course_event_id=${course_event_id}`);
+      }
+      break;
+    } catch (error) {
+      lastError = error;
+      if (isDeadlockError(error) && attempt < MAX_ATTEMPTS) {
+        console.warn(`[confirmBooking] runId=${cbRunId} attempt=${attempt} DEADLOCK sqlState=${error.sqlState} errno=${error.errno} course_event_id=${course_event_id}; retrying...`);
+        continue;
+      }
+      console.error(`[confirmBooking] runId=${cbRunId} attempt=${attempt} ms=${Date.now() - cbT0} ERROR sqlState=${error && error.sqlState} errno=${error && error.errno} course_event_id=${course_event_id} msg=${error && error.sqlMessage}`);
+      logRequest(500, 'Database error', { error: error.message, runId: cbRunId, attempt });
+      console.error('Error confirming booking:', error);
+      return res.status(400).json({ message: 'Course is not available', school_course_id });
     }
-
-    // Step 10.5: Build booking confirmation email payload
-    const bookingEmailData = await buildBookingEmailData(connection, {
-      bookingId,
-      booking_ref,
-      first_name,
-      last_name: last_name || '',
-      bike_hire: resolvedBikeHire,
-      course_type,
-      location,
-      courseId,
-      course_event_id
-    });
-
-    // Step 11: Remove Lock
-    await removeCurLock(connection, space_hold_id);
-
-    await connection.commit();
-
-    // Step 12: Send Email (and persist email_logs for audit; same table shape as other booking mail)
-    await sendBookingEmail(bookingEmailData, pool, {
-      booking_ref,
-      ip: req.clientIp || '',
-      attendeeEmail: email || ''
-    });
-
-    logRequest(200, 'Course is confirmed', { school_course_id, booking_ref });
-    return res.status(200).json({ message: 'Course is confirmed', school_course_id, booking_ref });
-
-  } catch (error) {
-    await connection.rollback();
-    logRequest(500, 'Database error', { error: error.message });
-    console.error('Error confirming booking:', error);
-    return res.status(400).json({ message: 'Course is not available', school_course_id });
-  } finally {
-    connection.release();
   }
+
+  if (!result) {
+    // Defensive: shouldn't happen, but if every attempt threw a deadlock we already returned above.
+    return res.status(400).json({ message: 'Course is not available', school_course_id });
+  }
+
+  // Branch on transactional outcome
+  if (result.kind === 'lock_missing') {
+    logRequest(402, 'Course is not locked', { school_course_id });
+    return res.status(400).json({ message: 'Course is not locked', school_course_id });
+  }
+  if (result.kind === 'duplicate') {
+    logRequest(200, 'Course is already confirmed', { school_course_id }, ALREADY_CONFIRMED_LOG);
+    return res.status(200).json({ message: 'Course is confirmed', school_course_id });
+  }
+  if (result.kind === 'event_missing') {
+    logRequest(404, 'Course event not found', { course_event_id });
+    return res.status(400).json({ message: 'Course is not available', school_course_id });
+  }
+
+  // result.kind === 'committed'
+  const { bookingId, booking_ref, vehicleType, bookingEmailData, eventParent } = result;
+  logRequest(200, 'Bike hire mapping resolved', { rideto_order_number, bike_hire, bike_hire_type, resolvedBikeHire, vehicleType });
+  logRequest(200, 'Attendee saved', { booking_ref, bookingId }, AFTER_SAVE_ATTENDEE_LOG);
+  if (eventParent) {
+    logRequest(200, 'Bookings done incremented', { parent: eventParent }, ADD_BOOKINGS_DONE_LOG);
+  }
+
+  // Step 12: Send Email (and persist email_logs for audit; same table shape as other booking mail)
+  await sendBookingEmail(bookingEmailData, pool, {
+    booking_ref,
+    ip: req.clientIp || '',
+    attendeeEmail: email || ''
+  });
+
+  logRequest(200, 'Course is confirmed', { school_course_id, booking_ref });
+  return res.status(200).json({ message: 'Course is confirmed', school_course_id, booking_ref });
 };
 
 module.exports = confirmBooking;

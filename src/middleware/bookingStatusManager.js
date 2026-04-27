@@ -1,5 +1,13 @@
 // src/middleware/bookingStatusManager.js
 
+// Module-level single-flight guard so concurrent ticks/callers can't pile
+// up two `updateExpiredBookings` transactions on the same rows.
+let __cleanupRunning = false;
+let __cleanupRunSeq = 0;
+
+const isDeadlockError = (err) =>
+  !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
+
 class BookingStatusManager {
 
   /**
@@ -83,36 +91,38 @@ class BookingStatusManager {
   }
 
   /**
-   * Middleware to automatically update booking statuses based on events
+   * Pass-through middleware. The previous implementation ran
+   * `updateExpiredBookings` synchronously on every `/bookings` and `/payment`
+   * request, which produced concurrent multi-row UPDATE transactions on
+   * `bookings`/`course_events` that deadlocked with the third-party
+   * `confirmBooking` transaction (sqlState 40001).
+   *
+   * The same cleanup is already invoked by the 60s interval (`startCleanupJob`)
+   * which is now single-flighted and deadlock-retried, so per-request fires
+   * are no longer needed.
    */
-  static createStatusUpdateMiddleware(pool) {
-    return async (req, res, next) => {
-      try {
-        // Run cleanup more frequently for timeout bookings
-        const shouldRunStatusUpdate = req.path.includes('/bookings') || req.path.includes('/payment');
-
-        if (shouldRunStatusUpdate) {
-          await this.updateExpiredBookings(pool);
-        }
-
-        next();
-      } catch (error) {
-        console.error('Status update middleware error:', error);
-        // Don't fail the request if status update fails
-        next();
-      }
-    };
+  static createStatusUpdateMiddleware(/* pool */) {
+    return (req, res, next) => next();
   }
 
   /**
-   * Start automatic cleanup job that runs every minute
+   * Start automatic cleanup job that runs every minute.
+   * Wraps `updateExpiredBookings` in a single-flight guard so a slow run
+   * cannot overlap with the next interval tick.
    */
   static startCleanupJob(pool) {
     setInterval(async () => {
+      if (__cleanupRunning) {
+        // Previous tick still in progress; skip.
+        return;
+      }
+      __cleanupRunning = true;
       try {
-        await this.updateExpiredBookings(pool);
+        await this.updateExpiredBookings(pool, 'setInterval:60s');
       } catch (error) {
-        console.error('Cleanup job error:', error);
+        console.error('[BookingStatus] cleanup job error:', error && error.sqlMessage || error);
+      } finally {
+        __cleanupRunning = false;
       }
     }, 60000); // Run every minute
 
@@ -120,80 +130,103 @@ class BookingStatusManager {
   }
 
   /**
-   * Update expired bookings to appropriate statuses
+   * Update expired bookings to appropriate statuses.
+   *
+   * Resilience: the four UPDATE statements run inside a single transaction
+   * that can deadlock against `confirmBooking` / booking-flow transactions.
+   * We retry the whole transaction up to 3 times on `ER_LOCK_DEADLOCK`
+   * (errno 1213 / sqlState 40001) which is the canonical handling for
+   * MySQL deadlock victims.
    */
-  static async updateExpiredBookings(pool) {
-    const connection = await pool.getConnection();
+  static async updateExpiredBookings(pool, caller = 'unknown') {
+    const MAX_ATTEMPTS = 3;
+    const runId = `run_${Date.now()}_${++__cleanupRunSeq}`;
+    let lastError = null;
 
-    try {
-      await connection.beginTransaction();
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const connection = await pool.getConnection();
+      const t0 = Date.now();
+      try {
+        await connection.beginTransaction();
 
-      // Cancel pending payment bookings older than 10 minutes
-      const [timeoutBookings] = await connection.query(`
-        UPDATE bookings b
-        SET b.status = ?, b.modified = NOW()
-        WHERE b.status = ?
-          AND b.created <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-      `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
-
-      // Release spaces from timeout cancelled bookings
-      if (timeoutBookings.affectedRows > 0) {
-        await connection.query(`
-          UPDATE course_events ce
-          JOIN bookings b ON ce.id = b.course_event_id
-          SET ce.current_locks = GREATEST(0, ce.current_locks - b.spaces)
+        // Cancel pending payment bookings older than 10 minutes
+        const [timeoutBookings] = await connection.query(`
+          UPDATE bookings b
+          SET b.status = ?, b.modified = NOW()
           WHERE b.status = ?
-            AND b.modified >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
-        `, [this.STATUS.CANCELLED]);
+            AND b.created <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+        `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
+
+        // Release spaces from timeout cancelled bookings
+        if (timeoutBookings.affectedRows > 0) {
+          await connection.query(`
+            UPDATE course_events ce
+            JOIN bookings b ON ce.id = b.course_event_id
+            SET ce.current_locks = GREATEST(0, ce.current_locks - b.spaces)
+            WHERE b.status = ?
+              AND b.modified >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
+          `, [this.STATUS.CANCELLED]);
+        }
+
+        // Mark confirmed bookings as completed only when ALL real event dates have passed.
+        // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
+        // TBC dates the subquery returns NULL, which evaluates to false and prevents premature completion.
+        const [completedBookings] = await connection.query(`
+          UPDATE bookings b
+          JOIN course_events ce ON b.course_event_id = ce.id
+          SET b.status = ?, b.modified = NOW()
+          WHERE b.status = ?
+            AND (
+              SELECT MAX(ced.event_date)
+              FROM course_event_dates ced
+              WHERE ced.course_event_id = ce.id
+                AND ced.event_date > '1900-01-01'
+                AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+            ) < CURDATE()
+        `, [this.STATUS.COMPLETED, this.STATUS.CONFIRMED]);
+
+        // Cancel pending payment bookings when the first real event date is tomorrow or sooner.
+        // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
+        // TBC dates the subquery returns NULL, which evaluates to false and prevents erroneous cancellation.
+        const [cancelledBookings] = await connection.query(`
+          UPDATE bookings b
+          JOIN course_events ce ON b.course_event_id = ce.id
+          SET b.status = ?,
+              b.modified = NOW()
+          WHERE b.status = ?
+            AND (
+              SELECT MIN(ced.event_date)
+              FROM course_event_dates ced
+              WHERE ced.course_event_id = ce.id
+                AND ced.event_date > '1900-01-01'
+                AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+            ) <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+        `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
+
+        await connection.commit();
+
+        if (timeoutBookings.affectedRows > 0 || completedBookings.affectedRows > 0 || cancelledBookings.affectedRows > 0) {
+          console.log(`[BookingStatus] runId=${runId} caller=${caller} attempt=${attempt} ms=${Date.now() - t0} timeout=${timeoutBookings.affectedRows} completed=${completedBookings.affectedRows} cancelled=${cancelledBookings.affectedRows}`);
+        }
+        if (attempt > 1) {
+          console.warn(`[BookingStatus] runId=${runId} succeeded after deadlock retry attempt=${attempt}`);
+        }
+        return; // success
+      } catch (error) {
+        try { await connection.rollback(); } catch (_) {}
+        lastError = error;
+        const ms = Date.now() - t0;
+        if (isDeadlockError(error) && attempt < MAX_ATTEMPTS) {
+          console.warn(`[BookingStatus] runId=${runId} caller=${caller} attempt=${attempt} ms=${ms} DEADLOCK (sqlState=${error.sqlState} errno=${error.errno}); retrying...`);
+          continue; // retry
+        }
+        console.error(`[BookingStatus] runId=${runId} caller=${caller} attempt=${attempt} ms=${ms} ERROR sqlState=${error && error.sqlState} errno=${error && error.errno} msg=${error && error.sqlMessage}`);
+        throw error;
+      } finally {
+        connection.release();
       }
-
-      // Mark confirmed bookings as completed only when ALL real event dates have passed.
-      // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
-      // TBC dates the subquery returns NULL, which evaluates to false and prevents premature completion.
-      const [completedBookings] = await connection.query(`
-        UPDATE bookings b
-        JOIN course_events ce ON b.course_event_id = ce.id
-        SET b.status = ?, b.modified = NOW()
-        WHERE b.status = ?
-          AND (
-            SELECT MAX(ced.event_date)
-            FROM course_event_dates ced
-            WHERE ced.course_event_id = ce.id
-              AND ced.event_date > '1900-01-01'
-              AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
-          ) < CURDATE()
-      `, [this.STATUS.COMPLETED, this.STATUS.CONFIRMED]);
-
-      // Cancel pending payment bookings when the first real event date is tomorrow or sooner.
-      // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
-      // TBC dates the subquery returns NULL, which evaluates to false and prevents erroneous cancellation.
-      const [cancelledBookings] = await connection.query(`
-        UPDATE bookings b
-        JOIN course_events ce ON b.course_event_id = ce.id
-        SET b.status = ?,
-            b.modified = NOW()
-        WHERE b.status = ?
-          AND (
-            SELECT MIN(ced.event_date)
-            FROM course_event_dates ced
-            WHERE ced.course_event_id = ce.id
-              AND ced.event_date > '1900-01-01'
-              AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
-          ) <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
-      `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
-
-      await connection.commit();
-
-      if (timeoutBookings.affectedRows > 0 || completedBookings.affectedRows > 0 || cancelledBookings.affectedRows > 0) {
-        console.log(`Status update: ${timeoutBookings.affectedRows} timeout cancelled, ${completedBookings.affectedRows} completed, ${cancelledBookings.affectedRows} event cancelled`);
-      }
-
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
     }
+    if (lastError) throw lastError;
   }
 
   /**
