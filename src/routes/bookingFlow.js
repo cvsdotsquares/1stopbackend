@@ -42,7 +42,7 @@ module.exports = (pool) => {
    * @desc Create booking lock
    * @access Public
    */
-  router.post('/lock', bookingController.createBookingLock.bind(bookingController));
+  // router.post('/lock', bookingController.createBookingLock.bind(bookingController));
 
   /**
    * @route GET /api/booking/settings

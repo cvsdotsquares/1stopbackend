@@ -33,29 +33,29 @@ class ExpiredLockCleanupCron {
           locked_by
         FROM lock_bookings
         WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-          AND locked_by IN ('ride2', 'terminal')
+          AND locked_by = 'ride2' OR locked_by = 'terminal'
         FOR UPDATE`,
         [apiExpiryMinutes]
       );
 
       let locksToProcess = rideTerminalLocks;
-      if (!locksToProcess || locksToProcess.length === 0) {
-        const [onlineLocks] = await connection.query(
-          `SELECT
-            id,
-            parent,
-            COALESCE(space_required, 1) AS space_required,
-            COALESCE(manual_lock, 0) AS manual_lock,
-            COALESCE(automatic_lock, 0) AS automatic_lock,
-            locked_by
-          FROM lock_bookings
-          WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-            AND locked_by = 'online'
-          FOR UPDATE`,
-          [onlineExpiryMinutes]
-        );
-        locksToProcess = onlineLocks;
-      }
+      // if (!locksToProcess || locksToProcess.length === 0) {
+      //   const [onlineLocks] = await connection.query(
+      //     `SELECT
+      //       id,
+      //       parent,
+      //       COALESCE(space_required, 1) AS space_required,
+      //       COALESCE(manual_lock, 0) AS manual_lock,
+      //       COALESCE(automatic_lock, 0) AS automatic_lock,
+      //       locked_by
+      //     FROM lock_bookings
+      //     WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      //       AND locked_by = 'online'
+      //     FOR UPDATE`,
+      //     [onlineExpiryMinutes]
+      //   );
+      //   locksToProcess = onlineLocks;
+      // }
 
       if (!locksToProcess || locksToProcess.length === 0) {
         await connection.commit();
@@ -107,9 +107,6 @@ class ExpiredLockCleanupCron {
       connection.release();
     }
     // create a log file in the logs folder
-    const logFilePath = path.join(__dirname, 'logs', 'cleanupExpiredLocks.log');
-    const logContent = `[LOCK CLEANUP CRON] Deleted ${deletedCount} expired lock(s); updated course_events rows: ${eventRowsTouched} (manual/automatic; current_locks per sibling)`;
-    fs.appendFileSync(logFilePath, logContent);
   }
 
   start() {

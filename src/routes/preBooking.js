@@ -72,17 +72,17 @@ function createPreBookingRoutes(pool) {
 
   // Public routes
   router.post('/check-ip-block', ipBlockValidation, handleValidationErrors, preBookingController.checkIpBlock.bind(preBookingController));
-  router.get('/course-availability/:eventId', preBookingController.getCourseAvailability.bind(preBookingController));
-  router.post('/lock-spaces', lockSpacesValidation, handleValidationErrors, preBookingController.lockSpaces.bind(preBookingController));
-  router.post('/create-prebooking', preBookingValidation, handleValidationErrors, preBookingController.createPreBooking.bind(preBookingController));
+  // router.get('/course-availability/:eventId', preBookingController.getCourseAvailability.bind(preBookingController));
+  // router.post('/lock-spaces', lockSpacesValidation, handleValidationErrors, preBookingController.lockSpaces.bind(preBookingController));
+  // router.post('/create-prebooking', preBookingValidation, handleValidationErrors, preBookingController.createPreBooking.bind(preBookingController));
   router.post('/log-ip-activity', logActivityValidation, handleValidationErrors, preBookingController.logIpActivity.bind(preBookingController));
-  router.post('/session/update', sessionUpdateValidation, handleValidationErrors, optionalAuth, preBookingController.updateSession.bind(preBookingController));
-  router.post('/external/hold-space', externalHoldValidation, handleValidationErrors, preBookingController.holdExternalSpace.bind(preBookingController));
+  // router.post('/session/update', sessionUpdateValidation, handleValidationErrors, optionalAuth, preBookingController.updateSession.bind(preBookingController));
+  // router.post('/external/hold-space', externalHoldValidation, handleValidationErrors, preBookingController.holdExternalSpace.bind(preBookingController));
 
   // Admin routes
-  router.post('/cleanup-locks', authenticateToken, preBookingController.cleanupExpiredLocks.bind(preBookingController));
-  router.post('/cleanup-prebookings', cleanupValidation, handleValidationErrors, preBookingController.cleanupExpiredPreBookings.bind(preBookingController));
-  router.post('/payment-result', preBookingController.handlePaymentResult.bind(preBookingController));
+  // router.post('/cleanup-locks', authenticateToken, preBookingController.cleanupExpiredLocks.bind(preBookingController));
+  // router.post('/cleanup-prebookings', cleanupValidation, handleValidationErrors, preBookingController.cleanupExpiredPreBookings.bind(preBookingController));
+  // router.post('/payment-result', preBookingController.handlePaymentResult.bind(preBookingController));
 
   return router;
 }
