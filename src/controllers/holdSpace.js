@@ -144,20 +144,20 @@ const lockBooking = async (pool, eventId, spaceRequired) => {
 
     const parentEvent = parentRows[0];
 
-    // const [insertResult] = await conn.query(
-    //   `INSERT INTO lock_bookings
-    //     SET event_id = ?,
-    //         parent = ?,
-    //         space_required = ?,
-    //         automatic_lock = 1,
-    //         manual_lock = 0,
-    //         locked_by = 'ride2',
-    //         created = NOW(),
-    //         modified = NOW(),
-    //         user_id = -1,
-    //         payment_page_stauts = 1`,
-    //   [eventId, parentEvent.parent, spaceRequired]
-    // );
+    const [insertResult] = await conn.query(
+      `INSERT INTO lock_bookings
+        SET event_id = ?,
+            parent = ?,
+            space_required = ?,
+            automatic_lock = 1,
+            manual_lock = 0,
+            locked_by = 'ride2',
+            created = NOW(),
+            modified = NOW(),
+            user_id = -1,
+            payment_page_stauts = 1`,
+      [eventId, parentEvent.parent, spaceRequired]
+    );
 
     await conn.query(
       'UPDATE course_events SET current_locks = current_locks + 1 WHERE id = ?',
@@ -167,7 +167,7 @@ const lockBooking = async (pool, eventId, spaceRequired) => {
     await conn.commit();
 
     return {
-      // id: insertResult.insertId,
+      id: insertResult.insertId,
       parent: parentEvent.parent,
     };
   } catch (err) {
