@@ -23,13 +23,13 @@ function createAuthRoutes(pool) {
     body('email')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid email address'),
 
     body('confirmEmail')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid confirmation email address')
       .custom((value, { req }) => {
         if (value !== req.body.email) {
@@ -110,7 +110,7 @@ function createAuthRoutes(pool) {
     body('email')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid email address'),
 
     body('password')
@@ -190,7 +190,7 @@ function createAuthRoutes(pool) {
     body('email')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid email address')
   ];
 
@@ -198,7 +198,7 @@ function createAuthRoutes(pool) {
     body('email')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid email address'),
     body('purpose')
       .optional()
@@ -210,7 +210,7 @@ function createAuthRoutes(pool) {
     body('email')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid email address'),
     body('otp')
       .isLength({ min: 6, max: 6 })
@@ -222,7 +222,7 @@ function createAuthRoutes(pool) {
     body('email')
       .trim()
       .isEmail()
-      .normalizeEmail()
+      .normalizeEmail({ gmail_remove_dots: false })
       .withMessage('Please provide a valid email address'),
     body('password')
       .isLength({ min: 8 })

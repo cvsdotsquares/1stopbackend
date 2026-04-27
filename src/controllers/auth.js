@@ -28,8 +28,8 @@ class AuthController {
   }
 
   /**
-   * Most recent booking's first attendee contact card (for booking-form prefill
-   * when users.license_number is still empty on legacy accounts).
+   * Most recent booking's first attendee contact card (prefill is sourced only
+   * from booking_attendees_dropdown, not the users table).
    */
   async _getBookingPrefillFallback(userId) {
     const [rows] = await this.pool.query(
@@ -38,8 +38,11 @@ class AuthController {
         bad.sur_name,
         bad.date_of_birth,
         bad.email,
+        bad.contact1,
+        bad.contact2,
         bad.license_type,
-        bad.license_number
+        bad.license_number,
+        bad.theory_number
       FROM bookings b
       JOIN booking_attendees ba
         ON ba.booking_id = b.id
@@ -58,30 +61,11 @@ class AuthController {
 
   /**
    * GET /auth/booking-prefill — prefill for booking attendee[0] only (does not alter /profile).
-   * Returns has_fallback: true with six fields from booking_attendees_dropdown when
-   * the logged-in user has no license_number on the users row and a past booking row exists.
+   * All prefill data comes from booking_attendees_dropdown (last booking’s first attendee card).
    */
   async bookingPrefill(req, res) {
     try {
       const userId = req.user.id;
-
-      const [users] = await this.pool.query(
-        'SELECT license_number FROM users WHERE id = ?',
-        [userId]
-      );
-
-      if (users.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-
-      const rawLic = users[0].license_number;
-      const hasLicense = rawLic != null && String(rawLic).trim() !== '';
-      if (hasLicense) {
-        return res.json({ success: true, data: { has_fallback: false } });
-      }
 
       const row = await this._getBookingPrefillFallback(userId);
       if (!row) {
@@ -108,9 +92,12 @@ class AuthController {
             first_name: row.first_name,
             sur_name: row.sur_name,
             email: row.email,
+            contact1: row.contact1 != null ? String(row.contact1) : null,
+            contact2: row.contact2 != null ? String(row.contact2) : null,
             date_of_birth: dateOfBirth,
             license_type: row.license_type,
-            license_number: row.license_number
+            license_number: row.license_number,
+            theory_number: row.theory_number != null ? String(row.theory_number) : null
           }
         }
       });
@@ -386,11 +373,9 @@ class AuthController {
   async checkEmail(req, res) {
     try {
       const { email } = req.body;
-
       if (!email) {
         return res.status(400).json({ success: false, message: 'Email is required' });
       }
-
       const [users] = await this.pool.query(
         'SELECT id, email, password_type, is_email_verified, status FROM users WHERE email = ?',
         [email]

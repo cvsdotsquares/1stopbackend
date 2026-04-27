@@ -106,6 +106,10 @@ class ExpiredLockCleanupCron {
     } finally {
       connection.release();
     }
+    // create a log file in the logs folder
+    const logFilePath = path.join(__dirname, 'logs', 'cleanupExpiredLocks.log');
+    const logContent = `[LOCK CLEANUP CRON] Deleted ${deletedCount} expired lock(s); updated course_events rows: ${eventRowsTouched} (manual/automatic; current_locks per sibling)`;
+    fs.appendFileSync(logFilePath, logContent);
   }
 
   start() {

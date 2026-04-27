@@ -28,7 +28,7 @@ class DashboardController {
       `, [userId, req.user.email]);
 
       const bookingsWithSecondary = await Promise.all((bookings || []).map(async (booking) => {
-        const primaryUserId = booking.booking_made_by_id || booking.user_id;
+        const primaryUserId = booking.user_id;
 
         const [secondaryRows] = await this.pool.query(`
           SELECT
@@ -114,7 +114,7 @@ class DashboardController {
       `, [userId, req.user.email]);
 
       const upcomingWithSecondary = await Promise.all((upcomingCourses || []).map(async (course) => {
-        const primaryUserId = course.booking_made_by_id || course.user_id;
+        const primaryUserId = course.user_id;
 
         const [secondaryRows] = await this.pool.query(`
           SELECT

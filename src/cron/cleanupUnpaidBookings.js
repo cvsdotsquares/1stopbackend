@@ -79,6 +79,10 @@ class BookingCleanupCron {
     } finally {
       connection.release();
     }
+    // create a log file in the logs folder
+    const logFilePath = path.join(__dirname, 'logs', 'cleanupUnpaidBookings.log');
+    const logContent = `[CLEANUP CRON] Cleanup completed`;
+    fs.appendFileSync(logFilePath, logContent);
   }
 
   start() {
