@@ -91,6 +91,12 @@ const removeSpace = (pool) => async (req, res) => {
   const courseEventId = req.body?.course_event_id;
   const lockId = req.body?.lock_id ?? req.body?.space_hold_id;
 
+  // #region agent log
+  // Diagnostic: discriminates H6 (third-party self-cancel) from H7/H8.
+  // If we see this line for the missing booking's lock_id, H6 is confirmed.
+  console.warn(`[REMOVE SPACE DEBUG] called course_event_id=${courseEventId} lock_id=${lockId} ip=${req.clientIp || ''}`);
+  // #endregion
+
   if (!courseEventId) {
     return res.status(404).json({ message: ['Course event id is required.'] });
   }
@@ -105,6 +111,10 @@ const removeSpace = (pool) => async (req, res) => {
 
   try {
     const status = await removeSpaceInDb(pool, courseEventId, lockId);
+
+    // #region agent log
+    console.warn(`[REMOVE SPACE DEBUG] outcome status=${status} lock_id=${lockId}`);
+    // #endregion
 
     if (status === 'success') {
       logMessage('success::200 -- Reserved sapce is removed');

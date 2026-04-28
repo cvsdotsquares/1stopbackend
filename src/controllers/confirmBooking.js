@@ -387,13 +387,30 @@ const confirmBooking = (pool) => async (req, res) => {
       // Step 1: Validate Space Lock
       const [lockCheck] = await connection.query('SELECT id FROM lock_bookings WHERE event_id = ? AND id = ?', [course_event_id, space_hold_id]);
       if (lockCheck.length === 0) {
-        await connection.rollback();
         // #region agent log
         // Diagnostic: a missed confirm. Capture the keys the third-party
         // sent so we can correlate against [HOLD SPACE DEBUG] /
-        // [LOCK CLEANUP DEBUG] lines in PM2.
-        console.warn(`[CONFIRM LOCK_MISSING DEBUG] space_hold_id=${space_hold_id} course_event_id=${course_event_id} rideto_order_number=${rideto_order_number} school_course_id=${school_course_id}`);
+        // [LOCK CLEANUP DEBUG] / [REMOVE SPACE DEBUG] lines in PM2.
+        // ALSO query by id-only so we can tell whether the row was
+        // DELETEd (gone) or merely UPDATEd to a different event_id (H8).
+        try {
+          const [lockById] = await connection.query(
+            'SELECT id, event_id, parent, locked_by, created, modified, delete_process FROM lock_bookings WHERE id = ?',
+            [space_hold_id]
+          );
+          if (!lockById || lockById.length === 0) {
+            console.warn(`[CONFIRM LOCK_MISSING DEBUG] state=row_DELETED space_hold_id=${space_hold_id} course_event_id=${course_event_id} rideto_order_number=${rideto_order_number} school_course_id=${school_course_id}`);
+          } else {
+            const r = lockById[0];
+            const cIso = r.created instanceof Date ? r.created.toISOString() : String(r.created);
+            const mIso = r.modified instanceof Date ? r.modified.toISOString() : String(r.modified);
+            console.warn(`[CONFIRM LOCK_MISSING DEBUG] state=row_PRESENT_event_mismatch space_hold_id=${space_hold_id} expected_event_id=${course_event_id} actual_event_id=${r.event_id} parent=${r.parent} locked_by=${r.locked_by} created=${cIso} modified=${mIso} delete_process=${r.delete_process} rideto_order_number=${rideto_order_number}`);
+          }
+        } catch (diagErr) {
+          console.warn(`[CONFIRM LOCK_MISSING DEBUG] diag_select_error=${diagErr && diagErr.message} space_hold_id=${space_hold_id} course_event_id=${course_event_id} rideto_order_number=${rideto_order_number}`);
+        }
         // #endregion
+        await connection.rollback();
         return { kind: 'lock_missing' };
       }
 
