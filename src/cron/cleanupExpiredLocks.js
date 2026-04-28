@@ -2,8 +2,7 @@ const cron = require('node-cron');
 
 /**
  * Mirrors 1stop-php/admin/cron/automatic_remove_space.php
- * - Pass 1: ride2/terminal locks expired by LOCK_EXPIRE_API_MINUTES (default 20)
- * - Pass 2: only if pass 1 is empty: online locks expired by LOCK_EXPIRE_ONLINE_MINUTES (default 10)
+ * - Pass 1: ride2 locks expired by LOCK_EXPIRE_API_MINUTES (default 20)
  * - Per lock: delete, then for each course_event with same parent update manual_lock_done, automatic_lock_done, current_locks
  */
 class ExpiredLockCleanupCron {
@@ -14,11 +13,10 @@ class ExpiredLockCleanupCron {
   async cleanupExpiredLocks() {
     const connection = await this.pool.getConnection();
     const apiExpiryMinutes = Number(process.env.LOCK_EXPIRE_API_MINUTES || 20);
-    const onlineExpiryMinutes = Number(process.env.LOCK_EXPIRE_ONLINE_MINUTES || 10);
 
     try {
       console.log(
-        `[LOCK CLEANUP CRON] Starting cleanup: API/terminal expiry = ${apiExpiryMinutes} min, online (pass 2) = ${onlineExpiryMinutes} min...`
+        `[LOCK CLEANUP CRON] Starting cleanup: API expiry = ${apiExpiryMinutes} min...`
       );
 
       await connection.beginTransaction();
@@ -39,27 +37,10 @@ class ExpiredLockCleanupCron {
       );
 
       let locksToProcess = rideTerminalLocks;
-      // if (!locksToProcess || locksToProcess.length === 0) {
-      //   const [onlineLocks] = await connection.query(
-      //     `SELECT
-      //       id,
-      //       parent,
-      //       COALESCE(space_required, 1) AS space_required,
-      //       COALESCE(manual_lock, 0) AS manual_lock,
-      //       COALESCE(automatic_lock, 0) AS automatic_lock,
-      //       locked_by
-      //     FROM lock_bookings
-      //     WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-      //       AND locked_by = 'online'
-      //     FOR UPDATE`,
-      //     [onlineExpiryMinutes]
-      //   );
-      //   locksToProcess = onlineLocks;
-      // }
 
       if (!locksToProcess || locksToProcess.length === 0) {
         await connection.commit();
-        console.log('[LOCK CLEANUP CRON] No expired locks found (ride2/terminal or online pass)');
+        console.log('[LOCK CLEANUP CRON] No expired locks found (ride2)');
         return;
       }
 
