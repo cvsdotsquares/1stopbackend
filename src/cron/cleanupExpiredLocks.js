@@ -33,10 +33,7 @@ class ExpiredLockCleanupCron {
             locked_by
         FROM lock_bookings
         WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-          AND (
-              locked_by = 'ride2'
-              OR locked_by = 'terminal'
-          )
+          AND locked_by = 'ride2'
         FOR UPDATE`,
         [apiExpiryMinutes]
       );
