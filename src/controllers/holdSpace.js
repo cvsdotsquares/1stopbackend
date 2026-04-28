@@ -232,13 +232,6 @@ const holdSpace = (pool) => async (req, res) => {
       });
     }
 
-    // #region agent log
-    // Diagnostic: every successful third-party hold creates a `ride2` lock.
-    // Logging id/parent/eventId here lets us correlate a missed confirm with
-    // the exact lock row that was supposed to back it.
-    console.warn(`[HOLD SPACE DEBUG] created lock_id=${lock.id} parent=${lock.parent} event_id=${holdRow.eventId} school_course_id=${params.school_course_id} locked_by=ride2`);
-    // #endregion
-
     return res.status(200).json({
       message: 'Course is reserved.',
       space_hold_id: lock.id,
