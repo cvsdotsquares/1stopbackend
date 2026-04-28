@@ -388,6 +388,12 @@ const confirmBooking = (pool) => async (req, res) => {
       const [lockCheck] = await connection.query('SELECT id FROM lock_bookings WHERE event_id = ? AND id = ?', [course_event_id, space_hold_id]);
       if (lockCheck.length === 0) {
         await connection.rollback();
+        // #region agent log
+        // Diagnostic: a missed confirm. Capture the keys the third-party
+        // sent so we can correlate against [HOLD SPACE DEBUG] /
+        // [LOCK CLEANUP DEBUG] lines in PM2.
+        console.warn(`[CONFIRM LOCK_MISSING DEBUG] space_hold_id=${space_hold_id} course_event_id=${course_event_id} rideto_order_number=${rideto_order_number} school_course_id=${school_course_id}`);
+        // #endregion
         return { kind: 'lock_missing' };
       }
 
