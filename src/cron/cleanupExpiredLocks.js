@@ -25,33 +25,21 @@ class ExpiredLockCleanupCron {
 
       const [rideTerminalLocks] = await connection.query(
         `SELECT
-          id,
-          event_id,
-          parent,
-          COALESCE(space_required, 1) AS space_required,
-          COALESCE(manual_lock, 0) AS manual_lock,
-          COALESCE(automatic_lock, 0) AS automatic_lock,
-          locked_by,
-          created,
-          TIMESTAMPDIFF(MINUTE, created, NOW()) AS age_minutes
+            id,
+            parent,
+            COALESCE(space_required, 1) AS space_required,
+            COALESCE(manual_lock, 0) AS manual_lock,
+            COALESCE(automatic_lock, 0) AS automatic_lock,
+            locked_by
         FROM lock_bookings
         WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-          AND locked_by = 'ride2' OR locked_by = 'terminal'
+          AND (
+              locked_by = 'ride2'
+              OR locked_by = 'terminal'
+          )
         FOR UPDATE`,
         [apiExpiryMinutes]
       );
-
-      // #region agent log
-      // Diagnostic: log each row matched by the cron's WHERE clause so we can
-      // tell whether the SQL operator-precedence is catching fresh terminal
-      // locks (`AND ... OR locked_by='terminal'` evaluates as
-      // `(... AND locked_by='ride2') OR locked_by='terminal'`).
-      console.warn(`[LOCK CLEANUP DEBUG] threshold_minutes=${apiExpiryMinutes} matched_count=${rideTerminalLocks.length}`);
-      for (const __dbgLock of rideTerminalLocks) {
-        const __created = __dbgLock.created instanceof Date ? __dbgLock.created.toISOString() : String(__dbgLock.created);
-        console.warn(`[LOCK CLEANUP DEBUG] candidate id=${__dbgLock.id} event_id=${__dbgLock.event_id} parent=${__dbgLock.parent} locked_by=${__dbgLock.locked_by} created=${__created} age_minutes=${__dbgLock.age_minutes}`);
-      }
-      // #endregion
 
       let locksToProcess = rideTerminalLocks;
       // if (!locksToProcess || locksToProcess.length === 0) {
