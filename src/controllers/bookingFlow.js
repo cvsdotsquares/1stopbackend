@@ -125,7 +125,6 @@ class BookingFlowController {
           AND ce.location_id = ?
           AND c.status = '1'
           AND ce.status = '1'
-          AND ce.booking_limit > ce.bookings_done
           AND ced.course_event_id IN (
             SELECT DISTINCT course_event_id
             FROM course_event_dates
