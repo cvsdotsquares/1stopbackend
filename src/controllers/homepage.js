@@ -196,7 +196,7 @@ class HomepageController {
       // Get training slider data
       const [trainingSlider] = await this.pool.query(`
         SELECT ets.slider_title, ets.slider_subtitle,
-               etsi.slider_img, etsi.slider_title as slide_title, etsi.img_caption
+               etsi.slider_img, etsi.slider_title as slide_title, etsi.img_caption, etsi.img_link
         FROM expert_training_slider ets
         LEFT JOIN expert_training_slider_images etsi ON ets.id = etsi.expert_training_slider_id
         WHERE ets.page_id = ?
@@ -209,7 +209,7 @@ class HomepageController {
           id: index + 1,
           title: item.slide_title || null,
           image: item.slider_img ? '/uploads/expert_training/' + item.slider_img : null,
-          link: "/" + (item.slide_title || "").toLowerCase().replace(/\s+/g, '-')
+          link: item.img_link || null
         }));
       }
 
