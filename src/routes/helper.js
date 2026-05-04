@@ -103,6 +103,10 @@ function createHelperRoutes(pool) {
     helperController.getLocationDetail.bind(helperController)
   );
 
+  router.get('/sitemap-data',
+    helperController.getSitemapData.bind(helperController)
+  );
+
   return router;
 }
 

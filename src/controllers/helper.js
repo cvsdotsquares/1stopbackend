@@ -688,6 +688,61 @@ class HelperController {
     }
   }
 
+  /**
+   * Return all SEO-relevant slugs for sitemap generation.
+   * Combines CMS pages (driven by page_menus → pages) and location pages
+   * (location_course_pages). Used by the Next.js sitemap.ts route.
+   */
+  async getSitemapData(req, res) {
+    try {
+      // CMS pages: the URL the frontend uses is page_menus.page_slug
+      // (matched by /[...slug]/page.tsx → /api/cmspages/:slug).
+      // Pull the most recent updated timestamp from the linked page row when available.
+      const [cmsPages] = await this.pool.query(`
+        SELECT
+          pm.page_slug AS slug,
+          p.updated AS updated,
+          p.created AS created
+        FROM page_menus pm
+        LEFT JOIN pages p ON p.id = pm.page_link_id
+        WHERE pm.page_slug IS NOT NULL AND pm.page_slug != '' AND pm.front_menu_show = 0 AND pm.page_slug != '#'
+      `);
+
+      // Location pages: the URL the frontend uses is /location/:slug
+      // (matched by /location/[...slug]/page.tsx → /api/helper/location/:slug).
+      // We don't assume the timestamp columns exist on this table to stay
+      // schema-tolerant; the sitemap will fall back to the build time.
+      const [locationPages] = await this.pool.query(`
+        SELECT slug
+        FROM location_course_pages
+        WHERE is_active = 1 AND slug IS NOT NULL AND slug != ''
+      `);
+
+      const normalize = (rows) =>
+        (rows || [])
+          .map((row) => ({
+            slug: String(row.slug || '').replace(/^\/+|\/+$/g, ''),
+            lastModified: row.updated || row.created || null,
+          }))
+          .filter((entry) => entry.slug.length > 0);
+
+      res.json({
+        success: true,
+        data: {
+          pages: normalize(cmsPages),
+          locations: normalize(locationPages),
+        },
+      });
+    } catch (error) {
+      console.error('Error fetching sitemap data:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch sitemap data',
+        error: error.message,
+      });
+    }
+  }
+
   async getTabSection(req, res) {
     try {
       const { page_id } = req.body;
