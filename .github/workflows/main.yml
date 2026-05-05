@@ -60,6 +60,9 @@ jobs:
             BOOKING_TIMEOUT_MINUTES=${{ secrets.BOOKING_TIMEOUT_MINUTES }}
             LOCK_EXPIRE_API_MINUTES=${{ secrets.LOCK_EXPIRE_API_MINUTES }}
             LOCK_EXPIRE_ONLINE_MINUTES=${{ secrets.LOCK_EXPIRE_ONLINE_MINUTES }}
+            MAINTENANCE_MODE=${{ secrets.MAINTENANCE_MODE }}
+            MAINTENANCE_BYPASS_TOKEN=${{ secrets.MAINTENANCE_BYPASS_TOKEN }}
+            MAINTENANCE_ALLOWED_IPS=${{ secrets.MAINTENANCE_ALLOWED_IPS }}
             EOF
 
             echo "Setting .env file permissions..."

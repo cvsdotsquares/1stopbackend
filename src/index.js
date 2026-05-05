@@ -35,6 +35,7 @@ const createFAQRoutes = require('./routes/faq');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
+const { createMaintenanceMiddleware } = require('./middleware/maintenance');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -87,13 +88,20 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Maintenance-Bypass');
   if (req.method === 'OPTIONS') {
     res.sendStatus(200);
   } else {
     next();
   }
 });
+
+// Maintenance gate. Must come AFTER the clientIp middleware (so the
+// IP whitelist works) and AFTER CORS (so the 503 response is readable
+// cross-origin from the frontend during preview). The middleware itself
+// allowlists /health, /db-test and /api/webhook so monitoring + Stripe
+// webhooks keep working during a maintenance window.
+app.use(createMaintenanceMiddleware());
 
 // Health check
 app.get('/health', (req, res) => {
