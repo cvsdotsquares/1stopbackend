@@ -51,6 +51,7 @@ class FAQController {
       }
 
       const processedFAQ = await replaceTokensInObject(this.pool, faqData);
+      console.log(processedFAQ);
       res.json({
         success: true,
         data: processedFAQ
