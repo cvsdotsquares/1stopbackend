@@ -679,7 +679,8 @@ class BookingController {
         ORDER BY \`primary\` DESC, id ASC
       `, [id]);
 
-      // Fetch secondary attendees (same course_event_id + booking_made_by_id group, excluding primary user)
+      // Fetch secondary attendees (same submission group only, scoped by id range to
+      // avoid leaking secondaries from a different submission for the same course_event)
       const primaryUserId = bookings[0].booking_made_by_id || bookings[0].user_id;
       const [secondaryAttendees] = await this.pool.query(`
         SELECT
@@ -719,9 +720,20 @@ class BookingController {
         WHERE b2.course_event_id = ?
           AND b2.booking_made_by_id = ?
           AND b2.user_id <> ?
-          AND b2.id <> ?
+          AND b2.id > ?
+          AND b2.id < COALESCE(
+            (
+              SELECT MIN(b3.id)
+              FROM bookings b3
+              WHERE b3.course_event_id = b2.course_event_id
+                AND b3.booking_made_by_id = b2.booking_made_by_id
+                AND b3.user_id = b3.booking_made_by_id
+                AND b3.id > ?
+            ),
+            ~0
+          )
         ORDER BY b2.id ASC
-      `, [bookings[0].course_event_id, primaryUserId, primaryUserId, id]);
+      `, [bookings[0].course_event_id, primaryUserId, primaryUserId, id, id]);
 
       res.json({
         success: true,

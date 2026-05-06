@@ -68,9 +68,20 @@ class DashboardController {
           WHERE b2.course_event_id = ?
             AND b2.booking_made_by_id = ?
             AND b2.user_id <> ?
-            AND b2.id <> ?
+            AND b2.id > ?
+            AND b2.id < COALESCE(
+              (
+                SELECT MIN(b3.id)
+                FROM bookings b3
+                WHERE b3.course_event_id = b2.course_event_id
+                  AND b3.booking_made_by_id = b2.booking_made_by_id
+                  AND b3.user_id = b3.booking_made_by_id
+                  AND b3.id > ?
+              ),
+              ~0
+            )
           ORDER BY b2.id ASC
-        `, [booking.course_event_id, primaryUserId, primaryUserId, booking.id]);
+        `, [booking.course_event_id, primaryUserId, primaryUserId, booking.id, booking.id]);
 
         return {
           ...booking,
@@ -154,9 +165,20 @@ class DashboardController {
           WHERE b2.course_event_id = ?
             AND b2.booking_made_by_id = ?
             AND b2.user_id <> ?
-            AND b2.id <> ?
+            AND b2.id > ?
+            AND b2.id < COALESCE(
+              (
+                SELECT MIN(b3.id)
+                FROM bookings b3
+                WHERE b3.course_event_id = b2.course_event_id
+                  AND b3.booking_made_by_id = b2.booking_made_by_id
+                  AND b3.user_id = b3.booking_made_by_id
+                  AND b3.id > ?
+              ),
+              ~0
+            )
           ORDER BY b2.id ASC
-        `, [course.course_event_id, primaryUserId, primaryUserId, course.booking_id]);
+        `, [course.course_event_id, primaryUserId, primaryUserId, course.booking_id, course.booking_id]);
 
         return {
           ...course,
