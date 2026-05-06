@@ -419,6 +419,7 @@ const confirmBooking = (pool) => async (req, res) => {
       `, [courseId, eventId, course_cost, course_cost, course_cost, space_hold_id, course_cost, JSON.stringify({original_amount: []})]);
 
       const bookingId = bookingResult.insertId;
+      console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/confirmBooking.js (RideTo step 4) | booking_id=${bookingId} | course_event_id=${eventId} | rideto_order_number=${rideto_order_number}`);
       const booking_ref = `1SRC${bookingId}`;
       const vehicleType = mapBikeHireToVehicleType(resolvedBikeHire);
 
@@ -477,6 +478,7 @@ const confirmBooking = (pool) => async (req, res) => {
 
       // Step 9: Complete Booking
       await connection.query('UPDATE bookings SET payment_due = payment_due - admin_payment_received, status = 1 WHERE id = ?', [bookingId]);
+      console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) | source=controllers/confirmBooking.js (RideTo step 9) | booking_id=${bookingId}`);
       await connection.query(`INSERT INTO booking_payments (booking_id, payment_type, transation_id, response, amount, created) VALUES (?, 'CASH', '', '', ?, NOW())`, [bookingId, course_cost]);
 
       // Step 10: Update Course Events

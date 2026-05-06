@@ -2,8 +2,8 @@
 const { validationResult } = require('express-validator');
 const { formatMySQLDateToDDMMYYYY, formatDateToDDMMYYYY } = require('../utils/dateFormat');
 const { sendBookingConfirmation } = require('../utils/emailService');
-const { replaceTokensInObject } = require('../utils/tokenReplacer');
-
+const { phpSerialize } = require('../utils/phpSerialize');
+const BookingStatusManager = require('../middleware/bookingStatusManager');
 class BookingController {
   constructor(pool) {
     this.pool = pool;
@@ -234,6 +234,7 @@ class BookingController {
         ]);
 
         const booking_id = bookingResult.insertId;
+        console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/bookings.js::createBooking | booking_id=${booking_id} | user_id=${user_id} | course_event_id=${course_event_id}`);
 
         // 7. Update event locks (temporary hold)
         await connection.query(`
@@ -265,9 +266,8 @@ class BookingController {
             CASE
               WHEN b.status = 0 THEN 'Pending Payment'
               WHEN b.status = 1 THEN 'Confirmed'
-              WHEN b.status = 2 THEN 'Completed'
-              WHEN b.status = 3 THEN 'Cancelled'
-              WHEN b.status = 4 THEN 'No Show'
+              WHEN b.status = 2 THEN 'Refunded'
+              WHEN b.status = 5 THEN 'Moved'
               ELSE 'Unknown'
             END as status_text
           FROM bookings b
@@ -386,6 +386,97 @@ class BookingController {
     }
   }
 
+  /**
+   * Create booking lock (temporary hold)
+   */
+  async createBookingLock(req, res) {
+    try {
+      const { course_event_id, spaces_required = 1, user_session } = req.body;
+
+      if (!course_event_id) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Course event ID is required'
+          }
+        });
+      }
+
+      // Check if event has availability
+      const [eventCheck] = await this.pool.query(`
+        SELECT
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          (ce.booking_limit - ce.bookings_done - ce.current_locks) as available_spaces
+        FROM course_events ce
+        WHERE ce.id = ? AND ce.status = '1'
+      `, [course_event_id]);
+
+      if (eventCheck.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Course event not found'
+          }
+        });
+      }
+
+      const event = eventCheck[0];
+      if (event.available_spaces < spaces_required) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_SPACES',
+            message: `Only ${event.available_spaces} spaces available`
+          }
+        });
+      }
+
+      // Create lock (expires in 15 minutes)
+      const expiresAt = new Date();
+      expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+
+      const [lockResult] = await this.pool.query(`
+        INSERT INTO lock_bookings (
+          event_id, space_required, user_id, ip_address,
+          created, modified
+        ) VALUES (?, ?, ?, ?, NOW(), NOW())
+      `, [
+        course_event_id,
+        spaces_required,
+        req.user?.id || 0,
+        req.clientIp || req.ip
+      ]);
+
+      // Update current locks
+      await this.pool.query(`
+        UPDATE course_events
+        SET current_locks = current_locks + ?
+        WHERE id = ?
+      `, [spaces_required, course_event_id]);
+
+      res.json({
+        success: true,
+        data: {
+          lock_id: lockResult.insertId,
+          expires_at: expiresAt.toISOString()
+        }
+      });
+
+    } catch (error) {
+      console.error('Error creating booking lock:', error);
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'SERVER_ERROR',
+          message: 'Failed to create booking lock'
+        }
+      });
+    }
+  }
   async getUserBookings(req, res) {
     try {
       const user_id = req.user.id;
@@ -439,9 +530,8 @@ class BookingController {
           CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
-            WHEN b.status = 2 THEN 'Completed'
-            WHEN b.status = 3 THEN 'Cancelled'
-            WHEN b.status = 4 THEN 'No Show'
+            WHEN b.status = 2 THEN 'Refunded'
+            WHEN b.status = 5 THEN 'Moved'
             ELSE 'Unknown'
           END as status_text,
           CASE
@@ -549,9 +639,8 @@ class BookingController {
           CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
-            WHEN b.status = 2 THEN 'Completed'
-            WHEN b.status = 3 THEN 'Cancelled'
-            WHEN b.status = 4 THEN 'No Show'
+            WHEN b.status = 2 THEN 'Refunded'
+            WHEN b.status = 5 THEN 'Moved'
             ELSE 'Unknown'
           END as status_text,
           CASE
@@ -634,16 +723,12 @@ class BookingController {
         ORDER BY b2.id ASC
       `, [bookings[0].course_event_id, primaryUserId, primaryUserId, id]);
 
-      const processedData = await replaceTokensInObject(this.pool, {
-        ...bookings[0],
-        attendees,
-        secondary_attendees: secondaryAttendees
-      });
-
       res.json({
         success: true,
         data: {
-          ...processedData
+          ...bookings[0],
+          attendees,
+          secondary_attendees: secondaryAttendees
         }
       });
 
@@ -883,103 +968,178 @@ class BookingController {
   }
 
   /**
-   * Cancel booking
+   * Cancel booking.
+   *
+   * Mirrors the legacy PHP admin delete flow in
+   * 1stop-php/admin/booking_refund_delete_common.php:
+   *   - hard-DELETE from `bookings` and `booking_attendees`
+   *   - soft-delete related `booking_payments` rows (isDelete = 1)
+   *   - archive a serialized snapshot into `deleted_bookings`
+   *   - audit the action in `booking_update_history`
+   *   - decrement capacity counters on `course_events` based on the
+   *     row's status before deletion
+   *
+   * The legacy schema does NOT carry a "Cancelled" status value; we must
+   * not write status=3, otherwise the row stays orphaned in `bookings`
+   * and is treated as live by every PHP query (`status != 5 OR status IS NULL`).
    */
   async cancelBooking(req, res) {
+    const connection = await this.pool.getConnection();
     try {
       const { id } = req.params;
       const user_id = req.user.id;
       const { cancellation_reason } = req.body;
 
-      // Start transaction
-      const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        // Get booking details
-        const [bookingCheck] = await connection.query(`
-          SELECT
-            b.id,
-            b.status,
-            b.spaces,
-            b.course_event_id,
-            ce.event_date
-          FROM bookings b
-          JOIN course_events ce ON b.course_event_id = ce.id
-          WHERE b.id = ? AND b.user_id = ?
-        `, [id, user_id]);
+        const [bookingRows] = await connection.query(
+          `SELECT b.*, MIN(ced.event_date) AS first_event_date
+           FROM bookings b
+           JOIN course_events ce ON b.course_event_id = ce.id
+           LEFT JOIN course_event_dates ced
+             ON ce.id = ced.course_event_id
+            AND ced.event_date > '1900-01-01'
+            AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+           WHERE b.id = ?
+             AND b.user_id = ?
+           GROUP BY b.id`,
+          [id, user_id]
+        );
 
-        if (bookingCheck.length === 0) {
+        if (bookingRows.length === 0) {
           throw new Error('Booking not found');
         }
 
-        const booking = bookingCheck[0];
+        const booking = bookingRows[0];
 
-        // Check if booking can be cancelled
-        if (booking.status === 3) {
-          throw new Error('Booking is already cancelled');
+        if (booking.status === BookingStatusManager.STATUS.REFUNDED) {
+          throw new Error('Booking has already been refunded; cannot cancel');
+        }
+        if (booking.status === BookingStatusManager.STATUS.MOVED_OUT) {
+          throw new Error('Booking has been moved to another course and is no longer active');
+        }
+        if (!BookingStatusManager.canCancel(booking.status)) {
+          throw new Error('Booking cannot be cancelled in its current state');
         }
 
-        if (booking.status === 2 || booking.status === 4) {
-          throw new Error('Cannot cancel completed or no-show bookings');
+        if (booking.first_event_date) {
+          const eventDate = new Date(booking.first_event_date);
+          const hoursUntilEvent = (eventDate - new Date()) / (1000 * 60 * 60);
+          if (hoursUntilEvent < 24) {
+            console.log(`Late cancellation for booking ${booking.id}: ${hoursUntilEvent.toFixed(2)} hours until event`);
+          }
         }
 
-        // Check cancellation policy (e.g., must cancel at least 24 hours before)
-        const eventDate = new Date(booking.event_date);
-        const now = new Date();
-        const hoursUntilEvent = (eventDate - now) / (1000 * 60 * 60);
+        const [primaryAttendeeRows] = await connection.query(
+          `SELECT *
+           FROM booking_attendees
+           WHERE booking_id = ?
+           ORDER BY \`primary\` DESC, id ASC
+           LIMIT 1`,
+          [id]
+        );
+        const primaryAttendee = primaryAttendeeRows[0] || {};
+        primaryAttendee.full_name = `${(primaryAttendee.first_name || '').trim()} ${(primaryAttendee.sur_name || '').trim()}`.trim();
 
-        if (hoursUntilEvent < 24) {
-          // Still allow cancellation but note it's late
-          console.log(`Late cancellation: ${hoursUntilEvent} hours until event`);
+        const [courseRows] = await connection.query(
+          `SELECT course_abb FROM courses WHERE id = ? LIMIT 1`,
+          [booking.course_id]
+        );
+        const [eventLocationRows] = await connection.query(
+          `SELECT ce.location_id, l.location_name
+           FROM course_events ce
+           LEFT JOIN locations l ON ce.location_id = l.id
+           WHERE ce.id = ?
+           LIMIT 1`,
+          [booking.course_event_id]
+        );
+        const [firstDateRows] = await connection.query(
+          `SELECT event_date
+           FROM course_event_dates
+           WHERE course_event_id = ?
+             AND event_date > '1900-01-01'
+             AND event_date NOT IN ('1111-11-11', '0000-00-00')
+           ORDER BY event_date ASC
+           LIMIT 1`,
+          [booking.course_event_id]
+        );
+
+        const courseInfo = {};
+        if (courseRows[0]) courseInfo.course_abb = courseRows[0].course_abb;
+        if (eventLocationRows[0]) courseInfo.location = eventLocationRows[0].location_name;
+        if (firstDateRows[0]) courseInfo.event_date = firstDateRows[0].event_date;
+
+        if (booking.status === BookingStatusManager.STATUS.CONFIRMED) {
+          await connection.query(
+            `UPDATE course_events
+             SET bookings_done = GREATEST(0, bookings_done - ?),
+                 modified = NOW()
+             WHERE id = ?`,
+            [booking.spaces, booking.course_event_id]
+          );
+        } else if (booking.status === BookingStatusManager.STATUS.PENDING_PAYMENT) {
+          await connection.query(
+            `UPDATE course_events
+             SET current_locks = GREATEST(0, current_locks - ?),
+                 modified = NOW()
+             WHERE id = ?`,
+            [booking.spaces, booking.course_event_id]
+          );
         }
 
-        // Update booking status to cancelled
-        await connection.query(`
-          UPDATE bookings
-          SET
-            status = 3,
-            modified = NOW()
-          WHERE id = ?
-        `, [id]);
+        await connection.query(
+          `UPDATE booking_payments SET isDelete = 1 WHERE booking_id = ?`,
+          [id]
+        );
 
-        // Release the spaces back to the event
-        if (booking.status === 0) {
-          // If it was pending, release from locks
-          await connection.query(`
-            UPDATE course_events
-            SET current_locks = GREATEST(0, current_locks - ?)
-            WHERE id = ?
-          `, [booking.spaces, booking.course_event_id]);
-        } else if (booking.status === 1) {
-          // If it was confirmed, release from bookings_done
-          await connection.query(`
-            UPDATE course_events
-            SET bookings_done = GREATEST(0, bookings_done - ?)
-            WHERE id = ?
-          `, [booking.spaces, booking.course_event_id]);
-        }
+        const bookingRefValue = primaryAttendee.booking_ref || `1SRC${booking.id}`;
+
+        const snapshot = phpSerialize({
+          booking,
+          attendee: primaryAttendee,
+          course_info: courseInfo,
+          cancellation_reason: cancellation_reason || null,
+          cancelled_via: 'node-api',
+        });
+
+        await connection.query(
+          `INSERT INTO deleted_bookings (booking_id, booking_ref, booking_data)
+           VALUES (?, ?, ?)`,
+          [booking.id, bookingRefValue, snapshot]
+        );
+
+        const auditNote = cancellation_reason
+          ? `Booking cancelled by user: ${cancellation_reason}`
+          : 'Booking cancelled by user';
+        await connection.query(
+          `INSERT INTO booking_update_history
+             (booking_id, updated_by_admin_id, type, status, created, modified)
+           VALUES (?, ?, 'deleted', ?, NOW(), NOW())`,
+          [booking.id, 0, auditNote]
+        );
+
+        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [id]);
+        await connection.query(`DELETE FROM bookings WHERE id = ?`, [id]);
 
         await connection.commit();
 
         res.json({
           success: true,
-          message: 'Booking cancelled successfully'
+          message: 'Booking cancelled successfully',
         });
-
       } catch (error) {
         await connection.rollback();
         throw error;
       } finally {
         connection.release();
       }
-
     } catch (error) {
       console.error('Error cancelling booking:', error);
       res.status(400).json({
         success: false,
         message: error.message || 'Failed to cancel booking',
-        error: error.message
+        error: error.message,
       });
     }
   }
@@ -991,36 +1151,62 @@ class BookingController {
     try {
       const user_id = req.user.id;
 
+      // Status semantics (matches PHP):
+      //   0 = pending payment, 1 = confirmed, 2 = refunded, 5 = moved-out tombstone.
+      // "Completed" is derived from event dates (status=1 AND latest event_date < today)
+      // because the legacy schema does not store a Completed flag.
+      // Cancellations are hard-deleted from `bookings` and live in `deleted_bookings`,
+      // so they are counted from there.
       const [stats] = await this.pool.query(`
         SELECT
           COUNT(*) as total_bookings,
           COUNT(CASE WHEN status = 0 THEN 1 END) as pending_bookings,
           COUNT(CASE WHEN status = 1 THEN 1 END) as confirmed_bookings,
-          COUNT(CASE WHEN status = 2 THEN 1 END) as completed_bookings,
-          COUNT(CASE WHEN status = 3 THEN 1 END) as cancelled_bookings,
-          COUNT(CASE WHEN status = 4 THEN 1 END) as noshow_bookings,
+          COUNT(CASE WHEN status = 2 THEN 1 END) as refunded_bookings,
+          COUNT(CASE WHEN status = 5 THEN 1 END) as moved_bookings,
           SUM(total_amount) as total_spent,
           AVG(total_amount) as average_booking_value,
           MAX(created) as last_booking_date
         FROM bookings
         WHERE user_id = ?
+          AND (status <> 5 OR status IS NULL)
       `, [user_id]);
 
-      // Get upcoming bookings count
+      // Completed = confirmed bookings whose latest course event date is in the past.
+      const [completedRows] = await this.pool.query(`
+        SELECT COUNT(*) as completed_bookings FROM (
+          SELECT b.id
+          FROM bookings b
+          JOIN course_event_dates ced
+            ON ced.course_event_id = b.course_event_id
+           AND ced.event_date > '1900-01-01'
+           AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+          WHERE b.user_id = ?
+            AND b.status = 1
+          GROUP BY b.id
+          HAVING MAX(ced.event_date) < CURDATE()
+        ) sub
+      `, [user_id]);
+      const completedCount = completedRows[0]?.completed_bookings ?? 0;
+
       const [upcomingStats] = await this.pool.query(`
-        SELECT COUNT(*) as upcoming_bookings
+        SELECT COUNT(DISTINCT b.id) as upcoming_bookings
         FROM bookings b
-        JOIN course_events ce ON b.course_event_id = ce.id
+        JOIN course_event_dates ced
+          ON ced.course_event_id = b.course_event_id
+         AND ced.event_date > '1900-01-01'
+         AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
         WHERE b.user_id = ?
           AND b.status IN (0, 1)
-          AND ce.event_date >= CURDATE()
+          AND ced.event_date >= CURDATE()
       `, [user_id]);
 
       res.json({
         success: true,
         data: {
           ...stats[0],
-          upcoming_bookings: upcomingStats[0].upcoming_bookings
+          completed_bookings: completedCount,
+          upcoming_bookings: upcomingStats[0].upcoming_bookings,
         }
       });
 
@@ -1111,9 +1297,8 @@ class BookingController {
           CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
-            WHEN b.status = 2 THEN 'Completed'
-            WHEN b.status = 3 THEN 'Cancelled'
-            WHEN b.status = 4 THEN 'No Show'
+            WHEN b.status = 2 THEN 'Refunded'
+            WHEN b.status = 5 THEN 'Moved'
             ELSE 'Unknown'
           END as status_text
         FROM bookings b

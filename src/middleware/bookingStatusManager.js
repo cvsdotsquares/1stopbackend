@@ -1,351 +1,263 @@
 // src/middleware/bookingStatusManager.js
-
-// Module-level single-flight guard so concurrent ticks/callers can't pile
-// up two `updateExpiredBookings` transactions on the same rows.
-let __cleanupRunning = false;
-let __cleanupRunSeq = 0;
-
-const isDeadlockError = (err) =>
-  !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
+//
+// Booking status semantics MUST match the legacy PHP system, because both
+// stacks read/write the same `bookings` table.
+//
+// Legacy PHP truth (verified in 1stop-php):
+//   0 = PENDING       -> row inserted before payment
+//   1 = CONFIRMED     -> payment received (Stripe / WorldPay / MOTO)
+//   2 = REFUNDED      -> set together with `refundable = 2` from
+//                        admin/booking_refund_delete_common.php
+//   5 = MOVED_OUT     -> tombstone left behind by the "move course" admin flow
+//                        (Booking::changeBookingstatus -> saveMoveBooking).
+//                        Filtered out everywhere via `(status != 5 OR status IS NULL)`.
+//
+// The legacy admin "Delete" flow does NOT use a status value at all; it hard
+// deletes the row from `bookings`, archives a serialized snapshot into
+// `deleted_bookings`, writes an audit row to `booking_update_history`, and
+// soft-deletes related rows in `booking_payments` (isDelete = 1).
+//
+// Lock model used by the new flow (per client request): we only mutate
+// `course_events.current_locks`. We do NOT use the legacy `lock_bookings`
+// table to express held seats during checkout.
+//
+// Historical note: an earlier version of this file invented
+// COMPLETED:2 / CANCELLED:3 / NO_SHOW:4 and ran cron + middleware that
+// auto-wrote those values. This collided with PHP's REFUNDED:2 and produced
+// rows the legacy admin would not display ("client cannot see a booking").
+// All such auto-mutations have been removed; "completed" is now derived from
+// event dates at read time, and cancellations follow the PHP archive flow.
 
 class BookingStatusManager {
-
   /**
-   * Booking status definitions
+   * Booking status definitions (must mirror PHP `bookings.status`).
    */
   static STATUS = {
     PENDING_PAYMENT: 0,
     CONFIRMED: 1,
-    COMPLETED: 2,
-    CANCELLED: 3,
-    NO_SHOW: 4
+    REFUNDED: 2,
+    MOVED_OUT: 5,
   };
 
   /**
-   * Status text mappings
+   * Status text mappings.
    */
   static STATUS_TEXT = {
     0: 'Pending Payment',
     1: 'Confirmed',
-    2: 'Completed',
-    3: 'Cancelled',
-    4: 'No Show'
+    2: 'Refunded',
+    5: 'Moved',
   };
 
   /**
-   * Get status text from status code
+   * Get status text from status code.
    */
   static getStatusText(status) {
     return this.STATUS_TEXT[status] || 'Unknown';
   }
 
   /**
-   * Check if status allows modifications
+   * Whether the booking is still "live" from the legacy schema's point of
+   * view (i.e. not a moved-out tombstone). Matches the PHP filter
+   *   `(bookings.status != 5 OR bookings.status IS NULL)`.
+   */
+  static isLive(status) {
+    return status !== this.STATUS.MOVED_OUT;
+  }
+
+  /**
+   * Whether the booking holds (or held) a seat that should count against
+   * course capacity. Refunded rows are kept in the table but no longer hold
+   * a seat in the legacy admin's reporting.
+   */
+  static isActive(status) {
+    return status === this.STATUS.PENDING_PAYMENT
+        || status === this.STATUS.CONFIRMED;
+  }
+
+  /**
+   * Derived "completed" check: PHP never stored a Completed flag; it's
+   * inferred from the latest course event date being in the past while the
+   * booking is still confirmed.
+   */
+  static isCompleted(status, lastEventDate) {
+    if (status !== this.STATUS.CONFIRMED) return false;
+    if (!lastEventDate) return false;
+    const last = new Date(lastEventDate);
+    if (Number.isNaN(last.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return last < today;
+  }
+
+  /**
+   * Editable bookings: only pending or confirmed rows can have their
+   * details modified.
    */
   static canModify(status) {
-    return status === this.STATUS.PENDING_PAYMENT || status === this.STATUS.CONFIRMED;
+    return this.isActive(status);
   }
 
   /**
-   * Check if status allows cancellation
+   * Cancellable bookings: only active rows; refund / move are admin-only
+   * paths and don't go through the user-side cancel.
    */
   static canCancel(status) {
-    return status === this.STATUS.PENDING_PAYMENT || status === this.STATUS.CONFIRMED;
+    return this.isActive(status);
   }
 
   /**
-   * Get valid status transitions
+   * Valid status transitions written directly to `bookings.status`.
+   * Note: real cancellations are NOT a status transition in this schema;
+   * they remove the row and archive it into `deleted_bookings`.
    */
   static getValidTransitions(currentStatus) {
     const transitions = {
-      [this.STATUS.PENDING_PAYMENT]: [
-        this.STATUS.CONFIRMED,
-        this.STATUS.CANCELLED
-      ],
-      [this.STATUS.CONFIRMED]: [
-        this.STATUS.PENDING_PAYMENT,
-        this.STATUS.COMPLETED,
-        this.STATUS.CANCELLED,
-        this.STATUS.NO_SHOW
-      ],
-      [this.STATUS.COMPLETED]: [], // Final state
-      [this.STATUS.CANCELLED]: [
-        this.STATUS.PENDING_PAYMENT,
-        this.STATUS.CONFIRMED
-      ], // Can be reactivated by admin
-      [this.STATUS.NO_SHOW]: [
-        this.STATUS.CONFIRMED,
-        this.STATUS.COMPLETED
-      ] // Admin can correct
+      [this.STATUS.PENDING_PAYMENT]: [this.STATUS.CONFIRMED],
+      [this.STATUS.CONFIRMED]: [this.STATUS.REFUNDED, this.STATUS.MOVED_OUT],
+      [this.STATUS.REFUNDED]: [],
+      [this.STATUS.MOVED_OUT]: [],
     };
-
     return transitions[currentStatus] || [];
   }
 
   /**
-   * Validate if status transition is allowed
+   * Validate if a status transition is allowed.
    */
   static isValidTransition(fromStatus, toStatus) {
-    const validTransitions = this.getValidTransitions(fromStatus);
-    return validTransitions.includes(toStatus);
+    return this.getValidTransitions(fromStatus).includes(toStatus);
   }
 
   /**
-   * Pass-through middleware. The previous implementation ran
-   * `updateExpiredBookings` synchronously on every `/bookings` and `/payment`
-   * request, which produced concurrent multi-row UPDATE transactions on
-   * `bookings`/`course_events` that deadlocked with the third-party
-   * `confirmBooking` transaction (sqlState 40001).
-   *
-   * The same cleanup is already invoked by the 60s interval (`startCleanupJob`)
-   * which is now single-flighted and deadlock-retried, so per-request fires
-   * are no longer needed.
+   * No-op middleware kept for backward compatibility with index.js wiring.
+   * The previous implementation auto-rewrote bookings.status on every
+   * /bookings or /payment request, which caused the very bug we're fixing.
+   * Lock expiry is now owned by cleanupExpiredLocks cron, and unpaid
+   * booking expiry by cleanupUnpaidBookings cron.
    */
-  static createStatusUpdateMiddleware(/* pool */) {
+  static createStatusUpdateMiddleware(_pool) {
     return (req, res, next) => next();
   }
 
   /**
-   * Start automatic cleanup job that runs every minute.
-   * Wraps `updateExpiredBookings` in a single-flight guard so a slow run
-   * cannot overlap with the next interval tick.
+   * No-op cleanup hook kept for backward compatibility with index.js
+   * wiring. See note on createStatusUpdateMiddleware. The two dedicated
+   * crons handle the side effects this method used to perform.
    */
-  static startCleanupJob(pool) {
-    setInterval(async () => {
-      if (__cleanupRunning) {
-        // Previous tick still in progress; skip.
-        return;
-      }
-      __cleanupRunning = true;
-      try {
-        await this.updateExpiredBookings(pool, 'setInterval:60s');
-      } catch (error) {
-        console.error('[BookingStatus] cleanup job error:', error && error.sqlMessage || error);
-      } finally {
-        __cleanupRunning = false;
-      }
-    }, 60000); // Run every minute
-
-    console.log('Booking cleanup job started - runs every minute');
+  static startCleanupJob(_pool) {
+    console.log(
+      '[BookingStatusManager] startCleanupJob is now a no-op; expiry is handled by cleanupUnpaidBookings + cleanupExpiredLocks crons.'
+    );
   }
 
   /**
-   * Update expired bookings to appropriate statuses.
+   * Calculate space allocation changes for a status transition that this
+   * service is allowed to perform (i.e. 0 -> 1 on payment, or the rare
+   * confirmed -> refunded).
    *
-   * Resilience: the four UPDATE statements run inside a single transaction
-   * that can deadlock against `confirmBooking` / booking-flow transactions.
-   * We retry the whole transaction up to 3 times on `ER_LOCK_DEADLOCK`
-   * (errno 1213 / sqlState 40001) which is the canonical handling for
-   * MySQL deadlock victims.
-   */
-  static async updateExpiredBookings(pool, caller = 'unknown') {
-    const MAX_ATTEMPTS = 3;
-    const runId = `run_${Date.now()}_${++__cleanupRunSeq}`;
-    let lastError = null;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const connection = await pool.getConnection();
-      const t0 = Date.now();
-      try {
-        await connection.beginTransaction();
-
-        // Cancel pending payment bookings older than 10 minutes
-        const [timeoutBookings] = await connection.query(`
-          UPDATE bookings b
-          SET b.status = ?, b.modified = NOW()
-          WHERE b.status = ?
-            AND b.created <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-        `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
-
-        // Release spaces from timeout cancelled bookings
-        if (timeoutBookings.affectedRows > 0) {
-          await connection.query(`
-            UPDATE course_events ce
-            JOIN bookings b ON ce.id = b.course_event_id
-            SET ce.current_locks = GREATEST(0, ce.current_locks - b.spaces)
-            WHERE b.status = ?
-              AND b.modified >= DATE_SUB(NOW(), INTERVAL 1 MINUTE)
-          `, [this.STATUS.CANCELLED]);
-        }
-
-        // Mark confirmed bookings as completed only when ALL real event dates have passed.
-        // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
-        // TBC dates the subquery returns NULL, which evaluates to false and prevents premature completion.
-        const [completedBookings] = await connection.query(`
-          UPDATE bookings b
-          JOIN course_events ce ON b.course_event_id = ce.id
-          SET b.status = ?, b.modified = NOW()
-          WHERE b.status = ?
-            AND (
-              SELECT MAX(ced.event_date)
-              FROM course_event_dates ced
-              WHERE ced.course_event_id = ce.id
-                AND ced.event_date > '1900-01-01'
-                AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
-            ) < CURDATE()
-        `, [this.STATUS.COMPLETED, this.STATUS.CONFIRMED]);
-
-        // Cancel pending payment bookings when the first real event date is tomorrow or sooner.
-        // TBC placeholder dates (1111-11-11, 0000-00-00) are excluded; if an event has only
-        // TBC dates the subquery returns NULL, which evaluates to false and prevents erroneous cancellation.
-        const [cancelledBookings] = await connection.query(`
-          UPDATE bookings b
-          JOIN course_events ce ON b.course_event_id = ce.id
-          SET b.status = ?,
-              b.modified = NOW()
-          WHERE b.status = ?
-            AND (
-              SELECT MIN(ced.event_date)
-              FROM course_event_dates ced
-              WHERE ced.course_event_id = ce.id
-                AND ced.event_date > '1900-01-01'
-                AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
-            ) <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
-        `, [this.STATUS.CANCELLED, this.STATUS.PENDING_PAYMENT]);
-
-        await connection.commit();
-
-        if (timeoutBookings.affectedRows > 0 || completedBookings.affectedRows > 0 || cancelledBookings.affectedRows > 0) {
-          console.log(`[BookingStatus] runId=${runId} caller=${caller} attempt=${attempt} ms=${Date.now() - t0} timeout=${timeoutBookings.affectedRows} completed=${completedBookings.affectedRows} cancelled=${cancelledBookings.affectedRows}`);
-        }
-        if (attempt > 1) {
-          console.warn(`[BookingStatus] runId=${runId} succeeded after deadlock retry attempt=${attempt}`);
-        }
-        return; // success
-      } catch (error) {
-        try { await connection.rollback(); } catch (_) {}
-        lastError = error;
-        const ms = Date.now() - t0;
-        if (isDeadlockError(error) && attempt < MAX_ATTEMPTS) {
-          console.warn(`[BookingStatus] runId=${runId} caller=${caller} attempt=${attempt} ms=${ms} DEADLOCK (sqlState=${error.sqlState} errno=${error.errno}); retrying...`);
-          continue; // retry
-        }
-        console.error(`[BookingStatus] runId=${runId} caller=${caller} attempt=${attempt} ms=${ms} ERROR sqlState=${error && error.sqlState} errno=${error && error.errno} msg=${error && error.sqlMessage}`);
-        throw error;
-      } finally {
-        connection.release();
-      }
-    }
-    if (lastError) throw lastError;
-  }
-
-  /**
-   * Calculate space allocation changes for status transitions
+   * Real cancellations are not status transitions in this schema, so they
+   * do not go through this helper; the cancel flow updates counters
+   * directly while removing the row.
    */
   static calculateSpaceChanges(oldStatus, newStatus, spaces) {
     let lockChange = 0;
     let bookingChange = 0;
 
-    // From pending (0) to confirmed (1)
+    // 0 -> 1: payment received, lock becomes a real booking
     if (oldStatus === this.STATUS.PENDING_PAYMENT && newStatus === this.STATUS.CONFIRMED) {
-      lockChange = -spaces; // Release locks
-      bookingChange = spaces; // Add to bookings_done
+      lockChange = -spaces;
+      bookingChange = spaces;
     }
-    // From confirmed (1) to pending (0)
+    // 1 -> 0: rare admin reversal back to pending
     else if (oldStatus === this.STATUS.CONFIRMED && newStatus === this.STATUS.PENDING_PAYMENT) {
-      lockChange = spaces; // Add to locks
-      bookingChange = -spaces; // Remove from bookings_done
+      lockChange = spaces;
+      bookingChange = -spaces;
     }
-    // From pending (0) to cancelled/no-show (3,4)
-    else if (oldStatus === this.STATUS.PENDING_PAYMENT &&
-             (newStatus === this.STATUS.CANCELLED || newStatus === this.STATUS.NO_SHOW)) {
-      lockChange = -spaces; // Release locks
+    // 1 -> 2: refunded, seat is released from bookings_done (PHP also
+    // releases capacity counters in booking_refund_delete_common.php).
+    else if (oldStatus === this.STATUS.CONFIRMED && newStatus === this.STATUS.REFUNDED) {
+      bookingChange = -spaces;
     }
-    // From confirmed (1) to cancelled/no-show/completed (2,3,4)
-    else if (oldStatus === this.STATUS.CONFIRMED &&
-             (newStatus === this.STATUS.COMPLETED ||
-              newStatus === this.STATUS.CANCELLED ||
-              newStatus === this.STATUS.NO_SHOW)) {
-      bookingChange = -spaces; // Remove from bookings_done
-    }
-    // From cancelled/no-show back to pending
-    else if ((oldStatus === this.STATUS.CANCELLED || oldStatus === this.STATUS.NO_SHOW) &&
-             newStatus === this.STATUS.PENDING_PAYMENT) {
-      lockChange = spaces; // Add to locks
-    }
-    // From cancelled/no-show/completed back to confirmed
-    else if ((oldStatus === this.STATUS.CANCELLED ||
-              oldStatus === this.STATUS.NO_SHOW ||
-              oldStatus === this.STATUS.COMPLETED) &&
-             newStatus === this.STATUS.CONFIRMED) {
-      bookingChange = spaces; // Add to bookings_done
+    // 1 -> 5: moved-out tombstone; saveMoveBooking already runs the
+    // lessEditedBooking / addEditBookingsdone counter dance, so we leave
+    // counters alone here to avoid double counting.
+    else if (oldStatus === this.STATUS.CONFIRMED && newStatus === this.STATUS.MOVED_OUT) {
+      // intentionally no counter change
     }
 
     return { lockChange, bookingChange };
   }
 
   /**
-   * Apply space allocation changes to course events
+   * Apply space allocation changes to course events.
    */
   static async updateEventSpaces(pool, courseEventId, lockChange, bookingChange) {
-    if (lockChange !== 0 || bookingChange !== 0) {
-      await pool.query(`
-        UPDATE course_events
-        SET
-          current_locks = GREATEST(0, current_locks + ?),
-          bookings_done = GREATEST(0, bookings_done + ?),
-          modified = NOW()
-        WHERE id = ?
-      `, [lockChange, bookingChange, courseEventId]);
-    }
+    if (lockChange === 0 && bookingChange === 0) return;
+    await pool.query(
+      `UPDATE course_events
+       SET current_locks = GREATEST(0, current_locks + ?),
+           bookings_done = GREATEST(0, bookings_done + ?),
+           modified = NOW()
+       WHERE id = ?`,
+      [lockChange, bookingChange, courseEventId]
+    );
   }
 
   /**
-   * Get booking status summary for an event
+   * Booking summary for an event. Counts are bucketed by the real PHP
+   * statuses; "completed" is derived from event dates rather than stored.
    */
   static async getEventBookingSummary(pool, courseEventId) {
-    const [summary] = await pool.query(`
-      SELECT
-        ce.booking_limit,
-        ce.bookings_done,
-        ce.current_locks,
-        (ce.booking_limit - ce.bookings_done - ce.current_locks) as spaces_available,
-        COUNT(b.id) as total_bookings,
-        COUNT(CASE WHEN b.status = 0 THEN 1 END) as pending_bookings,
-        COUNT(CASE WHEN b.status = 1 THEN 1 END) as confirmed_bookings,
-        COUNT(CASE WHEN b.status = 2 THEN 1 END) as completed_bookings,
-        COUNT(CASE WHEN b.status = 3 THEN 1 END) as cancelled_bookings,
-        COUNT(CASE WHEN b.status = 4 THEN 1 END) as noshow_bookings,
-        SUM(CASE WHEN b.status IN (0,1) THEN b.spaces ELSE 0 END) as active_spaces
-      FROM course_events ce
-      LEFT JOIN bookings b ON ce.id = b.course_event_id
-      WHERE ce.id = ?
-      GROUP BY ce.id
-    `, [courseEventId]);
+    const [summary] = await pool.query(
+      `SELECT
+         ce.booking_limit,
+         ce.bookings_done,
+         ce.current_locks,
+         (ce.booking_limit - ce.bookings_done - ce.current_locks) AS spaces_available,
+         COUNT(CASE WHEN b.status IS NOT NULL AND b.status <> 5 THEN b.id END) AS total_bookings,
+         COUNT(CASE WHEN b.status = 0 THEN 1 END) AS pending_bookings,
+         COUNT(CASE WHEN b.status = 1 THEN 1 END) AS confirmed_bookings,
+         COUNT(CASE WHEN b.status = 2 THEN 1 END) AS refunded_bookings,
+         COUNT(CASE WHEN b.status = 5 THEN 1 END) AS moved_bookings,
+         SUM(CASE WHEN b.status IN (0, 1) THEN b.spaces ELSE 0 END) AS active_spaces
+       FROM course_events ce
+       LEFT JOIN bookings b ON ce.id = b.course_event_id
+       WHERE ce.id = ?
+       GROUP BY ce.id`,
+      [courseEventId]
+    );
 
     return summary[0] || null;
   }
 
   /**
-   * Validate booking capacity before creating/updating
+   * Validate booking capacity before creating/updating.
+   * Only pending (0) and confirmed (1) rows hold a seat for capacity
+   * purposes; refunded (2) and moved-out (5) do not.
    */
   static async validateEventCapacity(pool, courseEventId, requiredSpaces, excludeBookingId = null) {
-    let query = `
-      SELECT
-        ce.booking_limit,
-        ce.bookings_done,
-        ce.current_locks,
-        (ce.booking_limit - ce.bookings_done - ce.current_locks) as spaces_available,
-        COALESCE(SUM(CASE WHEN b.status IN (0,1) AND b.id != ? THEN b.spaces ELSE 0 END), 0) as used_spaces
-      FROM course_events ce
-      LEFT JOIN bookings b ON ce.id = b.course_event_id
-      WHERE ce.id = ?
-      GROUP BY ce.id
-    `;
-
-    const [result] = await pool.query(query, [excludeBookingId || 0, courseEventId]);
+    const [result] = await pool.query(
+      `SELECT
+         ce.booking_limit,
+         ce.bookings_done,
+         ce.current_locks,
+         (ce.booking_limit - ce.bookings_done - ce.current_locks) AS spaces_available,
+         COALESCE(SUM(CASE WHEN b.status IN (0, 1) AND b.id != ? THEN b.spaces ELSE 0 END), 0) AS used_spaces
+       FROM course_events ce
+       LEFT JOIN bookings b ON ce.id = b.course_event_id
+       WHERE ce.id = ?
+       GROUP BY ce.id`,
+      [excludeBookingId || 0, courseEventId]
+    );
 
     if (!result.length) {
       throw new Error('Course event not found');
     }
 
     const event = result[0];
-    const availableSpaces = event.spaces_available;
-
-    if (availableSpaces < requiredSpaces) {
-      throw new Error(`Insufficient spaces available. Only ${availableSpaces} spaces remaining`);
+    if (event.spaces_available < requiredSpaces) {
+      throw new Error(`Insufficient spaces available. Only ${event.spaces_available} spaces remaining`);
     }
-
     return event;
   }
 }

@@ -1465,6 +1465,7 @@ class BookingFlowController {
           `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, attendeeUserId, 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
 
           const booking_id = bookingResult.insertId;
+          console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/bookingFlow.js (per-attendee) | booking_id=${booking_id} | attendee_index=${i} | user_id=${attendeeUserId} | course_event_id=${course_event_id}`);
           const bookingRef = `1SRC${booking_id}`;
           // Primary attendee is always enforced server-side by order; frontend cannot control this.
           const primaryFlag = i === 0 ? 1 : 0;

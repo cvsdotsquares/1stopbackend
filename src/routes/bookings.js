@@ -2,6 +2,7 @@
 const express = require('express');
 const BookingController = require('../controllers/bookings');
 const BookingValidation = require('../middleware/bookingValidation');
+const BookingStatusManager = require('../middleware/bookingStatusManager');
 const { authenticateToken } = require('../middleware/auth');
 
 function createBookingRoutes(pool) {
@@ -129,16 +130,26 @@ function createBookingRoutes(pool) {
     BookingValidation.validateAdminRole,
     [
       BookingValidation.getBookingById()[0], // Reuse ID validation
+      // Only the two safe in-row transitions are exposed via this endpoint:
+      //   0 = pending payment
+      //   1 = confirmed
+      // Refund (2), move-out tombstone (5), and "real cancellation" (which is
+      // actually a hard-delete + archive) are intentionally NOT writable here.
+      // Those flows live in the legacy PHP admin or in the dedicated cancel
+      // endpoint, because they require side effects (refundable=2, freeze
+      // counters, deleted_bookings archive, etc.) this endpoint cannot
+      // safely perform.
       require('express-validator').body('status')
-        .isInt({ min: 0, max: 4 })
-        .withMessage('Status must be between 0 and 4'),
-      require('express-validator').body('admin_notes')
-        .optional()
-        .isLength({ max: 1000 })
-        .withMessage('Admin notes must not exceed 1000 characters')
+        .isInt()
+        .custom((value) => {
+          const v = Number(value);
+          if (v !== 0 && v !== 1) {
+            throw new Error('Only status 0 (pending payment) or 1 (confirmed) can be set via this endpoint. Use the legacy admin for refund / delete / move.');
+          }
+          return true;
+        })
     ],
     async (req, res) => {
-      // Custom admin status update logic
       try {
         const { validationResult } = require('express-validator');
         const errors = validationResult(req);
@@ -151,19 +162,15 @@ function createBookingRoutes(pool) {
         }
 
         const { id } = req.params;
-        const { status, admin_notes } = req.body;
-        const admin_id = req.user.id;
+        const newStatus = parseInt(req.body.status, 10);
 
-        // Start transaction
         const connection = await pool.getConnection();
         await connection.beginTransaction();
 
         try {
-          // Get current booking
           const [currentBooking] = await connection.query(`
             SELECT 
               b.*,
-              ce.event_date,
               ce.booking_limit,
               ce.bookings_done,
               ce.current_locks
@@ -178,64 +185,55 @@ function createBookingRoutes(pool) {
 
           const booking = currentBooking[0];
           const oldStatus = booking.status;
-          const newStatus = parseInt(status);
 
-          // Update booking status
-          await connection.query(`
-            UPDATE bookings 
-            SET 
-              status = ?,
-              admin_notes = ?,
-              modified = NOW(),
-              status_changed_by = ?,
-              status_changed_at = NOW()
-            WHERE id = ?
-          `, [newStatus, admin_notes || '', admin_id, id]);
-
-          // Handle space allocation changes
-          if (oldStatus !== newStatus) {
-            let lockChange = 0;
-            let bookingChange = 0;
-
-            // From pending (0) to confirmed (1)
-            if (oldStatus === 0 && newStatus === 1) {
-              lockChange = -booking.spaces; // Release locks
-              bookingChange = booking.spaces; // Add to bookings_done
-            }
-            // From confirmed (1) to pending (0)
-            else if (oldStatus === 1 && newStatus === 0) {
-              lockChange = booking.spaces; // Add to locks
-              bookingChange = -booking.spaces; // Remove from bookings_done
-            }
-            // From pending (0) to cancelled/no-show (3,4)
-            else if (oldStatus === 0 && (newStatus === 3 || newStatus === 4)) {
-              lockChange = -booking.spaces; // Release locks
-            }
-            // From confirmed (1) to cancelled/no-show (3,4)
-            else if (oldStatus === 1 && (newStatus === 3 || newStatus === 4)) {
-              bookingChange = -booking.spaces; // Remove from bookings_done
-            }
-            // From cancelled/no-show back to pending
-            else if ((oldStatus === 3 || oldStatus === 4) && newStatus === 0) {
-              lockChange = booking.spaces; // Add to locks
-            }
-            // From cancelled/no-show back to confirmed
-            else if ((oldStatus === 3 || oldStatus === 4) && newStatus === 1) {
-              bookingChange = booking.spaces; // Add to bookings_done
-            }
-
-            // Apply changes to course_events
-            if (lockChange !== 0 || bookingChange !== 0) {
-              await connection.query(`
-                UPDATE course_events 
-                SET 
-                  current_locks = GREATEST(0, current_locks + ?),
-                  bookings_done = GREATEST(0, bookings_done + ?),
-                  modified = NOW()
-                WHERE id = ?
-              `, [lockChange, bookingChange, booking.course_event_id]);
-            }
+          if (oldStatus === newStatus) {
+            await connection.commit();
+            return res.json({
+              success: true,
+              message: 'Booking status unchanged',
+              data: { id, old_status: oldStatus, new_status: newStatus }
+            });
           }
+
+          if (oldStatus === BookingStatusManager.STATUS.REFUNDED) {
+            throw new Error('This booking has been refunded and cannot be re-activated via this endpoint');
+          }
+          if (oldStatus === BookingStatusManager.STATUS.MOVED_OUT) {
+            throw new Error('This booking is a moved-out tombstone and is read-only');
+          }
+
+          await connection.query(
+            `UPDATE bookings SET status = ?, modified = NOW() WHERE id = ?`,
+            [newStatus, id]
+          );
+          console.log(`[BOOKING STATUS] UPDATE bookings status=${newStatus} (${BookingStatusManager.getStatusText(newStatus)}) | source=routes/bookings.js (admin PUT /admin/:id/status) | booking_id=${id} | old_status=${oldStatus} (${BookingStatusManager.getStatusText(oldStatus)}) | admin_user_id=${req.user?.id || 0}`);
+
+          const { lockChange, bookingChange } = BookingStatusManager.calculateSpaceChanges(
+            oldStatus,
+            newStatus,
+            booking.spaces
+          );
+          if (lockChange !== 0 || bookingChange !== 0) {
+            await connection.query(`
+              UPDATE course_events 
+              SET 
+                current_locks = GREATEST(0, current_locks + ?),
+                bookings_done = GREATEST(0, bookings_done + ?),
+                modified = NOW()
+              WHERE id = ?
+            `, [lockChange, bookingChange, booking.course_event_id]);
+          }
+
+          await connection.query(
+            `INSERT INTO booking_update_history
+               (booking_id, updated_by_admin_id, type, status, created, modified)
+             VALUES (?, ?, 'status_change', ?, NOW(), NOW())`,
+            [
+              booking.id,
+              req.user.id || 0,
+              `Status ${oldStatus} -> ${newStatus} (${BookingStatusManager.getStatusText(oldStatus)} -> ${BookingStatusManager.getStatusText(newStatus)})`,
+            ]
+          );
 
           await connection.commit();
 
@@ -243,13 +241,13 @@ function createBookingRoutes(pool) {
             success: true,
             message: 'Booking status updated successfully',
             data: {
-              id: id,
+              id,
               old_status: oldStatus,
               new_status: newStatus,
-              admin_notes: admin_notes
+              old_status_text: BookingStatusManager.getStatusText(oldStatus),
+              new_status_text: BookingStatusManager.getStatusText(newStatus),
             }
           });
-
         } catch (error) {
           await connection.rollback();
           throw error;
@@ -294,32 +292,43 @@ function createBookingRoutes(pool) {
           }
         }
 
-        // Overall statistics
+        // Status semantics (matches PHP):
+        //   0 = pending payment, 1 = confirmed, 2 = refunded, 5 = moved-out tombstone.
+        // Cancellations are hard-deleted from `bookings` and live in `deleted_bookings`,
+        // so they are counted from there.
         const [overallStats] = await pool.query(`
           SELECT 
             COUNT(*) as total_bookings,
             COUNT(CASE WHEN status = 0 THEN 1 END) as pending_bookings,
             COUNT(CASE WHEN status = 1 THEN 1 END) as confirmed_bookings,
-            COUNT(CASE WHEN status = 2 THEN 1 END) as completed_bookings,
-            COUNT(CASE WHEN status = 3 THEN 1 END) as cancelled_bookings,
-            COUNT(CASE WHEN status = 4 THEN 1 END) as noshow_bookings,
+            COUNT(CASE WHEN status = 2 THEN 1 END) as refunded_bookings,
+            COUNT(CASE WHEN status = 5 THEN 1 END) as moved_bookings,
             SUM(total_amount) as total_revenue,
             AVG(total_amount) as average_booking_value,
             SUM(spaces) as total_spaces_booked
           FROM bookings b
-          WHERE 1=1 ${dateFilter}
+          WHERE (b.status <> 5 OR b.status IS NULL) ${dateFilter}
         `, queryParams);
 
-        // Monthly statistics for the last 12 months
+        const [cancelledTotalRows] = await pool.query(`
+          SELECT COUNT(*) as cancelled_bookings
+          FROM deleted_bookings db
+          WHERE 1 = 1 ${date_from || date_to ? "AND db.created BETWEEN COALESCE(?, '1900-01-01') AND COALESCE(?, '9999-12-31')" : ''}
+        `, (date_from || date_to) ? [date_from || null, date_to ? `${date_to} 23:59:59` : null] : []);
+        if (cancelledTotalRows[0]) {
+          overallStats[0].cancelled_bookings = cancelledTotalRows[0].cancelled_bookings;
+        }
+
         const [monthlyStats] = await pool.query(`
           SELECT 
             DATE_FORMAT(b.created, '%Y-%m') as month,
             COUNT(*) as bookings_count,
             SUM(total_amount) as revenue,
             COUNT(CASE WHEN status = 1 THEN 1 END) as confirmed_count,
-            COUNT(CASE WHEN status = 3 THEN 1 END) as cancelled_count
+            COUNT(CASE WHEN status = 2 THEN 1 END) as refunded_count
           FROM bookings b
           WHERE b.created >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+            AND (b.status <> 5 OR b.status IS NULL)
           GROUP BY DATE_FORMAT(b.created, '%Y-%m')
           ORDER BY month DESC
         `);

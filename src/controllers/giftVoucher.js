@@ -70,6 +70,7 @@ class GiftVoucherController {
 
         const bid = bookingInsert.insertId;
         console.log(`🎫 Reserved booking ID ${bid} for gift voucher`);
+        console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/giftVoucher.js (gift voucher placeholder) | booking_id=${bid} | user_id=${user_id || 0}`);
 
         // Generate voucher reference
         const voucher_ref = `1SGV${bid} - OGV`;

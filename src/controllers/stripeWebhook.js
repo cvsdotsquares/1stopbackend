@@ -170,6 +170,7 @@ class StripeWebhookController {
           await connection.query(`
             UPDATE bookings SET status = 1, modified = NOW() WHERE id = ?
           `, [bid]);
+          console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
 
           await connection.query(`
             INSERT INTO booking_payments
