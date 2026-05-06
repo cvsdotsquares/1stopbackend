@@ -154,8 +154,10 @@ class StripeWebhookController {
           console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
         }
 
-        // Update each booking status and insert a payment record for each
-        // payment_due and admin_payment_received are already set correctly at booking creation time
+        // Update each booking status and insert a payment record for each.
+        // admin_payment_received is intentionally written here (NOT at insert time in
+        // bookingFlow.js) so abandoned/failed PaymentIntents stay at 0 and remain
+        // cleanable by cleanupUnpaidBookings + the *Expired/Failed/Canceled handlers.
         let assignedSum = 0;
         const useBookingAmounts = computedTotal > 0 && Math.abs(computedTotal - paidAmount) <= 0.5;
 
@@ -168,9 +170,13 @@ class StripeWebhookController {
           assignedSum += amountForBooking;
 
           await connection.query(`
-            UPDATE bookings SET status = 1, modified = NOW() WHERE id = ?
-          `, [bid]);
-          console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
+            UPDATE bookings
+            SET status = 1,
+                admin_payment_received = ?,
+                modified = NOW()
+            WHERE id = ?
+          `, [amountForBooking, bid]);
+          console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) admin_payment_received=${amountForBooking} | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
 
           await connection.query(`
             INSERT INTO booking_payments

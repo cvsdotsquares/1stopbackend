@@ -1458,11 +1458,15 @@ class BookingFlowController {
           // payment_due = balance still owed after this payment (gross total - amount paid now)
           const attendeePaymentDue = roundCurrency(Math.max(0, attendeeGrossTotal - attendeePayableNow));
 
+          // admin_payment_received stays 0 until the Stripe webhook (`payment_intent.succeeded`)
+          // flips it to the actual paid amount. This keeps the cleanup cron able to delete
+          // abandoned/failed PaymentIntents and keeps the `admin_payment_received > 0` guards
+          // in handlePaymentExpired/Failed/Canceled meaningful.
           const [bookingResult] = await connection.query(`
             INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                  payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id, booking_made_by_id)
-            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?, ?)
-          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeePayableNow, attendeeUserId, 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
+            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?, ?)
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeeUserId, 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
 
           const booking_id = bookingResult.insertId;
           console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/bookingFlow.js (per-attendee) | booking_id=${booking_id} | attendee_index=${i} | user_id=${attendeeUserId} | course_event_id=${course_event_id}`);

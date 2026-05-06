@@ -22,6 +22,7 @@ class DashboardController {
         LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
         LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
         WHERE (b.user_id = ? OR ba.email = ?)
+          AND b.status <> 0
         GROUP BY b.id, b.total_amount, b.status, b.created, c.course_name, l.location_name, l.address1, l.address2, l.postcode, bp.transation_id
         ORDER BY b.created DESC
         LIMIT 5
@@ -119,7 +120,7 @@ class DashboardController {
         JOIN course_event_dates ced ON ce.id = ced.course_event_id
         JOIN locations l ON ce.location_id = l.id
         LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
-        WHERE (b.user_id = ? OR ba.email = ?) AND ced.event_date >= CURDATE() AND b.status IN (0, 1)
+        WHERE (b.user_id = ? OR ba.email = ?) AND ced.event_date >= CURDATE() AND b.status = 1
         GROUP BY b.id, c.course_name, l.location_name, l.address1, l.address2, l.postcode
         ORDER BY event_date ASC
       `, [userId, req.user.email]);
