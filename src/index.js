@@ -85,10 +85,10 @@ app.use((req, res, next) => {
 
 // CORS headers
 // Allow-Headers MUST list every non-standard request header the frontend sends
-// (Authorization is standard, but X-Maintenance-Bypass and X-Requested-With are
-// not, so without them the browser blocks the preflight). Origin pinning lets
-// us flip on credentialed requests (cookies/Authorization with credentials:'include')
-// without breaking, since `Access-Control-Allow-Origin: *` is incompatible with
+// (Authorization is standard, but X-Requested-With is not, so without it the
+// browser blocks the preflight). Origin pinning lets us flip on credentialed
+// requests (cookies/Authorization with credentials:'include') without breaking,
+// since `Access-Control-Allow-Origin: *` is incompatible with
 // `Access-Control-Allow-Credentials: true`.
 const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
@@ -107,7 +107,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.header(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Maintenance-Bypass'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization'
   );
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
