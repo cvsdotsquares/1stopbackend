@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const { replaceTokens } = require('../utils/tokenReplacer');
+const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
 
 const isDeadlockError = (err) =>
   !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
@@ -239,10 +240,13 @@ const buildBookingEmailData = async (connection, {
 const sendBookingEmail = async (bookingData, pool, meta = {}) => {
   const { booking_ref = '', ip = '', attendeeEmail = '' } = meta;
 
+  const smtpSecure = parseBooleanEnv(process.env.SMTP_SECURE, false);
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 587),
-    secure: parseBooleanEnv(process.env.SMTP_SECURE, false),
+    secure: smtpSecure,
+    // Force STARTTLS upgrade on non-SMTPS ports unless explicitly disabled.
+    requireTLS: !smtpSecure && parseBooleanEnv(process.env.SMTP_REQUIRE_TLS, true),
     auth: process.env.SMTP_USER && process.env.SMTP_PASS
       ? {
         user: process.env.SMTP_USER,
@@ -251,7 +255,10 @@ const sendBookingEmail = async (bookingData, pool, meta = {}) => {
       : undefined
   });
 
-  const fromAddress = (process.env.CONTACT_FROM || '').trim();
+  // From header includes display name (e.g. `"1 Stop Instruction" <info@…>`);
+  // fromAddress is the bare email used for logging + the validation guard below.
+  const fromHeader = getMailFrom();
+  const fromAddress = getMailFromAddress();
   const toAddress = (process.env.CONTACT_TO || '').trim();
   const bccVal = process.env.BOOKING_BCC || '';
 
@@ -287,7 +294,8 @@ const sendBookingEmail = async (bookingData, pool, meta = {}) => {
   }
 
   const mailOptions = {
-    from: fromAddress || process.env.SMTP_USER || '',
+    from: fromHeader || fromAddress,
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: toAddress,
     bcc: bccVal || undefined,
     subject,
@@ -298,8 +306,8 @@ const sendBookingEmail = async (bookingData, pool, meta = {}) => {
   let emailStatus = 0;
 
   if (!fromAddress || !toAddress) {
-    console.error('Booking email config missing: CONTACT_FROM/CONTACT_TO');
-    errors.push('Send skipped: CONTACT_FROM and/or CONTACT_TO not set in environment');
+    console.error('Booking email config missing: MAIL_FROM_EMAIL / CONTACT_FROM and CONTACT_TO');
+    errors.push('Send skipped: MAIL_FROM_EMAIL/CONTACT_FROM and/or CONTACT_TO not set in environment');
   } else if (!htmlBuildOk) {
     errors.push('Send skipped: HTML body could not be built');
   } else {

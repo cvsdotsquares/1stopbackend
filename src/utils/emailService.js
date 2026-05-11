@@ -1,11 +1,19 @@
 const nodemailer = require('nodemailer');
 const { formatDateToDDMMYYYY, formatMySQLDateToDDMMYYYY } = require('./dateFormat');
 const { replaceTokens } = require('./tokenReplacer');
+const { getMailFrom, getMailFromAddress, getReplyTo } = require('./mailFrom');
 
+// SMTP transport configuration:
+//   - SMTP_SECURE=true (port 465) → implicit TLS from the first byte.
+//   - SMTP_SECURE=false (port 587) → STARTTLS upgrade. We default
+//     requireTLS=true so the connection MUST upgrade to TLS or fail; set
+//     SMTP_REQUIRE_TLS=false to opt out for legacy servers without STARTTLS.
+const smtpSecure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT,
-  secure: false,
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: smtpSecure,
+  requireTLS: !smtpSecure && String(process.env.SMTP_REQUIRE_TLS ?? 'true').toLowerCase() !== 'false',
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
@@ -14,7 +22,8 @@ const transporter = nodemailer.createTransport({
 
 exports.sendOTPEmail = async (email, firstName, otp) => {
   const mailOptions = {
-    from: process.env.SMTP_USER,
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: email,
     subject: 'Email Verification - 1Stop Training',
     html: `
@@ -33,7 +42,8 @@ exports.sendRegistrationEmail = async (userData, pool) => {
   const { email, first_name, sur_name } = userData;
 
   const mailOptions = {
-    from: process.env.SMTP_USER,
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: email,
     subject: 'Welcome to 1 Stop Instruction',
     html: `<!DOCTYPE html>
@@ -99,7 +109,7 @@ exports.sendRegistrationEmail = async (userData, pool) => {
           VALUES (?, '', '', ?, ?, ?, ?, ?, NOW())
         `, [
           email,
-          process.env.SMTP_USER,
+          getMailFromAddress(),
           mailOptions.subject,
           mailOptions.html,
           emailStatus,
@@ -118,7 +128,8 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
   const { email, first_name, sur_name } = userData;
 
   const mailOptions = {
-    from: process.env.SMTP_USER,
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: email,
     subject: 'Password Updated - 1 Stop Instruction',
     html: `<!DOCTYPE html>
@@ -184,7 +195,7 @@ exports.sendPasswordUpdateEmail = async (userData, pool) => {
           VALUES (?, '', '', ?, ?, ?, ?, ?, NOW())
         `, [
           email,
-          process.env.SMTP_USER,
+          getMailFromAddress(),
           mailOptions.subject,
           mailOptions.html,
           emailStatus,
@@ -591,7 +602,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   };
 
   const mailOptions = {
-   from: process.env.SMTP_USER,
+   from: getMailFrom(),
+   ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
    to: attendeeEmailList[0],
    bcc: resolvedBcc,
    subject: `${course_name} Booking confirmation`
@@ -683,7 +695,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
           `, [
             recipientEmail,
             resolvedBcc || '',
-            process.env.SMTP_USER,
+            getMailFromAddress(),
             mailOptions.subject,
             `${recipientEmailHtml}\n\n<!-- delivery_meta: ${escapeHtml(JSON.stringify(recipientMeta || {}))} -->`,
             emailBy || 0,
@@ -813,7 +825,8 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
 </html>`;
 
   const mailOptions = {
-    from: process.env.SMTP_USER,
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: resolvedRecipientEmail,
     bcc: process.env.BOOKING_BCC,
     subject: `1 Stop Instruction Gift Voucher - Ref: ${voucher_ref}`,
@@ -846,7 +859,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
         `, [
           resolvedRecipientEmail,
           'bookings.testds@yopmail.com',
-          process.env.SMTP_USER,
+          getMailFromAddress(),
           mailOptions.subject,
           mailOptions.html,
           emailStatus,

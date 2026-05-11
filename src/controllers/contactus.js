@@ -6,6 +6,7 @@
 const nodemailer = require('nodemailer');
 const dotenv = require('dotenv');
 const { replaceTokensInObject } = require('../utils/tokenReplacer');
+const { getMailFrom, getMailFromAddress } = require('../utils/mailFrom');
 dotenv.config();
 
 class ContactUsController {
@@ -14,10 +15,13 @@ class ContactUsController {
 
     // Initialize SMTP transporter once per controller instance
     try {
+      const smtpSecure = (process.env.SMTP_SECURE === 'true');
       this.transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587,
-        secure: (process.env.SMTP_SECURE === 'true'), // true for 465, false for other ports
+        secure: smtpSecure, // true for 465 (implicit TLS), false for STARTTLS on 587/25
+        // Force TLS upgrade on STARTTLS ports unless explicitly disabled
+        requireTLS: !smtpSecure && process.env.SMTP_REQUIRE_TLS !== 'false',
         auth: process.env.SMTP_USER && process.env.SMTP_PASS ? {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS
@@ -131,13 +135,16 @@ class ContactUsController {
 
 
       // Prepare email
-      const toAddress = process.env.CONTACT_TO || process.env.SMTP_USER;
-      const fromAddress = process.env.CONTACT_FROM || process.env.SMTP_USER;
+      const toAddress = process.env.CONTACT_TO || getMailFromAddress();
+      // Header `from` includes the display name (e.g. `"1 Stop Instruction" <info@…>`),
+      // while the email_logs `from` column stores the bare address for searchability.
+      const fromHeader = getMailFrom();
+      const fromAddress = getMailFromAddress();
       const bccAddress = process.env.CONTACT_BCC || '';
       const officerDesignation = process.env.CONTACT_TO_OFFICER || 'Enquiry manager';
 
       const mailOptions = {
-        from: fromAddress,
+        from: fromHeader,
         to: toAddress,
         replyTo: email,
         subject: `Contact form submission: ${subject}`,

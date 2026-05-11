@@ -43,8 +43,12 @@ jobs:
             SMTP_HOST=${{ secrets.SMTP_HOST }}
             SMTP_PORT=${{ secrets.SMTP_PORT }}
             SMTP_SECURE=${{ secrets.SMTP_SECURE }}
+            SMTP_REQUIRE_TLS=${{ secrets.SMTP_REQUIRE_TLS }}
             SMTP_USER=${{ secrets.SMTP_USER }}
             SMTP_PASS=${{ secrets.SMTP_PASS }}
+            MAIL_FROM_EMAIL=${{ secrets.MAIL_FROM_EMAIL }}
+            MAIL_FROM_NAME=${{ secrets.MAIL_FROM_NAME }}
+            MAIL_REPLY_TO=${{ secrets.MAIL_REPLY_TO }}
             CONTACT_TO=${{ secrets.CONTACT_TO }}
             CONTACT_FROM=${{ secrets.CONTACT_FROM }}
             BOOKING_BCC=${{ secrets.BOOKING_BCC }}
