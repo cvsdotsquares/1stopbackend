@@ -16,11 +16,69 @@
 // That value is not part of the legacy schema and is no longer produced
 // anywhere in this code base.
 const cron = require('node-cron');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { phpSerialize } = require('../utils/phpSerialize');
+const StripeWebhookController = require('../controllers/stripeWebhook');
+
+// Stripe statuses that indicate the customer's payment is still in motion.
+// While a PaymentIntent is in any of these we MUST NOT delete the booking —
+// the next sweep (15 minutes later) will reconsider.
+const IN_FLIGHT_PI_STATUSES = new Set([
+  'processing',
+  'requires_action',
+  'requires_confirmation',
+  'requires_capture',
+]);
 
 class BookingCleanupCron {
   constructor(pool) {
     this.pool = pool;
+    // Reuses the existing webhook handler so a "missed webhook" booking is
+    // healed by the exact same code path the webhook itself would run —
+    // including its idempotency guard against double-processing.
+    this.webhookController = new StripeWebhookController(pool);
+  }
+
+  /**
+   * Stripe safety net. Before deleting a `status = 0` booking, look up its
+   * PaymentIntent on Stripe (matched via PI.metadata.booking_id, which
+   * bookingFlow.js stamps at PI creation time).
+   *
+   * Returns one of:
+   *   { action: 'recover', paymentIntent }  → caller should replay webhook + skip delete
+   *   { action: 'defer' }                   → caller should skip delete this round
+   *   { action: 'delete' }                  → caller should proceed with delete
+   *
+   * On any Stripe error we return 'defer' — the cron must NEVER delete a
+   * booking just because Stripe is briefly unreachable.
+   */
+  async _stripeSafetyCheck(booking) {
+    try {
+      const search = await stripe.paymentIntents.search({
+        query: `metadata['booking_id']:'${booking.id}'`,
+        limit: 10,
+      });
+
+      const succeeded = search.data.find((p) => p.status === 'succeeded');
+      if (succeeded) {
+        return { action: 'recover', paymentIntent: succeeded };
+      }
+
+      const inFlight = search.data.find((p) => IN_FLIGHT_PI_STATUSES.has(p.status));
+      if (inFlight) {
+        return { action: 'defer', paymentIntent: inFlight };
+      }
+
+      // Either no PI at all, or only canceled / requires_payment_method PIs.
+      // Genuinely abandoned — safe to delete.
+      return { action: 'delete', paymentIntent: search.data[0] || null };
+    } catch (error) {
+      console.error(
+        `[CLEANUP CRON] Stripe lookup failed for booking ${booking.id}; deferring delete to be safe:`,
+        error.message
+      );
+      return { action: 'defer' };
+    }
   }
 
   async cleanupUnpaidBookings() {
@@ -30,12 +88,18 @@ class BookingCleanupCron {
       console.log('[CLEANUP CRON] Starting cleanup of unpaid bookings...');
 
       const timeoutMinutes = process.env.BOOKING_TIMEOUT_MINUTES || 30;
+      // ORDER BY id ASC is load-bearing: bookingFlow.js inserts the primary
+      // attendee's booking first, so it gets the lowest id in a submission.
+      // Processing primary first lets a single handlePaymentSuccess replay
+      // flip the whole submission to status=1 in one shot — then the
+      // freshness re-read at the top of each iteration skips the secondaries.
       const [unpaidBookings] = await connection.query(`
         SELECT b.*
         FROM bookings b
         WHERE b.status = 0
           AND b.admin_payment_received = 0
           AND b.created < DATE_SUB(NOW(), INTERVAL ? MINUTE)
+        ORDER BY b.id ASC
       `, [timeoutMinutes]);
 
       if (unpaidBookings.length === 0) {
@@ -45,7 +109,61 @@ class BookingCleanupCron {
 
       console.log(`[CLEANUP CRON] Found ${unpaidBookings.length} unpaid bookings to clean up`);
 
-      for (const booking of unpaidBookings) {
+      for (const candidate of unpaidBookings) {
+        // Freshness re-read. A previous iteration's webhook replay may have
+        // already flipped this row (multi-attendee submissions share one
+        // PaymentIntent, so the primary's replay updates every sibling).
+        const [freshRows] = await this.pool.query(
+          `SELECT * FROM bookings
+           WHERE id = ? AND status = 0 AND admin_payment_received = 0`,
+          [candidate.id]
+        );
+        if (freshRows.length === 0) {
+          console.log(`[CLEANUP CRON] Booking ${candidate.id} no longer needs cleanup (status or payment changed); skipping`);
+          continue;
+        }
+        const booking = freshRows[0];
+
+        // Stripe safety net — only for the regular booking flow.
+        // gift_voucher rows use different metadata (`bid`, `type`) and are
+        // intentionally left on the legacy delete path for this minimal fix.
+        if (booking.booking_made_by !== 'gift_voucher') {
+          const check = await this._stripeSafetyCheck(booking);
+
+          if (check.action === 'recover') {
+            console.log(
+              `[CLEANUP CRON] Booking ${booking.id} has SUCCEEDED Stripe PaymentIntent ` +
+              `${check.paymentIntent.id}; replaying webhook instead of deleting (missed delivery rescue)`
+            );
+            try {
+              await this.webhookController.handlePaymentSuccess(check.paymentIntent);
+            } catch (replayError) {
+              console.error(
+                `[CLEANUP CRON] Webhook replay failed for booking ${booking.id}; deferring delete:`,
+                replayError
+              );
+            }
+            continue;
+          }
+
+          if (check.action === 'defer') {
+            console.log(
+              `[CLEANUP CRON] Booking ${booking.id} deferred` +
+              (check.paymentIntent ? ` (PI ${check.paymentIntent.id} status=${check.paymentIntent.status})` : '') +
+              `; will reconsider next sweep`
+            );
+            continue;
+          }
+
+          // action === 'delete': fall through to the existing delete path.
+          console.log(
+            `[CLEANUP CRON] Booking ${booking.id} cleared for deletion ` +
+            (check.paymentIntent
+              ? `(Stripe PI ${check.paymentIntent.id} status=${check.paymentIntent.status})`
+              : '(no Stripe PaymentIntent matched)')
+          );
+        }
+
         await connection.beginTransaction();
 
         try {
