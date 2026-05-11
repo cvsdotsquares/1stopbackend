@@ -13,10 +13,13 @@ class AllLocationsController {
 
     // Initialize SMTP transporter once per controller instance
     try {
+      const smtpSecure = (process.env.SMTP_SECURE === 'true');
       this.transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587,
-        secure: (process.env.SMTP_SECURE === 'true'), // true for 465, false for other ports
+        secure: smtpSecure, // true for 465 (implicit TLS), false for STARTTLS on 587/25
+        // Force TLS upgrade on STARTTLS ports unless explicitly disabled
+        requireTLS: !smtpSecure && process.env.SMTP_REQUIRE_TLS !== 'false',
         auth: process.env.SMTP_USER && process.env.SMTP_PASS ? {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS
