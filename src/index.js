@@ -83,13 +83,34 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS headers (basic setup - customize for production)
+// CORS headers
+// Allow-Headers MUST list every non-standard request header the frontend sends
+// (Authorization is standard, but X-Maintenance-Bypass and X-Requested-With are
+// not, so without them the browser blocks the preflight). Origin pinning lets
+// us flip on credentialed requests (cookies/Authorization with credentials:'include')
+// without breaking, since `Access-Control-Allow-Origin: *` is incompatible with
+// `Access-Control-Allow-Credentials: true`.
+const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  const requestOrigin = req.headers.origin;
+  if (corsAllowedOrigins.length === 0) {
+    // No allowlist configured → fall back to the existing permissive behaviour.
+    res.header('Access-Control-Allow-Origin', '*');
+  } else if (requestOrigin && corsAllowedOrigins.includes(requestOrigin)) {
+    res.header('Access-Control-Allow-Origin', requestOrigin);
+    res.header('Vary', 'Origin');
+  }
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Maintenance-Bypass'
+  );
   if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
+    res.sendStatus(204);
   } else {
     next();
   }
