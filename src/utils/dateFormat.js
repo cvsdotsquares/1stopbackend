@@ -41,7 +41,28 @@ const formatMySQLDateToDDMMYYYY = (mysqlDate) => {
   return `${day}/${month}/${year}`;
 };
 
+const getCurrentMysqlDateTime = (timeZone = 'Europe/London') => {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+    .formatToParts(new Date())
+    .reduce((acc, part) => {
+      if (part.type !== 'literal') acc[part.type] = part.value;
+      return acc;
+    }, {});
+
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+};
+
 module.exports = {
   formatDateToDDMMYYYY,
-  formatMySQLDateToDDMMYYYY
+  formatMySQLDateToDDMMYYYY,
+  getCurrentMysqlDateTime
 };

@@ -5,6 +5,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendBookingConfirmation } = require('../utils/emailService');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const { findOrCreateStripeCustomerByEmail } = require('../utils/stripeCustomer');
+const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const e = require('express');
 
 const parseDobToMysql = (dob) => {
@@ -1094,6 +1095,7 @@ class BookingFlowController {
       await connection.beginTransaction();
 
       try {
+        const createdAt = getCurrentMysqlDateTime();
         const attendees_count = attendees.length;
         const userIds = [];
         const generatedPasswords = [];
@@ -1127,10 +1129,11 @@ class BookingFlowController {
 
             const [userResult] = await connection.query(`
               INSERT INTO users (first_name, sur_name, email, password, password_type, contact1, contact2, contact3, status, created, modified, date_of_birth, license_number, license_type)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `, [
               attendee.first_name, attendee.sur_name, attendee.email,
               hashedPassword, passwordType, attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', passwordType === 'user_chosen' ? 1 : 0,
+              createdAt, createdAt,
               parseDobToMysql(attendee.date_of_birth), attendee.license_number, attendee.license_type
             ]);
 
@@ -1465,8 +1468,8 @@ class BookingFlowController {
           const [bookingResult] = await connection.query(`
             INSERT INTO bookings (course_id, course_event_id, user_id, type_of_book, spaces,
                                  payment_due, total_fees, vatrate, vat, total_amount, admin_payment_received, status, lockid, edit_payment_type, created_by, created, modified, edited_booking_id, booking_made_by, is_promo_applied, promo_code_id, booking_made_by_id)
-            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, NOW(), NOW(), 0, ?, ?, ?, ?)
-          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeeUserId, 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
+            VALUES (?, ?, ?, 'o', 1, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, 0, ?, ?, ?, ?)
+          `, [course_id, course_event_id, attendeeUserId, attendeePaymentDue, attendeeNetTotal, vatRate, attendeeVat, attendeeGrossTotal, attendeeUserId, createdAt, createdAt, 'customer', promoCodeId ? 1 : 0, promoCodeId || 0, userIds[0]]);
 
           const booking_id = bookingResult.insertId;
           console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/bookingFlow.js (per-attendee) | booking_id=${booking_id} | attendee_index=${i} | user_id=${attendeeUserId} | course_event_id=${course_event_id}`);
@@ -1494,26 +1497,27 @@ class BookingFlowController {
                 UPDATE booking_attendees_dropdown
                 SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, contact2 = ?, contact3 = ?,
                     email = ?, vehicle_type = ?, license_type = ?, license_number = ?, theory_number = ?, notes = ?, \
-                    date_of_birth = ?, \`primary\` = ?, updated = NOW()
+                    date_of_birth = ?, \`primary\` = ?, updated = ?
                 WHERE id = ?
               `, [
                 booking_id, bookingRef, attendee.first_name, attendee.sur_name,
                 attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
                 attendeeVehicleType, attendee.license_type || 0, normalizedLicenseNumber,
                 attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth),
-                primaryFlag, contactCardId
+                primaryFlag, createdAt, contactCardId
               ]);
             } else {
               const [cardResult] = await connection.query(`
                 INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                        email, vehicle_type, license_type, license_number, theory_number,
                                                        notes, date_of_birth, \`primary\`, created, updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `, [
                 booking_id, bookingRef, attendee.first_name, attendee.sur_name,
                 attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
                 attendeeVehicleType, attendee.license_type || 0, normalizedLicenseNumber,
-                attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth), primaryFlag
+                attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth), primaryFlag,
+                createdAt, createdAt
               ]);
               contactCardId = cardResult.insertId;
             }
@@ -1522,12 +1526,13 @@ class BookingFlowController {
               INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                                      email, vehicle_type, license_type, license_number, theory_number,
                                                      notes, date_of_birth, \`primary\`, created, updated)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `, [
               booking_id, bookingRef, attendee.first_name, attendee.sur_name,
               attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
               attendeeVehicleType, attendee.license_type || 0, '',
-              attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth), primaryFlag
+              attendee.theory_number || '', attendee.notes || '', parseDobToMysql(attendee.date_of_birth), primaryFlag,
+              createdAt, createdAt
             ]);
             contactCardId = cardResult.insertId;
           }
@@ -1536,12 +1541,13 @@ class BookingFlowController {
             INSERT INTO booking_attendees (booking_id, booking_ref, first_name, sur_name, contact1, contact2, contact3,
                                          email, vehicle_type, license_type, license_number, theory_number,
                                          admin_notes, notes, date_of_birth, contact_card_id, \`primary\`, created)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?)
           `, [
             booking_id, bookingRef, attendee.first_name, attendee.sur_name,
             attendee.contact1 || '', attendee.contact2 || '', attendee.contact3 || '', attendee.email,
             attendee.vehicle_type || 0, attendee.license_type || 0, normalizedLicenseNumber,
-            attendee.theory_number || '', parseDobToMysql(attendee.date_of_birth), contactCardId, primaryFlag
+            attendee.theory_number || '', parseDobToMysql(attendee.date_of_birth), contactCardId, primaryFlag,
+            createdAt
           ]);
         }
 
@@ -1554,11 +1560,20 @@ class BookingFlowController {
         try {
           const formatStripeDate = (dateValue) => {
             if (!dateValue) return '';
+
+            if (typeof dateValue === 'string') {
+              const match = dateValue.match(/^(\d{4})-(\d{2})-(\d{2})/);
+              if (match) {
+                const [, year, month, day] = match;
+                return `${Number(day)}/${Number(month)}/${year.slice(-2)}`;
+              }
+            }
+
             const dateObj = new Date(dateValue);
             if (Number.isNaN(dateObj.getTime())) return '';
-            const day = dateObj.getDate();
-            const month = dateObj.getMonth() + 1;
-            const yearShort = String(dateObj.getFullYear()).slice(-2);
+            const day = dateObj.getUTCDate();
+            const month = dateObj.getUTCMonth() + 1;
+            const yearShort = String(dateObj.getUTCFullYear()).slice(-2);
             return `${day}/${month}/${yearShort}`;
           };
 

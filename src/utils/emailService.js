@@ -606,7 +606,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
    to: attendeeEmailList[0],
    bcc: resolvedBcc,
-   subject: `${course_name} Booking confirmation`
+   subject: `${course_name} Booking Confirmation`
   };
 
   if (previewOnly) {

@@ -1,6 +1,7 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendGiftVoucherEmail } = require('../utils/emailService');
 const { findOrCreateStripeCustomerByEmail } = require('../utils/stripeCustomer');
+const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
 class GiftVoucherController {
   constructor(pool) {
@@ -56,6 +57,7 @@ class GiftVoucherController {
 
       try {
         await connection.beginTransaction();
+        const createdAt = getCurrentMysqlDateTime();
 
         // SOLUTION: Actually insert a placeholder row in bookings table to claim the ID
         // This permanently reserves the booking ID for this gift voucher
@@ -64,8 +66,8 @@ class GiftVoucherController {
            (course_id, course_event_id, user_id, type_of_book, spaces, payment_due,
             total_fees, vatrate, vat, total_amount, admin_payment_received, status,
             lockid, edit_payment_type, edited_booking_id, created_by, booking_made_by, created, modified)
-           VALUES (0, 0, ?, 'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, '', 0, 0, 'gift_voucher', NOW(), NOW())`,
-          [user_id || 0]
+           VALUES (0, 0, ?, 'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, '', 0, 0, 'gift_voucher', ?, ?)`,
+          [user_id || 0, createdAt, createdAt]
         );
 
         const bid = bookingInsert.insertId;
@@ -82,9 +84,9 @@ class GiftVoucherController {
            (bid, voucher_ref, voucher_date, subject, voucher_person, voucher_free_text,
             voucher_value, purchased_by, voucher_contact, voucher_email,
             voucher_payement_type, template_id, created, franchise_to_paid, user_id, redeem_note)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', 1, NOW(), 1, ?, '')`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', 1, ?, 1, ?, '')`,
           [bid, voucher_ref, voucher_date, subject || '', recipient_name, field_text || '',
-           voucher_value, purchased_by, contact_number, email_address, user_id]
+           voucher_value, purchased_by, contact_number, email_address, createdAt, user_id]
         );
 
         console.log(`✅ Inserted into gift_voucher_copieds with bid ${bid}, row ID: ${insertResult.insertId}`);

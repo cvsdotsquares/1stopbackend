@@ -1,7 +1,7 @@
 // src/controllers/stripeWebhook.js
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendGiftVoucherEmail } = require('../utils/emailService');
-const { formatDateToDDMMYYYY } = require('../utils/dateFormat');
+const { formatDateToDDMMYYYY, getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
 class StripeWebhookController {
   constructor(pool) {
@@ -89,6 +89,7 @@ class StripeWebhookController {
       await connection.beginTransaction();
 
       try {
+        const processedAt = getCurrentMysqlDateTime();
         // Idempotency check against the primary booking
         const [existingPayment] = await connection.query(`
           SELECT id FROM booking_payments WHERE transation_id = ?
@@ -148,9 +149,9 @@ class StripeWebhookController {
             UPDATE course_events
             SET bookings_done = bookings_done + ?,
                 current_locks = GREATEST(0, current_locks - ?),
-                modified = NOW()
+                modified = ?
             WHERE id = ?
-          `, [bookingSpaces, bookingSpaces, course_event_id]);
+          `, [bookingSpaces, bookingSpaces, processedAt, course_event_id]);
           console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
         }
 
@@ -173,16 +174,16 @@ class StripeWebhookController {
             UPDATE bookings
             SET status = 1,
                 admin_payment_received = ?,
-                modified = NOW()
+                modified = ?
             WHERE id = ?
-          `, [amountForBooking, bid]);
+          `, [amountForBooking, processedAt, bid]);
           console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) admin_payment_received=${amountForBooking} | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
 
           await connection.query(`
             INSERT INTO booking_payments
             (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
-            VALUES (?, 'SALE', ?, ?, 'booking', ?, NOW(), 0, '', '')
-          `, [bid, session.payment_intent || session.id, amountForBooking, JSON.stringify({ session_id: session.id, payment_status: session.payment_status })]);
+            VALUES (?, 'SALE', ?, ?, 'booking', ?, ?, 0, '', '')
+          `, [bid, session.payment_intent || session.id, amountForBooking, JSON.stringify({ session_id: session.id, payment_status: session.payment_status }), processedAt]);
         }
 
         await connection.commit();
@@ -535,6 +536,7 @@ class StripeWebhookController {
     await connection.beginTransaction();
 
     try {
+      const processedAt = getCurrentMysqlDateTime();
       // Idempotency check - prevent duplicate processing
       const [existingPayment] = await connection.query(
         `SELECT id FROM booking_payments WHERE transation_id = ?`,
@@ -594,11 +596,12 @@ class StripeWebhookController {
             voucher_free_text, voucher_value, purchased_by, voucher_contact,
             voucher_email, voucher_payement_type, template_id,
             redeem_note, franchise_to_paid, created)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, ?)`,
           [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id || 0,
            vData.subject || '', vData.voucher_person, vData.voucher_free_text || '',
            vData.voucher_value, vData.purchased_by, vData.voucher_contact || '',
-           vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1]
+           vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1,
+           processedAt]
         );
         console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
       } catch (insertError) {
@@ -619,12 +622,13 @@ class StripeWebhookController {
         `INSERT INTO booking_payments
          (transation_id, response, booking_id, payment_type, amount,
           created, transation_type, transation_extra_info, custom_payment_booking_ref, isDelete, voucher_serilized_response)
-         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?, 0, '')`,
+         VALUES (?, ?, ?, 'Online', ?, ?, 'custom_payment', ?, ?, 0, '')`,
         [
           paymentIntent.id,
           JSON.stringify(paymentIntent),
           vData.bid,
           paidAmount,
+          processedAt,
           JSON.stringify({
             payee_name: vData.voucher_person,
             payment_description: `Gift Voucher For ${vData.subject}`,
@@ -682,6 +686,7 @@ class StripeWebhookController {
     await connection.beginTransaction();
 
     try {
+      const processedAt = getCurrentMysqlDateTime();
       // Idempotency check - check if voucher already exists in gift_voucher table
       const [existingVoucher] = await connection.query(
         `SELECT id FROM gift_voucher WHERE bid = ?`,
@@ -731,11 +736,12 @@ class StripeWebhookController {
             voucher_free_text, voucher_value, purchased_by, voucher_contact,
             voucher_email, voucher_payement_type, template_id,
             redeem_note, franchise_to_paid, created)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, NOW())`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'o', ?, '', ?, ?)`,
           [voucherDate, uniqueVoucherRef, vData.bid, vData.user_id || 0,
            vData.subject || '', vData.voucher_person, vData.voucher_free_text || '',
            vData.voucher_value, vData.purchased_by, vData.voucher_contact || '',
-           vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1]
+           vData.voucher_email, vData.template_id || 1, vData.franchise_to_paid || 1,
+           processedAt]
         );
         console.log(`✅ Gift voucher inserted with ID ${insertResult.insertId}`);
       } catch (insertError) {
@@ -756,7 +762,7 @@ class StripeWebhookController {
         `INSERT INTO booking_payments
          (transation_id, response, booking_id, payment_type, amount,
           created, transation_type, transation_extra_info, custom_payment_booking_ref, isDelete, voucher_serilized_response)
-         VALUES (?, ?, ?, 'Online', ?, NOW(), 'custom_payment', ?, ?, 0, '')`,
+         VALUES (?, ?, ?, 'Online', ?, ?, 'custom_payment', ?, ?, 0, '')`,
         [
           session.payment_intent || session.id,
           JSON.stringify({
@@ -767,6 +773,7 @@ class StripeWebhookController {
           }),
           vData.bid,
           paidAmount,
+          processedAt,
           JSON.stringify({
             payee_name: vData.voucher_person,
             payment_description: `Gift Voucher For ${vData.subject}`,

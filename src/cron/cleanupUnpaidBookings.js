@@ -19,6 +19,7 @@ const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { phpSerialize } = require('../utils/phpSerialize');
 const StripeWebhookController = require('../controllers/stripeWebhook');
+const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
 // Stripe statuses that indicate the customer's payment is still in motion.
 // While a PaymentIntent is in any of these we MUST NOT delete the booking —
@@ -88,6 +89,7 @@ class BookingCleanupCron {
       console.log('[CLEANUP CRON] Starting cleanup of unpaid bookings...');
 
       const timeoutMinutes = process.env.BOOKING_TIMEOUT_MINUTES || 30;
+      const cleanupAt = getCurrentMysqlDateTime();
       // ORDER BY id ASC is load-bearing: bookingFlow.js inserts the primary
       // attendee's booking first, so it gets the lowest id in a submission.
       // Processing primary first lets a single handlePaymentSuccess replay
@@ -98,9 +100,9 @@ class BookingCleanupCron {
         FROM bookings b
         WHERE b.status = 0
           AND b.admin_payment_received = 0
-          AND b.created < DATE_SUB(NOW(), INTERVAL ? MINUTE)
+          AND b.created < DATE_SUB(?, INTERVAL ? MINUTE)
         ORDER BY b.id ASC
-      `, [timeoutMinutes]);
+      `, [cleanupAt, timeoutMinutes]);
 
       if (unpaidBookings.length === 0) {
         console.log('[CLEANUP CRON] No unpaid bookings to clean up');
@@ -182,9 +184,9 @@ class BookingCleanupCron {
             await connection.query(`
               UPDATE course_events
               SET current_locks = GREATEST(0, current_locks - ?),
-                  modified = NOW()
+                  modified = ?
               WHERE id = ?
-            `, [booking.spaces, booking.course_event_id]);
+            `, [booking.spaces, cleanupAt, booking.course_event_id]);
           }
 
           const [primaryAttendeeRows] = await connection.query(
@@ -249,8 +251,8 @@ class BookingCleanupCron {
           await connection.query(
             `INSERT INTO booking_update_history
                (booking_id, updated_by_admin_id, type, status, created, modified)
-             VALUES (?, 0, 'deleted', ?, NOW(), NOW())`,
-            [booking.id, `Auto-cleanup: unpaid timeout after ${timeoutMinutes} minutes`]
+             VALUES (?, 0, 'deleted', ?, ?, ?)`,
+            [booking.id, `Auto-cleanup: unpaid timeout after ${timeoutMinutes} minutes`, cleanupAt, cleanupAt]
           );
 
           await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
