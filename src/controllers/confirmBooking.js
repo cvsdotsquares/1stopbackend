@@ -307,7 +307,7 @@ const sendBookingEmail = async (bookingData, pool, meta = {}) => {
   const mailOptions = {
     from: fromHeader || fromAddress,
     ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
-    to: toAddress,
+    //to: toAddress,
     bcc: bccVal || undefined,
     subject,
     html,
