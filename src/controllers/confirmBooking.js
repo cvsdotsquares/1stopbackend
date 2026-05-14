@@ -3,6 +3,7 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
+const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
 const isDeadlockError = (err) =>
   !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
@@ -102,6 +103,15 @@ const normalizeUrl = (value, fallback = '') => {
   if (!url) return fallback;
   if (/^https?:\/\//i.test(url)) return url.replace(/^http:\/\//i, 'https://');
   return `https://${url}`;
+};
+
+const toTitleCase = (value) => {
+  const input = String(value || '').trim();
+  if (!input) return '';
+
+  return input.replace(/\w\S*/g, (text) =>
+    text.charAt(0).toUpperCase() + text.substr(1).toLowerCase()
+  );
 };
 
 const mapBikeHireToVehicleType = (bikeHire) => {
@@ -402,6 +412,7 @@ const confirmBooking = (pool) => async (req, res) => {
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
+      const createdAt = getCurrentMysqlDateTime();
 
       // Step 1: Validate Space Lock
       const [lockCheck] = await connection.query('SELECT id FROM lock_bookings WHERE event_id = ? AND id = ?', [course_event_id, space_hold_id]);
@@ -434,8 +445,8 @@ const confirmBooking = (pool) => async (req, res) => {
         INSERT INTO bookings (course_id, course_event_id, user_id, booking_made_by_id, booking_made_by, type_of_book, spaces,
           payment_due, total_fees, vatrate, vat, total_amount, status, lockid, created, modified, admin_payment_received,
           is_promo_applied, promo_code_id, promo_code_data)
-        VALUES (?, ?, 0, 5, 'admin', 'r', 1, ?, ?, 0, 0, ?, 0, ?, NOW(), NOW(), ?, 0, 0, ?)
-      `, [courseId, eventId, course_cost, course_cost, course_cost, space_hold_id, course_cost, JSON.stringify({original_amount: []})]);
+        VALUES (?, ?, 0, 5, 'admin', 'r', 1, ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, 0, 0, ?)
+      `, [courseId, eventId, course_cost, course_cost, course_cost, space_hold_id, createdAt, createdAt, course_cost, JSON.stringify({original_amount: []})]);
 
       const bookingId = bookingResult.insertId;
       console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/confirmBooking.js (RideTo step 4) | booking_id=${bookingId} | course_event_id=${eventId} | rideto_order_number=${rideto_order_number}`);
@@ -445,7 +456,10 @@ const confirmBooking = (pool) => async (req, res) => {
       // Step 5 & 6: Save Attendee to dropdown
       const cleanedPhone = (phone || '').replace(/\s+/g, '');
       const upperLicence = (driving_licence || '').trim().toUpperCase();
-      const fullName = `${first_name} ${last_name || ''} (rt#${rideto_order_number})`.trim();
+      const properFirstName = toTitleCase(first_name);
+      const properLastName = toTitleCase(last_name);
+      const displayName = [properFirstName, properLastName].filter(Boolean).join(' ');
+      const fullName = `${displayName} (rt#${rideto_order_number})`.trim();
       const dobMysql = parseDobToMysql(date_of_birth);
 
       let contactCardId;
@@ -460,16 +474,16 @@ const confirmBooking = (pool) => async (req, res) => {
             `UPDATE booking_attendees_dropdown
              SET booking_id = ?, booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, email = ?, license_number = ?, rideto_orderid = ?, date_of_birth = ?, updated = NOW()
              WHERE id = ?`,
-            [bookingId, booking_ref, first_name, last_name, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql, contactCardId]
+            [bookingId, booking_ref, properFirstName, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql, contactCardId]
           );
         } else {
           const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-            [bookingId, booking_ref, first_name, last_name, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql]);
+            [bookingId, booking_ref, properFirstName, fullName, cleanedPhone, email || '', upperLicence, rideto_order_number, dobMysql]);
           contactCardId = cardResult.insertId;
         }
       } else {
         const [cardResult] = await connection.query(`INSERT INTO booking_attendees_dropdown (booking_id, booking_ref, first_name, sur_name, contact1, email, license_number, rideto_orderid, date_of_birth, created, updated) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, NOW(), NOW())`,
-          [bookingId, booking_ref, first_name, last_name, cleanedPhone, email || '', rideto_order_number, dobMysql]);
+          [bookingId, booking_ref, properFirstName, fullName, cleanedPhone, email || '', rideto_order_number, dobMysql]);
         contactCardId = cardResult.insertId;
       }
 
@@ -479,7 +493,7 @@ const confirmBooking = (pool) => async (req, res) => {
           vehicle_type, license_type, license_number, theory_number, admin_notes, notes, date_of_birth, \`primary\`, created, previousparent,
           rideto_orderid, contact_card_id)
         VALUES (?, ?, ?, ?, ?, '', '', ?, ?, 1, ?, '', '', '', ?, 1, NOW(), '', ?, ?)
-      `, [booking_ref, bookingId, first_name, last_name, cleanedPhone, email || '', vehicleType, upperLicence, dobMysql, rideto_order_number, contactCardId]);
+      `, [booking_ref, bookingId, properFirstName, fullName, cleanedPhone, email || '', vehicleType, upperLicence, dobMysql, rideto_order_number, contactCardId]);
 
       // Step 8: Check/Insert User
       if (email) {
@@ -487,7 +501,7 @@ const confirmBooking = (pool) => async (req, res) => {
         let userId;
         if (existingUser.length === 0) {
           const [userResult] = await connection.query(`INSERT INTO users (first_name, sur_name, email, contact1, reg_type, status, created) VALUES (?, ?, ?, ?, 'g', 1, NOW())`,
-            [first_name, last_name || '', email, cleanedPhone]);
+            [properFirstName, properLastName, email, cleanedPhone]);
           userId = userResult.insertId;
         } else {
           userId = existingUser[0].id;
@@ -510,8 +524,8 @@ const confirmBooking = (pool) => async (req, res) => {
       const bookingEmailData = await buildBookingEmailData(connection, {
         bookingId,
         booking_ref,
-        first_name,
-        last_name: last_name || '',
+        first_name: properFirstName,
+        last_name: properLastName,
         rideto_order_number,
         bike_hire: resolvedBikeHire,
         course_type,
