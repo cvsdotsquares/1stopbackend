@@ -459,7 +459,7 @@ const confirmBooking = (pool) => async (req, res) => {
       const properFirstName = toTitleCase(first_name);
       const properLastName = toTitleCase(last_name);
       const displayName = [properFirstName, properLastName].filter(Boolean).join(' ');
-      const fullName = `${displayName} (rt#${rideto_order_number})`.trim();
+      const fullName = `${properLastName} (rt#${rideto_order_number})`.trim();
       const dobMysql = parseDobToMysql(date_of_birth);
 
       let contactCardId;
