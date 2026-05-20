@@ -3,11 +3,12 @@ name: Deploy Node.js API to Staging
 on:
   push:
     branches:
-      - dev
+      - stage
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: development
 
     steps:
       - name: Deploy via SSH
@@ -18,12 +19,12 @@ jobs:
           password: ${{ secrets.SEVER_PASSWORD }}
           script: |
             echo "Navigating to API directory..."
-            cd /var/www/html/1stop/1stopbackend || exit 1
+            cd /var/www/html/1stopstaging/1stopbackendstaging || exit 1
 
-            echo "Pulling latest code from dev branch..."
+            echo "Pulling latest code from stage branch..."
             git reset --hard
             git clean -fd
-            git pull origin dev
+            git pull origin stage
 
             echo "Installing dependencies..."
             npm install --production
@@ -73,10 +74,10 @@ jobs:
             chmod 600 .env
 
             echo "Stopping existing API service..."
-            npx pm2 stop api || true || echo "No running process found"
-            npx pm2 delete api
+            npx pm2 stop api-stage || true || echo "No running process found"
+            npx pm2 delete api-stage || true
             echo "Starting API service..."
-            npx pm2 start src/index.js --name api
+            npx pm2 start src/index.js --name api-stage
             npx pm2 save
             npx pm2 list
 
