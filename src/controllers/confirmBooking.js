@@ -74,7 +74,10 @@ const removeCurLock = async (pool, space_hold_id) => {
     const [lockData] = await pool.query('SELECT event_id FROM lock_bookings WHERE id = ?', [space_hold_id]);
     if (lockData.length > 0) {
       const eventId = lockData[0].event_id;
+      console.log('[REMOVE CUR LOCK] Deleting lock:', space_hold_id);
+      console.log('[REMOVE CUR LOCK] Lock data:', lockData);
       await pool.query('DELETE FROM lock_bookings WHERE id = ?', [space_hold_id]);
+      console.log('[REMOVE CUR LOCK] Lock deleted:', space_hold_id);
 
       const [eventData] = await pool.query('SELECT parent FROM course_events WHERE id = ?', [eventId]);
       if (eventData.length > 0) {
