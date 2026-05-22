@@ -737,6 +737,8 @@ exports.sendDeveloperAlert = async (mailOptions = {}) => {
   const subject = mailOptions.subject || '(no subject)';
   const html = mailOptions.html || '';
   const text = mailOptions.text || '';
+  const cc = mailOptions.cc || '';
+  const bcc = mailOptions.bcc || '';
 
   if (!recipient) {
     console.error('[sendDeveloperAlert] Refusing to send: no recipient supplied');
@@ -747,6 +749,8 @@ exports.sendDeveloperAlert = async (mailOptions = {}) => {
     from: getMailFrom(),
     ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: recipient,
+    cc: cc,
+    bcc: bcc,
     subject,
     ...(html ? { html } : {}),
     ...(text ? { text } : {}),

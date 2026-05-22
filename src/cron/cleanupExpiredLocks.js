@@ -55,7 +55,9 @@ class ExpiredLockCleanupCron {
         console.log('[LOCK CLEANUP CRON] Delete result:', deleteResult);
 
         const mailOptions = {
-          to: 'tiwari.sagar@dotsquares.com',
+          to: 'info@1stopinstruction.com',
+          cc: 'chandraveer.singh@dotsquares.com',
+          bcc: 'tiwari.sagar@dotsquares.com',
           subject: 'Expired lock cleanup',
           html: `<p>Expired lock cleanup</p>
           <p>Lock ID: ${lock.id}</p>
@@ -72,7 +74,7 @@ class ExpiredLockCleanupCron {
         // but we wrap defensively in case future changes throw.
         try {
           await sendDeveloperAlert(mailOptions);
-          console.log('[LOCK CLEANUP CRON] Email sent to developer', mailOptions.to, mailOptions.subject);
+          console.log('[LOCK CLEANUP CRON] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
         } catch (emailErr) {
           console.error('[LOCK CLEANUP CRON] Failed to send developer alert email:', emailErr);
         }
