@@ -84,6 +84,7 @@ const removeSpaceInDb = async (pool, eventId, lockId) => {
 };
 
 const removeSpace = (pool) => async (req, res) => {
+  console.log('[REMOVE SPACE] Request received', req.body);
   if (req.method !== 'POST') {
     return res.status(405).json({ message: `Method "${req.method}" not allowed.` });
   }

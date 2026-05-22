@@ -74,7 +74,10 @@ const removeCurLock = async (pool, space_hold_id) => {
     const [lockData] = await pool.query('SELECT event_id FROM lock_bookings WHERE id = ?', [space_hold_id]);
     if (lockData.length > 0) {
       const eventId = lockData[0].event_id;
+      console.log('[REMOVE CUR LOCK] Deleting lock:', space_hold_id);
+      console.log('[REMOVE CUR LOCK] Lock data:', lockData);
       await pool.query('DELETE FROM lock_bookings WHERE id = ?', [space_hold_id]);
+      console.log('[REMOVE CUR LOCK] Lock deleted:', space_hold_id);
 
       const [eventData] = await pool.query('SELECT parent FROM course_events WHERE id = ?', [eventId]);
       if (eventData.length > 0) {
@@ -380,6 +383,8 @@ const confirmBooking = (pool) => async (req, res) => {
     return res.status(405).json({ message: 'Method not allowed' });
   }
 
+  console.log('[CONFIRM BOOKING] Request received', JSON.stringify(req.body));
+
   const validationErrors = validateRequest(req.body);
   if (validationErrors) {
     logRequest(400, 'Validation failed', validationErrors);
@@ -536,7 +541,11 @@ const confirmBooking = (pool) => async (req, res) => {
       });
 
       // Step 11: Remove Lock
-      await removeCurLock(connection, space_hold_id);
+      if (bookingId) {
+        console.log('[CONFIRM BOOKING] Removing lock:', space_hold_id);
+        await removeCurLock(connection, space_hold_id);
+      }
+
 
       await connection.commit();
       return {

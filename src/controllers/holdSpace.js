@@ -165,6 +165,7 @@ const lockBooking = async (pool, eventId, spaceRequired) => {
       [parentEvent.id]
     );
 
+    console.log('[HOLD SPACE] Course is locked.', { school_course_id: params.school_course_id , event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
     logMessage('Course is locked.', { school_course_id: params.school_course_id , event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
 
     const mailOptions = {
