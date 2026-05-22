@@ -541,10 +541,9 @@ const confirmBooking = (pool) => async (req, res) => {
       });
 
       // Step 11: Remove Lock
-      if (bookingId) {
         console.log('[CONFIRM BOOKING] Removing lock:', space_hold_id);
         await removeCurLock(connection, space_hold_id);
-      }
+
 
 
       await connection.commit();
