@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const { sendDeveloperAlert } = require('../utils/emailService');
 
 /**
  * Mirrors 1stop-php/admin/cron/automatic_remove_space.php
@@ -48,7 +49,34 @@ class ExpiredLockCleanupCron {
       let eventRowsTouched = 0;
 
       for (const lock of locksToProcess) {
+        console.log('[LOCK CLEANUP CRON] Deleting lock:', lock.id);
+        console.log('[LOCK CLEANUP CRON] Lock Data:', JSON.stringify(lock));
         const [deleteResult] = await connection.query('DELETE FROM lock_bookings WHERE id = ?', [lock.id]);
+        console.log('[LOCK CLEANUP CRON] Delete result:', deleteResult);
+
+        const mailOptions = {
+          to: 'tiwari.sagar@dotsquares.com',
+          subject: 'Expired lock cleanup',
+          html: `<p>Expired lock cleanup</p>
+          <p>Lock ID: ${lock.id}</p>
+          <p>Delete result: ${JSON.stringify(deleteResult)}</p>
+          <p>Locks to process: ${JSON.stringify(locksToProcess)}</p>`,
+          text: `Expired lock cleanup
+          Lock ID: ${lock.id}
+          Delete result: ${JSON.stringify(deleteResult)}
+          Locks to process: ${JSON.stringify(locksToProcess)}`
+        };
+
+        // Isolate email failures: SMTP issues must not roll back the cleanup
+        // transaction. sendDeveloperAlert already swallows its own errors,
+        // but we wrap defensively in case future changes throw.
+        try {
+          await sendDeveloperAlert(mailOptions);
+          console.log('[LOCK CLEANUP CRON] Email sent to developer', mailOptions.to, mailOptions.subject);
+        } catch (emailErr) {
+          console.error('[LOCK CLEANUP CRON] Failed to send developer alert email:', emailErr);
+        }
+        console.log('[LOCK CLEANUP CRON] Deleted lock:', lock.id, 'with result:', deleteResult);
         if (!deleteResult || deleteResult.affectedRows === 0) {
           continue;
         }

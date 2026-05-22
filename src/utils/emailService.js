@@ -721,6 +721,46 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   return { success: true, status: emailStatus };
 };
 
+/**
+ * Generic transactional alert helper for internal/developer notifications
+ * (e.g. cron health pings, cleanup summaries). Applies the configured From /
+ * Reply-To and swallows SMTP failures so callers don't break their own flow.
+ *
+ * `mailOptions.from` is ignored; the From address is always taken from the
+ * MAIL_FROM_* env config so dev alerts can't accidentally bypass it.
+ *
+ * Intentionally does NOT write to `email_logs` — these are internal alerts,
+ * not customer-facing mail, so we don't pollute the audit table with them.
+ */
+exports.sendDeveloperAlert = async (mailOptions = {}) => {
+  const recipient = String(mailOptions.to || '').trim();
+  const subject = mailOptions.subject || '(no subject)';
+  const html = mailOptions.html || '';
+  const text = mailOptions.text || '';
+
+  if (!recipient) {
+    console.error('[sendDeveloperAlert] Refusing to send: no recipient supplied');
+    return { success: false, status: 0, error: new Error('No recipient supplied') };
+  }
+
+  const finalOptions = {
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+    to: recipient,
+    subject,
+    ...(html ? { html } : {}),
+    ...(text ? { text } : {}),
+  };
+
+  try {
+    await transporter.sendMail(finalOptions);
+    return { success: true, status: 1, error: null };
+  } catch (error) {
+    console.error('[sendDeveloperAlert] Error sending developer alert email:', error);
+    return { success: false, status: 0, error };
+  }
+};
+
 exports.sendGiftVoucherEmail = async (voucherData, pool) => {
   const {
     voucher_ref,
