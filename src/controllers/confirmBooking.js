@@ -383,6 +383,8 @@ const confirmBooking = (pool) => async (req, res) => {
     return res.status(405).json({ message: 'Method not allowed' });
   }
 
+  console.log('[CONFIRM BOOKING] Request received', JSON.stringify(req.body));
+
   const validationErrors = validateRequest(req.body);
   if (validationErrors) {
     logRequest(400, 'Validation failed', validationErrors);
@@ -539,7 +541,11 @@ const confirmBooking = (pool) => async (req, res) => {
       });
 
       // Step 11: Remove Lock
-      await removeCurLock(connection, space_hold_id);
+      if (bookingId) {
+        console.log('[CONFIRM BOOKING] Removing lock:', space_hold_id);
+        await removeCurLock(connection, space_hold_id);
+      }
+
 
       await connection.commit();
       return {
