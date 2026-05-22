@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { sendDeveloperAlert } = require('../utils/emailService');
 
 const LOG_FILE = path.join(__dirname, '../../restapi/booking/hold_space.txt');
 
@@ -164,7 +165,40 @@ const lockBooking = async (pool, eventId, spaceRequired) => {
       [parentEvent.id]
     );
 
+    logMessage('Course is locked.', { school_course_id: params.school_course_id , event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
+
+    const mailOptions = {
+      to: 'info@1stopinstruction.com',
+      cc: 'chandraveer.singh@dotsquares.com',
+      bcc: 'tiwari.sagar@dotsquares.com',
+      subject: 'Course is locked.',
+      html: `<p>Course is locked.</p>
+      <p>School course id: ${params.school_course_id}</p>
+      <p>Event id: ${eventId}</p>
+      <p>Parent: ${parentEvent.parent}</p>
+      <p>Space required: ${spaceRequired}</p>
+      <p>Inserted lock: ${JSON.stringify(insertResult)}</p>
+    `,
+      text: `Course is locked.
+      School course id: ${params.school_course_id}
+      Event id: ${eventId}
+      Parent: ${parentEvent.parent}
+      Space required: ${spaceRequired}
+      Inserted lock: ${JSON.stringify(insertResult)}`
+    };
+
     await conn.commit();
+
+    // Send the developer alert AFTER commit so SMTP latency doesn't hold the
+    // row lock on course_events, and we never email about a hold that ended
+    // up rolled back. Failures here must not affect the caller — the lock is
+    // already persisted.
+    try {
+      await sendDeveloperAlert(mailOptions);
+      console.log('[HOLD SPACE] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
+    } catch (err) {
+      console.error('[HOLD SPACE] Error sending developer alert email:', err);
+    }
 
     return {
       id: insertResult.insertId,
