@@ -128,7 +128,7 @@ const checkAvailability = async (pool, params) => {
   return rows && rows.length > 0 ? rows[0] : null;
 };
 
-const lockBooking = async (pool, eventId, spaceRequired) => {
+const lockBooking = async (pool, eventId, spaceRequired, params = {}) => {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -165,8 +165,8 @@ const lockBooking = async (pool, eventId, spaceRequired) => {
       [parentEvent.id]
     );
 
-    console.log('[HOLD SPACE] Course is locked.', { school_course_id: params.school_course_id , event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
-    logMessage('Course is locked.', { school_course_id: params.school_course_id , event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
+    console.log('[HOLD SPACE] Course is locked.', { school_course_id: params.school_course_id, event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
+    logMessage('Course is locked.', { school_course_id: params.school_course_id, event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
 
     const mailOptions = {
       to: 'info@1stopinstruction.com',
@@ -258,7 +258,7 @@ const holdSpace = (pool) => async (req, res) => {
       });
     }
 
-    const lock = await lockBooking(pool, holdRow.eventId, 1);
+    const lock = await lockBooking(pool, holdRow.eventId, 1, params);
     if (!lock) {
       logMessage('Course is not available.', { school_course_id: params.school_course_id });
       return res.status(400).json({
