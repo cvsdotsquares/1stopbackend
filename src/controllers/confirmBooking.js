@@ -4,6 +4,7 @@ const nodemailer = require('nodemailer');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
+const { sendDeveloperAlert } = require('../utils/emailService');
 
 const isDeadlockError = (err) =>
   !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
@@ -73,7 +74,10 @@ const removeCurLock = async (pool, space_hold_id) => {
     const [lockData] = await pool.query('SELECT event_id FROM lock_bookings WHERE id = ?', [space_hold_id]);
     if (lockData.length > 0) {
       const eventId = lockData[0].event_id;
+      console.log('[REMOVE CUR LOCK] Deleting lock:', space_hold_id);
+      console.log('[REMOVE CUR LOCK] Lock data:', lockData);
       await pool.query('DELETE FROM lock_bookings WHERE id = ?', [space_hold_id]);
+      console.log('[REMOVE CUR LOCK] Lock deleted:', space_hold_id);
 
       const [eventData] = await pool.query('SELECT parent FROM course_events WHERE id = ?', [eventId]);
       if (eventData.length > 0) {
@@ -379,6 +383,8 @@ const confirmBooking = (pool) => async (req, res) => {
     return res.status(405).json({ message: 'Method not allowed' });
   }
 
+  console.log('[CONFIRM BOOKING] Request received', JSON.stringify(req.body));
+
   const validationErrors = validateRequest(req.body);
   if (validationErrors) {
     logRequest(400, 'Validation failed', validationErrors);
@@ -535,7 +541,10 @@ const confirmBooking = (pool) => async (req, res) => {
       });
 
       // Step 11: Remove Lock
-      await removeCurLock(connection, space_hold_id);
+        console.log('[CONFIRM BOOKING] Removing lock:', space_hold_id);
+        await removeCurLock(connection, space_hold_id);
+
+
 
       await connection.commit();
       return {
@@ -589,7 +598,28 @@ const confirmBooking = (pool) => async (req, res) => {
 
   // Branch on transactional outcome
   if (result.kind === 'lock_missing') {
-    logRequest(402, 'Course is not locked', { school_course_id });
+    logRequest(402, 'Course is not locked', { school_course_id, course_event_id, rideto_order_number });
+    const mailOptions = {
+      to: 'info@1stopinstruction.com',
+      cc: 'chandraveer.singh@dotsquares.com',
+      bcc: 'tiwari.sagar@dotsquares.com',
+      subject: 'Course is not locked',
+      html: `<p>Course is not locked.</p>
+      <p>School course id: ${school_course_id}</p>
+      <p>Course event id: ${course_event_id}</p>
+      <p>Rideto order number: ${rideto_order_number}</p>
+    `,
+      text: `Course is not locked.
+      School course id: ${school_course_id}
+      Course event id: ${course_event_id}
+      Rideto order number: ${rideto_order_number}`
+    };
+    try {
+      await sendDeveloperAlert(mailOptions);
+      console.log('[CONFIRM BOOKING] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
+    } catch (err) {
+      console.error('[CONFIRM BOOKING] Error sending developer alert email:', err);
+    }
     return res.status(400).json({ message: 'Course is not locked', school_course_id });
   }
   if (result.kind === 'duplicate') {
