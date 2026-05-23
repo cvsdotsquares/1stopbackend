@@ -169,9 +169,9 @@ const lockBooking = async (pool, eventId, spaceRequired, params = {}) => {
     logMessage('Course is locked.', { school_course_id: params.school_course_id, event_id: eventId, parent: parentEvent.parent, space_required: spaceRequired, inserted_lock: insertResult });
 
     const mailOptions = {
-      to: 'info@1stopinstruction.com',
+      to: 'tiwari.sagar@dotsquares.com',
       cc: 'chandraveer.singh@dotsquares.com',
-      bcc: 'tiwari.sagar@dotsquares.com',
+      bcc: '',
       subject: 'Course is locked.',
       html: `<p>Course is locked.</p>
       <p>School course id: ${params.school_course_id}</p>
