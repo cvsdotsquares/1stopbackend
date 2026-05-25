@@ -55,9 +55,9 @@ class ExpiredLockCleanupCron {
         console.log('[LOCK CLEANUP CRON] Delete result:', deleteResult);
 
         const mailOptions = {
-          to: 'info@1stopinstruction.com',
+          to: 'tiwari.sagar@dotsquares.com',
           cc: 'chandraveer.singh@dotsquares.com',
-          bcc: 'tiwari.sagar@dotsquares.com',
+          bcc: '',
           subject: 'Expired lock cleanup',
           html: `<p>Expired lock cleanup</p>
           <p>Lock ID: ${lock.id}</p>
