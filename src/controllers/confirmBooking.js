@@ -600,9 +600,9 @@ const confirmBooking = (pool) => async (req, res) => {
   if (result.kind === 'lock_missing') {
     logRequest(402, 'Course is not locked', { school_course_id, course_event_id, rideto_order_number });
     const mailOptions = {
-      to: 'info@1stopinstruction.com',
+      to: 'tiwari.sagar@dotsquares.com',
       cc: 'chandraveer.singh@dotsquares.com',
-      bcc: 'tiwari.sagar@dotsquares.com',
+      bcc: '',
       subject: 'Course is not locked',
       html: `<p>Course is not locked.</p>
       <p>School course id: ${school_course_id}</p>
