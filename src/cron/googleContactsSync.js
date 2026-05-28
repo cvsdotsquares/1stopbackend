@@ -14,7 +14,7 @@ const cron = require('node-cron');
 const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
 
-const CRON_SCHEDULE = '*/1 * * * *';
+const CRON_SCHEDULE = '*/15 * * * *';
 const SYNC_DELAY_MINUTES = Number(process.env.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES || 15);
 const LOG_PREFIX = '[GOOGLE CONTACTS CRON]';
 const UPDATE_PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,biographies';
