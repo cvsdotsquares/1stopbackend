@@ -12,13 +12,25 @@
 
 const cron = require('node-cron');
 const { google } = require('googleapis');
-const { getAuthClient } = require('../lib/oauth');
+const { OAuth2Client } = require('google-auth-library');
 
-const CRON_SCHEDULE = '*/15 * * * *';
+const CRON_SCHEDULE = '*/1 * * * *';
 const SYNC_DELAY_MINUTES = Number(process.env.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES || 15);
 const LOG_PREFIX = '[GOOGLE CONTACTS CRON]';
 const UPDATE_PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,biographies';
 const READ_PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,biographies,metadata';
+
+function getAuthClient() {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) {
+    console.warn(`${LOG_PREFIX} Google OAuth env vars missing (GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN); cron will fail to authenticate.`);
+  }
+  const client = new OAuth2Client(clientId, clientSecret);
+  client.setCredentials({ refresh_token: refreshToken });
+  return client;
+}
 
 function log(...args) {
   console.log(LOG_PREFIX, ...args);
