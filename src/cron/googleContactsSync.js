@@ -1,258 +1,201 @@
 // src/cron/googleContactsSync.js
-// Periodic worker for processing google_contacts_sync rows.
-// This is intentionally simple / low-volume, similar to the cleanup cron jobs.
+// Periodic worker for processing rows in `google_contacts_sync`.
+//
+// Picks up entries created at least N minutes before "now" (default 15 min)
+// and dispatches them to the Google People API based on `event_type`:
+//   - 'insert' -> create the Google contact, store resourceName on
+//                 booking_attendees_dropdown.google_profile_id
+//   - 'update' -> update the Google contact identified by google_id
+//   - 'delete' -> remove the Google contact identified by google_id
+// In all three cases the corresponding `google_contacts_sync` row is removed
+// after the operation completes successfully.
+
 const cron = require('node-cron');
 const { google } = require('googleapis');
 const { getAuthClient } = require('../lib/oauth');
 
-const CRON_SCHEDULE = process.env.GOOGLE_CONTACTS_CRON_SCHEDULE || '*/15 * * * *';
-const STATUS_PENDING = 1;
+const CRON_SCHEDULE = '*/15 * * * *';
+const SYNC_DELAY_MINUTES = Number(process.env.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES || 15);
+const LOG_PREFIX = '[GOOGLE CONTACTS CRON]';
+const UPDATE_PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,biographies';
+const READ_PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,biographies,metadata';
 
-function mapPersonPayload(attendee) {
-  const names = [];
-  if (attendee.first_name || attendee.last_name || attendee.full_name) {
-    names.push({
-      givenName: attendee.first_name || '',
-      familyName: attendee.last_name || '',
-      displayName: attendee.full_name || ((attendee.first_name || '') + ' ' + (attendee.last_name || '')).trim()
-    });
-  }
-
-  const emailAddresses = attendee.email ? [{ value: attendee.email }] : [];
-  const phoneNumbers = attendee.phone ? [{ value: attendee.phone }] : [];
-  const addresses = (attendee.address1 || attendee.city || attendee.region || attendee.postcode || attendee.country) ? [{
-    streetAddress: attendee.address1 || '',
-    city: attendee.city || '',
-    region: attendee.region || '',
-    postalCode: attendee.postcode || '',
-    country: attendee.country || ''
-  }] : [];
-  const organizations = (attendee.organization_name || attendee.job_title) ? [{
-    name: attendee.organization_name || '',
-    title: attendee.job_title || ''
-  }] : [];
-  const userDefined = [];
-  if (attendee.id) userDefined.push({ key: 'local_contact_id', value: String(attendee.id) });
-  if (attendee.license_number) userDefined.push({ key: 'license_number', value: String(attendee.license_number) });
-
-  const payload = {};
-  if (names.length) payload.names = names;
-  if (emailAddresses.length) payload.emailAddresses = emailAddresses;
-  if (phoneNumbers.length) payload.phoneNumbers = phoneNumbers;
-  if (addresses.length) payload.addresses = addresses;
-  if (organizations.length) payload.organizations = organizations;
-  if (userDefined.length) payload.userDefined = userDefined;
-  return payload;
+function log(...args) {
+  console.log(LOG_PREFIX, ...args);
+}
+function logWarn(...args) {
+  console.warn(LOG_PREFIX, ...args);
+}
+function logError(...args) {
+  console.error(LOG_PREFIX, ...args);
 }
 
 function normalizeError(error) {
   if (!error) return { message: 'Unknown error' };
-  if (error.response && error.response.data) {
-    return error.response.data;
-  }
-  if (error.message) {
-    return { message: error.message };
-  }
+  if (error.response && error.response.data) return error.response.data;
+  if (error.message) return { message: error.message };
   return { message: String(error) };
 }
 
-function isPermanentError(errorBody) {
-  const status = errorBody?.status || errorBody?.code || null;
-  if (!status) return false;
-  const statusCode = Number(status);
-  return Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500 && statusCode !== 429;
-}
+function buildPersonPayload(attendee) {
+  const givenName = (attendee.first_name || '').trim();
+  const familyName = (attendee.sur_name || '').trim();
+  const displayName = `${givenName} ${familyName}`.trim();
 
-async function archiveSyncResult(pool, meta) {
-  const sql = `INSERT INTO google_contacts_sync_after_synced
-    (contact_id, event_type, google_id, status)
-    VALUES (?, ?, ?, ?)`;
-  const params = [
-    meta.contact_id || null,
-    meta.event_type || null,
-    meta.google_id || null,
-    meta.status || STATUS_PENDING
-  ];
-  try {
-    await pool.query(sql, params);
-  } catch (e) {
-    console.warn('[GOOGLE CONTACTS CRON] Could not archive sync result:', e.message || e);
+  const payload = {};
+
+  if (givenName || familyName) {
+    payload.names = [{
+      givenName,
+      familyName,
+      ...(displayName ? { displayName } : {})
+    }];
   }
+
+  if (attendee.email) {
+    payload.emailAddresses = [{ value: String(attendee.email).trim() }];
+  }
+
+  const phones = [];
+  if (attendee.contact1) phones.push({ value: String(attendee.contact1).trim(), type: 'mobile' });
+  if (attendee.contact2) phones.push({ value: String(attendee.contact2).trim(), type: 'other' });
+  if (phones.length) payload.phoneNumbers = phones;
+
+  if (attendee.booking_ref) {
+    payload.biographies = [{
+      value: `Booking Ref: ${attendee.booking_ref}`,
+      contentType: 'TEXT_PLAIN'
+    }];
+  }
+
+  return payload;
 }
 
-async function markSyncRowDone(pool, syncId, meta) {
-  const googleId = meta.google_id || null;
-  await archiveSyncResult(pool, Object.assign({}, meta, { sync_id: syncId, status: STATUS_PENDING, google_id: googleId }));
+async function fetchAttendee(pool, contactId) {
+  const [rows] = await pool.query(
+    `SELECT id, first_name, sur_name, contact1, contact2, email, booking_ref
+     FROM booking_attendees_dropdown
+     WHERE id = ?
+     LIMIT 1`,
+    [contactId]
+  );
+  return rows[0] || null;
+}
+
+async function deleteSyncRow(pool, syncId) {
   await pool.query('DELETE FROM google_contacts_sync WHERE id = ?', [syncId]);
 }
 
-async function markSyncRowFailed(pool, syncRow, errorBody) {
-  const permanent = isPermanentError(errorBody);
-  if (permanent) {
-    await archiveSyncResult(pool, {
-      contact_id: syncRow.contact_id,
-      event_type: syncRow.event_type,
-      google_id: syncRow.google_id || null,
-      status: STATUS_PENDING
-    });
-    await pool.query('DELETE FROM google_contacts_sync WHERE id = ?', [syncRow.id]);
-  } else {
-    console.error('[GOOGLE CONTACTS CRON] Transient error, leaving sync row for retry:', normalizeError(errorBody));
-  }
-}
-
-async function getPendingRows(connection) {
-  const [rows] = await connection.query(
-    `SELECT id, contact_id, event_type, google_id, created
-     FROM google_contacts_sync
-     WHERE status = ?
-     ORDER BY id
-     FOR UPDATE`,
-    [STATUS_PENDING]
-  );
-  return rows;
-}
-
-async function acquirePendingRows(connection, rows) {
-  return rows;
-}
-
-async function processSyncRow(pool, syncRow, authClient) {
-  const people = google.people({ version: 'v1', auth: authClient });
-  const contactId = syncRow.contact_id;
-  if (!contactId) {
-    await markSyncRowFailed(pool, syncRow, { message: 'Missing contact_id in sync row' });
-    return;
-  }
-
-  const [attendeeRows] = await pool.query('SELECT * FROM booking_attendees_dropdown WHERE id = ? LIMIT 1', [contactId]);
-  const attendee = attendeeRows[0];
+async function handleInsert(pool, peopleApi, syncRow) {
+  const attendee = await fetchAttendee(pool, syncRow.contact_id);
   if (!attendee) {
-    await markSyncRowFailed(pool, syncRow, { message: 'booking_attendees_dropdown row not found', contact_id: contactId });
+    logWarn(`[INSERT] booking_attendees_dropdown row not found (contact_id=${syncRow.contact_id}); dropping sync row id=${syncRow.id}`);
+    await deleteSyncRow(pool, syncRow.id);
     return;
   }
 
-  const eventType = String(syncRow.event_type || '').toLowerCase();
-  const personPayload = mapPersonPayload(attendee);
+  const payload = buildPersonPayload(attendee);
+  log(`[INSERT] Creating Google contact (sync_id=${syncRow.id}, contact_id=${attendee.id}, booking_ref=${attendee.booking_ref || 'N/A'})`);
 
-  async function updateAttendeeEtag(resourceName, responseData) {
-    const etag = responseData?.metadata?.sources?.[0]?.etag || null;
-    if (etag !== null) {
-      await pool.query('UPDATE booking_attendees_dropdown SET google_profile_etag = ? WHERE id = ?', [etag, attendee.id]);
+  const res = await peopleApi.people.createContact({
+    requestBody: payload,
+    personFields: UPDATE_PERSON_FIELDS
+  });
+
+  const resourceName = res?.data?.resourceName;
+  if (!resourceName) {
+    throw new Error('createContact did not return a resourceName');
+  }
+
+  await pool.query(
+    'UPDATE booking_attendees_dropdown SET google_profile_id = ? WHERE id = ?',
+    [resourceName, attendee.id]
+  );
+  await deleteSyncRow(pool, syncRow.id);
+
+  log(`[INSERT] OK resourceName=${resourceName} stored as google_profile_id for contact_id=${attendee.id}; sync_id=${syncRow.id} removed`);
+}
+
+async function handleUpdate(pool, peopleApi, syncRow) {
+  const attendee = await fetchAttendee(pool, syncRow.contact_id);
+  if (!attendee) {
+    logWarn(`[UPDATE] booking_attendees_dropdown row not found (contact_id=${syncRow.contact_id}); dropping sync row id=${syncRow.id}`);
+    await deleteSyncRow(pool, syncRow.id);
+    return;
+  }
+
+  const resourceName = syncRow.google_id;
+  if (!resourceName) {
+    logWarn(`[UPDATE] Missing google_id for sync row id=${syncRow.id} (contact_id=${attendee.id}); dropping sync row`);
+    await deleteSyncRow(pool, syncRow.id);
+    return;
+  }
+
+  log(`[UPDATE] Fetching latest etag for ${resourceName} (sync_id=${syncRow.id}, contact_id=${attendee.id})`);
+  const latest = await peopleApi.people.get({
+    resourceName,
+    personFields: READ_PERSON_FIELDS
+  });
+
+  const payload = buildPersonPayload(attendee);
+  payload.etag = latest?.data?.etag;
+
+  log(`[UPDATE] Updating Google contact ${resourceName} (sync_id=${syncRow.id}, contact_id=${attendee.id}, booking_ref=${attendee.booking_ref || 'N/A'})`);
+  await peopleApi.people.updateContact({
+    resourceName,
+    requestBody: payload,
+    updatePersonFields: UPDATE_PERSON_FIELDS,
+    personFields: UPDATE_PERSON_FIELDS
+  });
+
+  await deleteSyncRow(pool, syncRow.id);
+  log(`[UPDATE] OK resourceName=${resourceName} updated for contact_id=${attendee.id}; sync_id=${syncRow.id} removed`);
+}
+
+async function handleDelete(pool, peopleApi, syncRow) {
+  const resourceName = syncRow.google_id;
+  if (!resourceName) {
+    logWarn(`[DELETE] Missing google_id for sync row id=${syncRow.id} (contact_id=${syncRow.contact_id}); nothing to delete in Google. Dropping sync row.`);
+    await deleteSyncRow(pool, syncRow.id);
+    return;
+  }
+
+  log(`[DELETE] Deleting Google contact ${resourceName} (sync_id=${syncRow.id}, contact_id=${syncRow.contact_id})`);
+  try {
+    await peopleApi.people.deleteContact({ resourceName });
+  } catch (err) {
+    const normalized = normalizeError(err);
+    const status = Number(normalized.code || normalized.status || 0);
+    if (status === 404) {
+      logWarn(`[DELETE] Google contact ${resourceName} not found (already deleted). Continuing.`);
+    } else {
+      throw err;
     }
   }
 
+  await deleteSyncRow(pool, syncRow.id);
+  log(`[DELETE] OK resourceName=${resourceName} removed from Google; sync_id=${syncRow.id} removed`);
+}
+
+async function processSyncRow(pool, peopleApi, syncRow) {
+  const eventType = String(syncRow.event_type || '').toLowerCase();
   try {
-    if (eventType === 'create') {
-      if (attendee.google_profile_id) {
-        return await processSyncRow(pool, Object.assign({}, syncRow, { event_type: 'update' }), authClient);
-      }
-      const res = await people.people.createContact({
-        requestBody: personPayload,
-        personFields: 'names,emailAddresses,phoneNumbers,addresses,organizations,userDefined,metadata'
-      });
-      const resourceName = res?.data?.resourceName;
-      const etag = res?.data?.metadata?.sources?.[0]?.etag || null;
-      if (!resourceName) {
-        throw { message: 'createContact did not return resourceName', response: res?.data };
-      }
-      await pool.query('UPDATE booking_attendees_dropdown SET google_profile_id = ?, google_profile_etag = ? WHERE id = ?', [resourceName, etag, attendee.id]);
-      await markSyncRowDone(pool, syncRow.id, {
-        contact_id: attendee.id,
-        event_type: eventType,
-        google_id: resourceName,
-        google_resource: resourceName,
-        response_json: res.data,
-        status: STATUS_PENDING
-      });
-
+    if (eventType === 'insert') {
+      await handleInsert(pool, peopleApi, syncRow);
     } else if (eventType === 'update') {
-      const resourceName = syncRow.google_id || attendee.google_profile_id;
-      if (!resourceName) {
-        return await processSyncRow(pool, Object.assign({}, syncRow, { event_type: 'create' }), authClient);
-      }
-
-      try {
-        const res = await people.people.updateContact({
-          resourceName,
-          requestBody: personPayload,
-          updatePersonFields: Object.keys(personPayload).join(','),
-          personFields: 'names,emailAddresses,phoneNumbers,addresses,organizations,userDefined,metadata'
-        });
-        await updateAttendeeEtag(resourceName, res.data);
-        await markSyncRowDone(pool, syncRow.id, {
-          contact_id: attendee.id,
-          event_type: eventType,
-          google_id: resourceName,
-          google_resource: resourceName,
-          response_json: res.data,
-          status: STATUS_PENDING
-        });
-      } catch (err) {
-        const normalized = normalizeError(err);
-        const statusCode = Number(normalized.status || normalized.code || 0);
-        if (statusCode === 400 && JSON.stringify(normalized).includes('failedPrecondition')) {
-          try {
-            const latest = await people.people.get({
-              resourceName,
-              personFields: 'names,emailAddresses,phoneNumbers,addresses,organizations,userDefined,metadata'
-            });
-            const merged = Object.assign({}, latest.data, personPayload);
-            const retryRes = await people.people.updateContact({
-              resourceName,
-              requestBody: merged,
-              updatePersonFields: Object.keys(personPayload).join(','),
-              personFields: 'names,emailAddresses,phoneNumbers,addresses,organizations,userDefined,metadata'
-            });
-            await updateAttendeeEtag(resourceName, retryRes.data);
-            await markSyncRowDone(pool, syncRow.id, {
-              contact_id: attendee.id,
-              event_type: eventType,
-              google_id: resourceName,
-              google_resource: resourceName,
-              response_json: retryRes.data,
-              status: STATUS_PENDING
-            });
-            return;
-          } catch (retryErr) {
-            await markSyncRowFailed(pool, syncRow, normalizeError(retryErr));
-            return;
-          }
-        }
-        await markSyncRowFailed(pool, syncRow, normalized);
-      }
-
+      await handleUpdate(pool, peopleApi, syncRow);
     } else if (eventType === 'delete') {
-      const resourceName = syncRow.google_id || attendee.google_profile_id;
-      if (!resourceName) {
-        await markSyncRowDone(pool, syncRow.id, {
-          contact_id: attendee.id,
-          event_type: eventType,
-          response_json: { message: 'Nothing to delete' },
-          status: STATUS_PENDING
-        });
-        return;
-      }
-      try {
-        await people.people.deleteContact({ resourceName });
-        await pool.query('UPDATE booking_attendees_dropdown SET google_profile_id = NULL, google_profile_etag = NULL WHERE id = ?', [attendee.id]);
-        await markSyncRowDone(pool, syncRow.id, {
-          contact_id: attendee.id,
-          event_type: eventType,
-          google_id: resourceName,
-          google_resource: resourceName,
-          response_json: { message: 'deleted' },
-          status: STATUS_PENDING
-        });
-      } catch (err) {
-        await markSyncRowFailed(pool, syncRow, normalizeError(err));
-      }
-
+      await handleDelete(pool, peopleApi, syncRow);
     } else {
-      await markSyncRowFailed(pool, syncRow, { message: 'Unknown event_type', value: syncRow.event_type });
+      logWarn(`Unknown event_type='${syncRow.event_type}' for sync row id=${syncRow.id}; dropping`);
+      await deleteSyncRow(pool, syncRow.id);
     }
   } catch (error) {
-    await markSyncRowFailed(pool, syncRow, normalizeError(error));
+    const normalized = normalizeError(error);
+    logError(
+      `Failed to process sync row id=${syncRow.id} (contact_id=${syncRow.contact_id}, event_type=${syncRow.event_type}, google_id=${syncRow.google_id || 'N/A'}):`,
+      normalized
+    );
   }
 }
 
@@ -260,45 +203,63 @@ class GoogleContactsSyncCron {
   constructor(pool) {
     this.pool = pool;
     this.authClient = getAuthClient();
+    this.isRunning = false;
   }
 
   async syncPendingContacts() {
-    const connection = await this.pool.getConnection();
-    let pendingRows = [];
+    if (this.isRunning) {
+      logWarn('Previous run still in progress; skipping this tick.');
+      return;
+    }
+    this.isRunning = true;
+    const startedAt = Date.now();
+
     try {
-      pendingRows = await getPendingRows(connection);
-      if (!pendingRows.length) {
-        await connection.commit();
-        console.log('[GOOGLE CONTACTS CRON] No pending sync rows');
+      let rows;
+      try {
+        const [result] = await this.pool.query(
+          `SELECT id, contact_id, event_type, google_id
+           FROM google_contacts_sync
+           WHERE created >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+           ORDER BY id ASC`,
+          [SYNC_DELAY_MINUTES]
+        );
+        rows = result;
+        console.log('[GOOGLE CONTACTS SYNC] Rows:', rows);
+      } catch (error) {
+        logError('Failed to load pending sync rows:', error);
         return;
       }
-      await acquirePendingRows(connection, pendingRows);
-      await connection.commit();
-    } catch (error) {
-      await connection.rollback();
-      console.error('[GOOGLE CONTACTS CRON] Failed to acquire pending rows:', error);
-      return;
-    } finally {
-      connection.release();
-    }
 
-    for (const row of pendingRows) {
-      try {
-        await processSyncRow(this.pool, row, this.authClient);
-      } catch (error) {
-        console.error('[GOOGLE CONTACTS CRON] Error processing sync row', row.id, error);
+      if (!rows.length) {
+        log(`No sync rows older than ${SYNC_DELAY_MINUTES} minute(s) to process`);
+        return;
       }
-    }
 
-    console.log(`[GOOGLE CONTACTS CRON] Processed ${pendingRows.length} row(s)`);
+      log(`Picked up ${rows.length} sync row(s) older than ${SYNC_DELAY_MINUTES} minute(s); starting processing...`);
+
+      const peopleApi = google.people({ version: 'v1', auth: this.authClient });
+
+      let processed = 0;
+      for (const row of rows) {
+        await processSyncRow(this.pool, peopleApi, row);
+        processed += 1;
+      }
+
+      log(`Processed ${processed}/${rows.length} sync row(s) in ${Date.now() - startedAt}ms`);
+    } finally {
+      this.isRunning = false;
+    }
   }
 
   start() {
     cron.schedule(CRON_SCHEDULE, () => {
-      console.log('[GOOGLE CONTACTS CRON] Running scheduled sync...');
-      this.syncPendingContacts();
+      log('Running scheduled sync...');
+      this.syncPendingContacts().catch((error) => {
+        logError('Unhandled error in syncPendingContacts:', error);
+      });
     });
-    console.log(`[GOOGLE CONTACTS CRON] Scheduled to run at cron pattern: ${CRON_SCHEDULE}`);
+    log(`Scheduled at cron pattern: ${CRON_SCHEDULE} (delay window: ${SYNC_DELAY_MINUTES} min)`);
   }
 }
 
