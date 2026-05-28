@@ -35,6 +35,7 @@ const createFAQRoutes = require('./routes/faq');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
+const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -312,4 +313,8 @@ app.listen(PORT, () => {
   // Start expired lock cleanup cron
   const expiredLockCleanupCron = new ExpiredLockCleanupCron(pool);
   expiredLockCleanupCron.start();
+
+  // Start Google contacts sync cron
+  const googleContactsSyncCron = new GoogleContactsSyncCron(pool);
+  googleContactsSyncCron.start();
 });
