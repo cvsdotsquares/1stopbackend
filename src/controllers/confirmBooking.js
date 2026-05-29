@@ -614,12 +614,12 @@ const confirmBooking = (pool) => async (req, res) => {
       Course event id: ${course_event_id}
       Rideto order number: ${rideto_order_number}`
     };
-    try {
-      await sendDeveloperAlert(mailOptions);
-      console.log('[CONFIRM BOOKING] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
-    } catch (err) {
-      console.error('[CONFIRM BOOKING] Error sending developer alert email:', err);
-    }
+    // try {
+    //   await sendDeveloperAlert(mailOptions);
+    //   console.log('[CONFIRM BOOKING] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
+    // } catch (err) {
+    //   console.error('[CONFIRM BOOKING] Error sending developer alert email:', err);
+    // }
     return res.status(400).json({ message: 'Course is not locked', school_course_id });
   }
   if (result.kind === 'duplicate') {

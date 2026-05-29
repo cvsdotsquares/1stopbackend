@@ -72,12 +72,12 @@ class ExpiredLockCleanupCron {
         // Isolate email failures: SMTP issues must not roll back the cleanup
         // transaction. sendDeveloperAlert already swallows its own errors,
         // but we wrap defensively in case future changes throw.
-        try {
-          await sendDeveloperAlert(mailOptions);
-          console.log('[LOCK CLEANUP CRON] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
-        } catch (emailErr) {
-          console.error('[LOCK CLEANUP CRON] Failed to send developer alert email:', emailErr);
-        }
+        // try {
+        //   await sendDeveloperAlert(mailOptions);
+        //   console.log('[LOCK CLEANUP CRON] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
+        // } catch (emailErr) {
+        //   console.error('[LOCK CLEANUP CRON] Failed to send developer alert email:', emailErr);
+        // }
         console.log('[LOCK CLEANUP CRON] Deleted lock:', lock.id, 'with result:', deleteResult);
         if (!deleteResult || deleteResult.affectedRows === 0) {
           continue;
