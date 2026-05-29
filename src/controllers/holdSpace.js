@@ -194,12 +194,12 @@ const lockBooking = async (pool, eventId, spaceRequired, params = {}) => {
     // row lock on course_events, and we never email about a hold that ended
     // up rolled back. Failures here must not affect the caller — the lock is
     // already persisted.
-    try {
-      await sendDeveloperAlert(mailOptions);
-      console.log('[HOLD SPACE] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
-    } catch (err) {
-      console.error('[HOLD SPACE] Error sending developer alert email:', err);
-    }
+    // try {
+    //   await sendDeveloperAlert(mailOptions);
+    //   console.log('[HOLD SPACE] Email sent to developer', mailOptions.to, mailOptions.cc, mailOptions.bcc, mailOptions.subject);
+    // } catch (err) {
+    //   console.error('[HOLD SPACE] Error sending developer alert email:', err);
+    // }
 
     return {
       id: insertResult.insertId,

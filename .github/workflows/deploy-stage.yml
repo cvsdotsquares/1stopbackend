@@ -68,6 +68,10 @@ jobs:
             MAINTENANCE_MODE=${{ secrets.MAINTENANCE_MODE }}
             MAINTENANCE_BYPASS_TOKEN=${{ secrets.MAINTENANCE_BYPASS_TOKEN }}
             MAINTENANCE_ALLOWED_IPS=${{ secrets.MAINTENANCE_ALLOWED_IPS }}
+            GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+            GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+            GOOGLE_REFRESH_TOKEN=${{ secrets.GOOGLE_REFRESH_TOKEN }}
+            GOOGLE_CONTACTS_SYNC_DELAY_MINUTES=${{ secrets.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES }}            
             EOF
 
             echo "Setting .env file permissions..."
