@@ -266,8 +266,10 @@ class AuthController {
       const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
       await this.pool.query(
-        'INSERT INTO email_verification_otps (user_id, email, otp, purpose, expires_at) VALUES (?, ?, ?, ?, ?)',
-        [result.insertId, email, otp, 'email_verification', otpExpiresAt]
+        `INSERT INTO email_verification_otps
+         (user_id, email, otp, purpose, expires_at)
+         VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))`,
+        [result.insertId, email, otp, 'email_verification']
       );
 
       await sendOTPEmail(email, first_name, otp);
