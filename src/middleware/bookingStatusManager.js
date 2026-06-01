@@ -193,14 +193,21 @@ class BookingStatusManager {
    */
   static async updateEventSpaces(pool, courseEventId, lockChange, bookingChange) {
     if (lockChange === 0 && bookingChange === 0) return;
-    await pool.query(
-      `UPDATE course_events
-       SET current_locks = GREATEST(0, current_locks + ?),
-           bookings_done = GREATEST(0, bookings_done + ?),
-           modified = NOW()
-       WHERE id = ?`,
-      [lockChange, bookingChange, courseEventId]
-    );
+    const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await applyGroupSpaceDelta(connection, courseEventId, {
+        lockDelta: lockChange,
+        bookingsDoneDelta: bookingChange,
+      });
+      await connection.commit();
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
   }
 
   /**
