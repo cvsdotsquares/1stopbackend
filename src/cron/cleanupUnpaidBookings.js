@@ -18,6 +18,7 @@
 const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { phpSerialize } = require('../utils/phpSerialize');
+const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
 const StripeWebhookController = require('../controllers/stripeWebhook');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
@@ -181,12 +182,9 @@ class BookingCleanupCron {
           }
 
           if (booking.course_event_id && booking.spaces) {
-            await connection.query(`
-              UPDATE course_events
-              SET current_locks = GREATEST(0, current_locks - ?),
-                  modified = ?
-              WHERE id = ?
-            `, [booking.spaces, cleanupAt, booking.course_event_id]);
+            await applyGroupSpaceDelta(connection, booking.course_event_id, {
+              lockDelta: -booking.spaces,
+            });
           }
 
           const [primaryAttendeeRows] = await connection.query(

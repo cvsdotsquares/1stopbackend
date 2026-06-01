@@ -6,6 +6,13 @@ const { sendBookingConfirmation } = require('../utils/emailService');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const { findOrCreateStripeCustomerByEmail } = require('../utils/stripeCustomer');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
+const {
+  loadAvailabilityCohortCache,
+  getGroupAvailability,
+  isGroupFirstDayPassed,
+  applyGroupSpaceDelta,
+  lockSiblingEventsForUpdate,
+} = require('../utils/courseEventGroup');
 const e = require('express');
 
 const parseDobToMysql = (dob) => {
@@ -99,6 +106,7 @@ class BookingFlowController {
           ce.booking_limit,
           ce.bookings_done,
           ce.current_locks,
+          ce.parent,
           ce.event_type,
           ce.is_deposit,
           ce.vehicle_type_manual,
@@ -150,6 +158,8 @@ class BookingFlowController {
         if (!groupedEvents[eventId]) {
           groupedEvents[eventId] = {
             course_event_id: eventId,
+            parent: Number(event.parent) || 0,
+            event_type: event.event_type,
             course_name: event.course_name,
             booking_limit: event.booking_limit,
             bookings_done: event.bookings_done,
@@ -185,7 +195,43 @@ class BookingFlowController {
 
       // Build calendar data with "X Day Course" logic
       const availability = [];
-      Object.values(groupedEvents).forEach(eventGroup => {
+      const locationIdNum = parseInt(location_id, 10);
+
+      const cohortCache = await loadAvailabilityCohortCache(
+        this.pool,
+        Object.values(groupedEvents).map((g) => ({
+          eventId: g.course_event_id,
+          parent: g.parent,
+          eventType: g.event_type,
+        })),
+        locationIdNum
+      );
+
+      for (const eventGroup of Object.values(groupedEvents)) {
+        if (cohortCache.isFirstDayPassed(eventGroup.course_event_id)) {
+          continue;
+        }
+
+        const groupAvail = cohortCache.getAvailability(eventGroup.course_event_id);
+        if (groupAvail) {
+          eventGroup.booking_limit = groupAvail.booking_limit;
+          eventGroup.bookings_done = groupAvail.bookings_done;
+          eventGroup.current_locks = groupAvail.current_locks;
+        }
+
+        const pricingRow = cohortCache.getNearestPricing(eventGroup.course_event_id);
+        if (pricingRow && Number(pricingRow.id) !== Number(eventGroup.course_event_id)) {
+          eventGroup.is_deposit = pricingRow.is_deposit;
+          eventGroup.vehicle_type_manual = pricingRow.vehicle_type_manual;
+          eventGroup.vehicle_type_automatic = pricingRow.vehicle_type_automatic;
+          eventGroup.vehicle_type_own = pricingRow.vehicle_type_own;
+          eventGroup.school_one_off_price = pricingRow.school_one_off_price;
+          eventGroup.school_deposit_price = pricingRow.school_deposit_price;
+          eventGroup.school_total_price = pricingRow.school_total_price;
+          eventGroup.own_one_off_price = pricingRow.own_one_off_price;
+          eventGroup.own_deposit_price = pricingRow.own_deposit_price;
+          eventGroup.own_total_price = pricingRow.own_total_price;
+        }
 
         const availableSpaces = eventGroup.booking_limit - eventGroup.bookings_done - eventGroup.current_locks;
         const isFullyBooked = (eventGroup.bookings_done + eventGroup.current_locks) >= eventGroup.booking_limit;
@@ -229,12 +275,16 @@ class BookingFlowController {
         let depositNote = null;
 
         if (isDepositEnabled && depositDays > 0) {
-          // Get the earliest non-TBC date to check against deposit_days
+          const groupFirstDate = cohortCache.isLinked(eventGroup.course_event_id)
+            ? cohortCache.getGroupFirstDate(eventGroup.course_event_id)
+            : null;
           const firstNonTBCDate = sortedDates.find(d => !d.is_tbc);
-          if (firstNonTBCDate) {
+          const depositReferenceDate = groupFirstDate || firstNonTBCDate?.event_date;
+
+          if (depositReferenceDate) {
             const today = new Date();
             today.setHours(0, 0, 0, 0);
-            const courseStartDate = new Date(firstNonTBCDate.event_date);
+            const courseStartDate = new Date(`${String(depositReferenceDate).slice(0, 10)}T00:00:00`);
             courseStartDate.setHours(0, 0, 0, 0);
             const diffTime = courseStartDate.getTime() - today.getTime();
             const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
@@ -245,7 +295,6 @@ class BookingFlowController {
               depositNote = `Deposit option is only available when booking at least ${depositDays} days before the course start date. Full payment is required for this date.`;
             }
           } else {
-            // All dates are TBC, cannot determine eligibility
             depositNote = 'Deposit option is unavailable as the course dates are yet to be confirmed.';
           }
         } else if (!isDepositEnabled) {
@@ -325,7 +374,7 @@ class BookingFlowController {
           freeze: isFrozen ? 1 : 0,
           status: isFullyBooked ? 'fully_booked' : (availableSpaces > 0 ? 'available' : 'not_available')
         });
-      });
+      }
 
       // Object.values() iteration order is numeric key order (course_event_id), not event_date
       availability.sort((a, b) => String(a.date).localeCompare(String(b.date)));
@@ -1143,21 +1192,36 @@ class BookingFlowController {
           userIds.push(userId);
         }
 
-        // Check availability with row lock to prevent race conditions
+        // Lock linked siblings so capacity stays consistent across the cohort
+        await lockSiblingEventsForUpdate(connection, course_event_id);
+
         const [event] = await connection.query(`
           SELECT booking_limit, bookings_done, current_locks,
                  vehicle_type_manual, vehicle_type_automatic, vehicle_type_own
           FROM course_events
           WHERE id = ?
-          FOR UPDATE
         `, [course_event_id]);
 
         if (!event.length) {
           throw new Error('Event not found');
         }
 
-        const currentLocks = event[0].current_locks || 0;
-        const availableSpaces = event[0].booking_limit - event[0].bookings_done - currentLocks;
+        const groupAvail = await getGroupAvailability(connection, course_event_id);
+        const currentLocks = groupAvail?.current_locks ?? (event[0].current_locks || 0);
+        const bookingsDone = groupAvail?.bookings_done ?? (event[0].bookings_done || 0);
+        const bookingLimit = groupAvail?.booking_limit ?? event[0].booking_limit;
+        const availableSpaces = groupAvail?.availableSpaces
+          ?? (bookingLimit - bookingsDone - currentLocks);
+
+        if (await isGroupFirstDayPassed(connection, course_event_id)) {
+          await connection.rollback();
+          connection.release();
+          return res.status(400).json({
+            success: false,
+            message: 'This course is no longer available for booking because the first day has already passed.',
+          });
+        }
+
         if (availableSpaces < attendees_count) {
           await connection.rollback();
           connection.release();
@@ -1217,13 +1281,11 @@ class BookingFlowController {
           });
         }
 
-        // Increment current_locks to temporarily reserve the spaces (prevents race conditions)
-        // bookings_done will be incremented when payment is confirmed via webhook
-        await connection.query(`
-          UPDATE course_events
-          SET current_locks = current_locks + ?
-          WHERE id = ?
-        `, [attendees_count, course_event_id]);
+        // Reserve spaces on all linked course_events (shared multi-day cohort)
+        // bookings_done is incremented when payment is confirmed via webhook
+        await applyGroupSpaceDelta(connection, course_event_id, {
+          lockDelta: attendees_count,
+        });
 
         const [courseData] = await connection.query(`
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
@@ -1620,6 +1682,7 @@ class BookingFlowController {
               booking_refs: bookingRefs.join(','),
               course_id: course_id.toString(),
               course_event_id: course_event_id.toString(),
+              spaces: attendees_count.toString(),
               user_id: userIds[0].toString(),
               attendees_count: attendees_count.toString(),
               first_attendee_name: primaryAttendeeName,
