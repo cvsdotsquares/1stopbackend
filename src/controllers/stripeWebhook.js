@@ -2,6 +2,10 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendGiftVoucherEmail } = require('../utils/emailService');
 const { formatDateToDDMMYYYY, getCurrentMysqlDateTime } = require('../utils/dateFormat');
+const {
+  applyGroupSpaceDelta,
+  lockSiblingEventsForUpdate,
+} = require('../utils/courseEventGroup');
 
 class StripeWebhookController {
   constructor(pool) {
@@ -81,140 +85,149 @@ class StripeWebhookController {
       ? booking_ids.split(',').map(id => parseInt(id, 10)).filter(Boolean)
       : booking_id ? [parseInt(booking_id, 10)] : [];
 
-    if (allBookingIds.length > 0 && course_event_id && (spaces || attendees_count)) {
-      const bookingSpaces = Number.parseInt(spaces || attendees_count, 10);
-      console.log(`💼 Processing payment for bookings: ${allBookingIds.join(', ')}`);
-
-      const connection = await this.pool.getConnection();
-      await connection.beginTransaction();
-
-      try {
-        const processedAt = getCurrentMysqlDateTime();
-        // Idempotency check against the primary booking
-        const [existingPayment] = await connection.query(`
-          SELECT id FROM booking_payments WHERE transation_id = ?
-        `, [session.payment_intent || session.id]);
-
-        if (existingPayment.length > 0) {
-          console.log(`⚠️ Payment already processed`);
-          await connection.commit();
-          return;
-        }
-
-        const paidAmount = (session.amount_received || session.amount || 0) / 100;
-
-        // Prefer per-booking amounts from the booking records, so mixed own/school values (e.g. 200 + 300) are preserved.
-        const placeholderList = allBookingIds.map(() => '?').join(',');
-        const [bookingRows] = await connection.query(
-          `SELECT id, total_amount, payment_due FROM bookings WHERE id IN (${placeholderList})`,
-          allBookingIds
-        );
-
-        const bookingAmounts = allBookingIds.map((bid) => {
-          const b = bookingRows.find((row) => Number(row.id) === Number(bid));
-          if (!b) return paidAmount / allBookingIds.length;
-
-          const amount = Number(b.total_amount || 0) - Number(b.payment_due || 0);
-          return Math.max(amount, 0);
-        });
-
-        const computedTotal = bookingAmounts.reduce((sum, amount) => sum + amount, 0);
-        const fallbackPerBookingAmount = paidAmount / allBookingIds.length;
-
-        console.log('Stripe webhook bookingAmounts', {
-          allBookingIds,
-          bookingRows,
-          bookingAmounts,
-          paidAmount,
-          computedTotal,
-          fallbackPerBookingAmount
-        });
-
-        // If the computed total differs from paid amount (e.g. rounding or partial payments), preserve the paid amount.
-        if (Math.abs(computedTotal - paidAmount) > 0.01 || computedTotal <= 0) {
-          console.log('Stripe webhook fallback to equal split payment amounts');
-          // fallback to equal split if no valid booking amount breakdown exists
-          for (let i = 0; i < bookingAmounts.length; i += 1) {
-            bookingAmounts[i] = fallbackPerBookingAmount;
-          }
-        }
-
-        // Lock event and move from current_locks to bookings_done
-        const [eventDetails] = await connection.query(`
-          SELECT bookings_done, current_locks, booking_limit FROM course_events WHERE id = ? FOR UPDATE
-        `, [course_event_id]);
-
-        if (eventDetails.length > 0) {
-          await connection.query(`
-            UPDATE course_events
-            SET bookings_done = bookings_done + ?,
-                current_locks = GREATEST(0, current_locks - ?),
-                modified = ?
-            WHERE id = ?
-          `, [bookingSpaces, bookingSpaces, processedAt, course_event_id]);
-          console.log(`✅ Decremented current_locks by ${bookingSpaces}, Incremented bookings_done by ${bookingSpaces}`);
-        }
-
-        // Update each booking status and insert a payment record for each.
-        // admin_payment_received is intentionally written here (NOT at insert time in
-        // bookingFlow.js) so abandoned/failed PaymentIntents stay at 0 and remain
-        // cleanable by cleanupUnpaidBookings + the *Expired/Failed/Canceled handlers.
-        let assignedSum = 0;
-        const useBookingAmounts = computedTotal > 0 && Math.abs(computedTotal - paidAmount) <= 0.5;
-
-        for (let i = 0; i < allBookingIds.length; i += 1) {
-          const bid = allBookingIds[i];
-          const amountForBooking = useBookingAmounts
-            ? (i === allBookingIds.length - 1 ? paidAmount - assignedSum : bookingAmounts[i])
-            : fallbackPerBookingAmount;
-
-          assignedSum += amountForBooking;
-
-          await connection.query(`
-            UPDATE bookings
-            SET status = 1,
-                admin_payment_received = ?,
-                modified = ?
-            WHERE id = ?
-          `, [amountForBooking, processedAt, bid]);
-          console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) admin_payment_received=${amountForBooking} | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
-
-          await connection.query(`
-            INSERT INTO booking_payments
-            (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
-            VALUES (?, 'SALE', ?, ?, 'booking', ?, ?, 0, '', '')
-          `, [bid, session.payment_intent || session.id, amountForBooking, JSON.stringify({ session_id: session.id, payment_status: session.payment_status }), processedAt]);
-        }
-
-        await connection.commit();
-        console.log(`✅ Payment confirmed for bookings: ${allBookingIds.join(', ')}`);
-
-        // Send confirmation email for each booking
-        const clientIpFromMetadata = String(
-          session.metadata?.client_ip || session.metadata?.clientIp || ''
-        )
-          .replace(/^::ffff:/, '')
-          .trim();
-
-        for (const bid of allBookingIds) {
-          try {
-            await this.sendBookingConfirmationEmail(bid, { clientIp: clientIpFromMetadata });
-          } catch (emailError) {
-            console.error(`❌ Failed to send confirmation email for booking ${bid}:`, emailError);
-          }
-        }
-      } catch (error) {
-        await connection.rollback();
-        console.error('Error:', error);
-        throw error;
-      } finally {
-        connection.release();
-      }
+    if (allBookingIds.length === 0) {
+      console.warn('[stripeWebhook] payment success with no booking ids in metadata', session.metadata);
       return;
     }
 
-    // Old flow with temp_ref and booking_data
-    console.error('❌ No booking_id in metadata');
+    const connection = await this.pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      let courseEventId = Number.parseInt(course_event_id, 10) || 0;
+      let bookingSpaces = Number.parseInt(spaces || attendees_count, 10) || 0;
+
+      if (!courseEventId || !bookingSpaces) {
+        const [bookingMetaRows] = await connection.query(
+          `SELECT course_event_id, spaces FROM bookings WHERE id = ? LIMIT 1`,
+          [allBookingIds[0]]
+        );
+        if (bookingMetaRows[0]) {
+          courseEventId = courseEventId || Number(bookingMetaRows[0].course_event_id) || 0;
+          bookingSpaces = bookingSpaces || Number(bookingMetaRows[0].spaces) || 1;
+        }
+      }
+
+      if (!courseEventId || !bookingSpaces) {
+        console.error('[stripeWebhook] Cannot confirm cohort counters: missing course_event_id or spaces', {
+          metadata: session.metadata,
+          bookingIds: allBookingIds,
+        });
+        await connection.rollback();
+        return;
+      }
+
+      console.log(`💼 Processing payment for bookings: ${allBookingIds.join(', ')} (event ${courseEventId}, spaces ${bookingSpaces})`);
+
+      const processedAt = getCurrentMysqlDateTime();
+      // Idempotency check against the primary booking
+      const [existingPayment] = await connection.query(`
+        SELECT id FROM booking_payments WHERE transation_id = ?
+      `, [session.payment_intent || session.id]);
+
+      if (existingPayment.length > 0) {
+        console.log(`⚠️ Payment already processed`);
+        await connection.rollback();
+        return;
+      }
+
+      const paidAmount = (session.amount_received || session.amount || 0) / 100;
+
+      // Prefer per-booking amounts from the booking records, so mixed own/school values (e.g. 200 + 300) are preserved.
+      const placeholderList = allBookingIds.map(() => '?').join(',');
+      const [bookingRows] = await connection.query(
+        `SELECT id, total_amount, payment_due FROM bookings WHERE id IN (${placeholderList})`,
+        allBookingIds
+      );
+
+      const bookingAmounts = allBookingIds.map((bid) => {
+        const b = bookingRows.find((row) => Number(row.id) === Number(bid));
+        if (!b) return paidAmount / allBookingIds.length;
+
+        const amount = Number(b.total_amount || 0) - Number(b.payment_due || 0);
+        return Math.max(amount, 0);
+      });
+
+      const computedTotal = bookingAmounts.reduce((sum, amount) => sum + amount, 0);
+      const fallbackPerBookingAmount = paidAmount / allBookingIds.length;
+
+      console.log('Stripe webhook bookingAmounts', {
+        allBookingIds,
+        bookingRows,
+        bookingAmounts,
+        paidAmount,
+        computedTotal,
+        fallbackPerBookingAmount
+      });
+
+      // If the computed total differs from paid amount (e.g. rounding or partial payments), preserve the paid amount.
+      if (Math.abs(computedTotal - paidAmount) > 0.01 || computedTotal <= 0) {
+        console.log('Stripe webhook fallback to equal split payment amounts');
+        for (let i = 0; i < bookingAmounts.length; i += 1) {
+          bookingAmounts[i] = fallbackPerBookingAmount;
+        }
+      }
+
+      // Move held spaces to bookings_done on all linked course_events (root + children)
+      await lockSiblingEventsForUpdate(connection, courseEventId);
+      await applyGroupSpaceDelta(connection, courseEventId, {
+        lockDelta: -bookingSpaces,
+        bookingsDoneDelta: bookingSpaces,
+      });
+      console.log(`✅ Linked cohort (event ${courseEventId}): -${bookingSpaces} current_locks, +${bookingSpaces} bookings_done on all siblings`);
+
+      let assignedSum = 0;
+      const useBookingAmounts = computedTotal > 0 && Math.abs(computedTotal - paidAmount) <= 0.5;
+
+      for (let i = 0; i < allBookingIds.length; i += 1) {
+        const bid = allBookingIds[i];
+        const amountForBooking = useBookingAmounts
+          ? (i === allBookingIds.length - 1 ? paidAmount - assignedSum : bookingAmounts[i])
+          : fallbackPerBookingAmount;
+
+        assignedSum += amountForBooking;
+
+        await connection.query(`
+          UPDATE bookings
+          SET status = 1,
+              admin_payment_received = ?,
+              modified = ?
+          WHERE id = ?
+        `, [amountForBooking, processedAt, bid]);
+        console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) admin_payment_received=${amountForBooking} | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
+
+        await connection.query(`
+          INSERT INTO booking_payments
+          (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
+          VALUES (?, 'SALE', ?, ?, 'booking', ?, ?, 0, '', '')
+        `, [bid, session.payment_intent || session.id, amountForBooking, JSON.stringify({ session_id: session.id, payment_status: session.payment_status }), processedAt]);
+      }
+
+      await connection.commit();
+      console.log(`✅ Payment confirmed for bookings: ${allBookingIds.join(', ')}`);
+
+      // Send confirmation email for each booking (after commit)
+      const clientIpFromMetadata = String(
+        session.metadata?.client_ip || session.metadata?.clientIp || ''
+      )
+        .replace(/^::ffff:/, '')
+        .trim();
+
+      for (const bid of allBookingIds) {
+        try {
+          await this.sendBookingConfirmationEmail(bid, { clientIp: clientIpFromMetadata });
+        } catch (emailError) {
+          console.error(`❌ Failed to send confirmation email for booking ${bid}:`, emailError);
+        }
+      }
+      return;
+    } catch (error) {
+      await connection.rollback();
+      console.error('Error confirming payment:', error);
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   async handlePaymentExpired(session) {
@@ -255,15 +268,12 @@ class StripeWebhookController {
 
       console.log(`⏱️ Payment expired for booking ${booking_id} - initiating cleanup`);
 
-      // Release current_locks for this booking - CRITICAL
+      // Release held spaces on all linked course_events
       if (booking.course_event_id && booking.spaces) {
-        await connection.query(`
-          UPDATE course_events
-          SET current_locks = GREATEST(0, current_locks - ?),
-              modified = NOW()
-          WHERE id = ?
-        `, [booking.spaces, booking.course_event_id]);
-        console.log(`🔓 Released ${booking.spaces} locks from event ${booking.course_event_id}`);
+        await applyGroupSpaceDelta(connection, booking.course_event_id, {
+          lockDelta: -booking.spaces,
+        });
+        console.log(`🔓 Released ${booking.spaces} locks from linked cohort (event ${booking.course_event_id})`);
       }
 
       // Delete attendee records (which also deletes booking references)
@@ -344,11 +354,9 @@ class StripeWebhookController {
           const booking = bookings[0];
 
           if (booking.course_event_id && booking.spaces) {
-            await connection.query(`
-              UPDATE course_events
-              SET current_locks = GREATEST(0, current_locks - ?), modified = NOW()
-              WHERE id = ?
-            `, [booking.spaces, booking.course_event_id]);
+            await applyGroupSpaceDelta(connection, booking.course_event_id, {
+              lockDelta: -booking.spaces,
+            });
           }
 
           await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [bid]);
@@ -426,11 +434,9 @@ class StripeWebhookController {
           const booking = bookings[0];
 
           if (booking.course_event_id && booking.spaces) {
-            await connection.query(`
-              UPDATE course_events
-              SET current_locks = GREATEST(0, current_locks - ?), modified = NOW()
-              WHERE id = ?
-            `, [booking.spaces, booking.course_event_id]);
+            await applyGroupSpaceDelta(connection, booking.course_event_id, {
+              lockDelta: -booking.spaces,
+            });
           }
 
           await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [bid]);
