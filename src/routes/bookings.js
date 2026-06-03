@@ -214,14 +214,11 @@ function createBookingRoutes(pool) {
             booking.spaces
           );
           if (lockChange !== 0 || bookingChange !== 0) {
-            await connection.query(`
-              UPDATE course_events 
-              SET 
-                current_locks = GREATEST(0, current_locks + ?),
-                bookings_done = GREATEST(0, bookings_done + ?),
-                modified = NOW()
-              WHERE id = ?
-            `, [lockChange, bookingChange, booking.course_event_id]);
+            const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+            await applyGroupSpaceDelta(connection, booking.course_event_id, {
+              lockDelta: lockChange,
+              bookingsDoneDelta: bookingChange,
+            });
           }
 
           await connection.query(

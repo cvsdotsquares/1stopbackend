@@ -236,12 +236,9 @@ class BookingController {
         const booking_id = bookingResult.insertId;
         console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/bookings.js::createBooking | booking_id=${booking_id} | user_id=${user_id} | course_event_id=${course_event_id}`);
 
-        // 7. Update event locks (temporary hold)
-        await connection.query(`
-          UPDATE course_events
-          SET current_locks = current_locks + ?, modified = NOW()
-          WHERE id = ?
-        `, [spaces, course_event_id]);
+        // 7. Reserve spaces on all linked course_events (multi-day cohort)
+        const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+        await applyGroupSpaceDelta(connection, course_event_id, { lockDelta: spaces });
 
         // 8. Get complete booking data
         const [newBooking] = await connection.query(`
@@ -1082,22 +1079,15 @@ class BookingController {
         if (eventLocationRows[0]) courseInfo.location = eventLocationRows[0].location_name;
         if (firstDateRows[0]) courseInfo.event_date = firstDateRows[0].event_date;
 
+        const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
         if (booking.status === BookingStatusManager.STATUS.CONFIRMED) {
-          await connection.query(
-            `UPDATE course_events
-             SET bookings_done = GREATEST(0, bookings_done - ?),
-                 modified = NOW()
-             WHERE id = ?`,
-            [booking.spaces, booking.course_event_id]
-          );
+          await applyGroupSpaceDelta(connection, booking.course_event_id, {
+            bookingsDoneDelta: -booking.spaces,
+          });
         } else if (booking.status === BookingStatusManager.STATUS.PENDING_PAYMENT) {
-          await connection.query(
-            `UPDATE course_events
-             SET current_locks = GREATEST(0, current_locks - ?),
-                 modified = NOW()
-             WHERE id = ?`,
-            [booking.spaces, booking.course_event_id]
-          );
+          await applyGroupSpaceDelta(connection, booking.course_event_id, {
+            lockDelta: -booking.spaces,
+          });
         }
 
         await connection.query(
