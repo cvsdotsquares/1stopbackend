@@ -1290,7 +1290,7 @@ class BookingFlowController {
         const [courseData] = await connection.query(`
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
                  ce.school_deposit_price, ce.own_deposit_price, ce.school_total_price, ce.own_total_price, ce.location_id,
-                 lc.location_name,
+                 lc.loc_abb,
                  ce.is_deposit, c.deposit_days, f.vat as franchise_vat
           FROM courses c
           JOIN course_events ce ON c.id = ce.course_id
@@ -1653,9 +1653,7 @@ class BookingFlowController {
             attendeeSummary,
             '-',
             courseData[0]?.course_name || 'Course',
-            '-',
-            courseData[0]?.location_name || 'Location',
-            '-',
+            courseData[0]?.loc_abb || 'Location',
             courseDateText
           ].filter(Boolean);
           const stripeDescription = stripeDescriptionParts.join(' ').replace(/\s+/g, ' ').trim();
