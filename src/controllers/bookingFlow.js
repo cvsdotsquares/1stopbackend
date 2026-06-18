@@ -249,6 +249,17 @@ class BookingFlowController {
 
         // Find first non-TBC date for calendar display
         const firstRealDate = sortedDates.find(d => !d.is_tbc) || sortedDates[0];
+
+        // Skip events that start today or in the past
+        if (firstRealDate && !firstRealDate.is_tbc) {
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const firstDate = new Date(`${firstRealDate.event_date}T00:00:00`);
+          if (firstDate <= today) {
+            continue;
+          }
+        }
+
         const isFrozen = firstRealDate.freeze === 1 || firstRealDate.freeze_count > 0;
 
         // Calculate number of days for this course
