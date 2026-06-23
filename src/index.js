@@ -37,6 +37,7 @@ const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
+const { getMapsUploadDir } = require('./admin/services/locationsService');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -59,6 +60,9 @@ app.use('/api/webhook', createStripeWebhookRoutes(pool));
 // Middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Direction map uploads (locations admin) — served at /maps/:filename
+app.use('/maps', express.static(getMapsUploadDir(), { index: false, fallthrough: false }));
 
 // IP address extraction middleware (must be before CORS)
 app.use((req, res, next) => {

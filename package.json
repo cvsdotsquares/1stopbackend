@@ -24,6 +24,7 @@
     "googleapis": "^171.4.0",
     "ipware": "^2.0.0",
     "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
     "mysql2": "^3.15.3",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.3",
