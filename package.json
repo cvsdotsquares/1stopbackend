@@ -4,8 +4,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node -r ./src/loadEnv.js src/index.js",
+    "dev": "nodemon -r ./src/loadEnv.js src/index.js"
   },
   "keywords": [],
   "author": "",
@@ -14,9 +14,11 @@
   "dependencies": {
     "axios": "^1.13.2",
     "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "crypto-js": "^4.2.0",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "express-session": "^1.19.0",
     "express-validator": "^7.3.0",
     "google-auth-library": "^10.6.2",
     "googleapis": "^171.4.0",

@@ -1,5 +1,5 @@
 // src/index.js
-require('dotenv').config();
+require('./loadEnv');
 const express = require('express');
 const mysql = require('mysql2/promise');
 const createAuthRoutes = require('./routes/auth');
@@ -36,6 +36,7 @@ const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
+const createAdminRoutes = require('./admin');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -96,15 +97,36 @@ const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+function isLocalDevOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+  } catch (_err) {
+    return false;
+  }
+}
+
+function isCorsOriginAllowed(origin) {
+  if (!origin) return false;
+  if (corsAllowedOrigins.includes(origin)) return true;
+  // Admin UI dev: allow localhost origins with credentials when allowlist unset.
+  if (corsAllowedOrigins.length === 0 && isLocalDevOrigin(origin)) return true;
+  return false;
+}
+
 app.use((req, res, next) => {
   const requestOrigin = req.headers.origin;
-  if (corsAllowedOrigins.length === 0) {
-    // No allowlist configured → fall back to the existing permissive behaviour.
-    res.header('Access-Control-Allow-Origin', '*');
-  } else if (requestOrigin && corsAllowedOrigins.includes(requestOrigin)) {
+
+  if (requestOrigin && isCorsOriginAllowed(requestOrigin)) {
     res.header('Access-Control-Allow-Origin', requestOrigin);
+    res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Vary', 'Origin');
+  } else if (!requestOrigin) {
+    // Non-browser clients (curl, server-to-server).
+    res.header('Access-Control-Allow-Origin', '*');
   }
+
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.header(
     'Access-Control-Allow-Headers',
@@ -180,6 +202,7 @@ app.use('/restapi/booking', createGetcourseRoutes(pool));
 app.use('/restapi/booking', createHoldSpaceRoutes(pool));
 app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
 app.use('/api/faq', createFAQRoutes(pool));
+app.use('/api/admin', createAdminRoutes(pool));
 
 // API Documentation endpoint
 app.get('/api', (req, res) => {
