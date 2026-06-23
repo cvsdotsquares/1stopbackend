@@ -12,6 +12,7 @@ const cookieParser = require('cookie-parser');
 const createAdminAuthRoutes = require('./routes/auth');
 const createDashboardRoutes = require('./routes/dashboard');
 const createHeaderRoutes = require('./routes/header');
+const createLocationsRoutes = require('./routes/locations');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -33,6 +34,7 @@ function createAdminRoutes(pool) {
   router.use('/auth', createAdminAuthRoutes(pool));
   router.use('/dashboard', createDashboardRoutes(pool));
   router.use('/header', createHeaderRoutes(pool));
+  router.use('/locations', createLocationsRoutes(pool));
 
   return router;
 }
