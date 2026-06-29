@@ -9,7 +9,64 @@ const { sendDeveloperAlert } = require('../utils/emailService');
 const isDeadlockError = (err) =>
   !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
 
+const isDuplicateKeyError = (err) =>
+  !!err && (err.errno === 1062 || err.code === 'ER_DUP_ENTRY');
+
+const RIDE_TO_LOCK_PREFIX = 'rideto_confirm:';
+const RIDE_TO_LOCK_TIMEOUT_SEC = Number(process.env.RIDETO_CONFIRM_LOCK_TIMEOUT_SEC || 10);
+
 let __cbRunSeq = 0;
+
+const normalizeRideToOrderNumber = (value) => String(value ?? '').trim();
+
+const acquireRideToOrderLock = async (connection, ridetoOrderNumber) => {
+  const lockName = `${RIDE_TO_LOCK_PREFIX}${ridetoOrderNumber}`;
+  const [rows] = await connection.query('SELECT GET_LOCK(?, ?) AS acquired', [lockName, RIDE_TO_LOCK_TIMEOUT_SEC]);
+  return rows[0]?.acquired === 1 ? lockName : null;
+};
+
+const releaseRideToOrderLock = async (connection, lockName) => {
+  if (!lockName) return;
+  try {
+    await connection.query('SELECT RELEASE_LOCK(?)', [lockName]);
+  } catch (err) {
+    console.error('[confirmBooking] Failed to release RideTo order lock:', lockName, err);
+  }
+};
+
+const findExistingRideToBooking = async (connection, ridetoOrderNumber) => {
+  const [attendeeRows] = await connection.query(`
+    SELECT booking_id, booking_ref
+    FROM booking_attendees
+    WHERE rideto_orderid = ?
+    ORDER BY id ASC
+    LIMIT 1
+  `, [ridetoOrderNumber]);
+
+  if (attendeeRows.length > 0) {
+    return {
+      bookingId: attendeeRows[0].booking_id,
+      booking_ref: attendeeRows[0].booking_ref,
+    };
+  }
+
+  const [dropdownRows] = await connection.query(`
+    SELECT booking_id, booking_ref
+    FROM booking_attendees_dropdown
+    WHERE rideto_orderid = ?
+    ORDER BY id ASC
+    LIMIT 1
+  `, [ridetoOrderNumber]);
+
+  if (dropdownRows.length > 0) {
+    return {
+      bookingId: dropdownRows[0].booking_id,
+      booking_ref: dropdownRows[0].booking_ref,
+    };
+  }
+
+  return null;
+};
 
 const {
   buildSubject,
@@ -416,25 +473,39 @@ const confirmBooking = (pool) => async (req, res) => {
   // errors so the outer retry loop can decide whether to retry.
   const runTransaction = async () => {
     const connection = await pool.getConnection();
+    let orderLockName = null;
+    const normalizedRideToOrder = normalizeRideToOrderNumber(rideto_order_number);
+
     try {
       await connection.beginTransaction();
       const createdAt = getCurrentMysqlDateTime();
 
-      // Step 1: Validate Space Lock
-      const [lockCheck] = await connection.query('SELECT id FROM lock_bookings WHERE event_id = ? AND id = ?', [course_event_id, space_hold_id]);
-      if (lockCheck.length === 0) {
+      // Serialize all confirm attempts for the same RideTo order (prevents concurrent duplicates).
+      orderLockName = await acquireRideToOrderLock(connection, normalizedRideToOrder);
+      if (!orderLockName) {
         await connection.rollback();
-        return { kind: 'lock_missing' };
+        return { kind: 'busy' };
       }
 
-      // Step 2: Check Duplicate Order
-      const [dupCheck1] = await connection.query('SELECT id FROM booking_attendees WHERE rideto_orderid = ?', [rideto_order_number]);
-      const [dupCheck2] = await connection.query('SELECT id FROM booking_attendees_dropdown WHERE rideto_orderid = ?', [rideto_order_number]);
-
-      if (dupCheck1.length > 0 || dupCheck2.length > 0) {
+      const existingBooking = await findExistingRideToBooking(connection, normalizedRideToOrder);
+      if (existingBooking) {
         await removeCurLock(connection, space_hold_id);
         await connection.commit();
-        return { kind: 'duplicate' };
+        return { kind: 'duplicate', ...existingBooking };
+      }
+
+      // Step 1: Validate Space Lock (FOR UPDATE so only one txn proceeds per hold id)
+      const [lockCheck] = await connection.query(
+        'SELECT id FROM lock_bookings WHERE event_id = ? AND id = ? FOR UPDATE',
+        [course_event_id, space_hold_id]
+      );
+      if (lockCheck.length === 0) {
+        const existingAfterLockMiss = await findExistingRideToBooking(connection, normalizedRideToOrder);
+        await connection.rollback();
+        if (existingAfterLockMiss) {
+          return { kind: 'duplicate', ...existingAfterLockMiss };
+        }
+        return { kind: 'lock_missing' };
       }
 
       // Step 3: Fetch Booking Status
@@ -557,8 +628,15 @@ const confirmBooking = (pool) => async (req, res) => {
       };
     } catch (error) {
       try { await connection.rollback(); } catch (_) {}
+      if (isDuplicateKeyError(error)) {
+        const existingAfterDupKey = await findExistingRideToBooking(connection, normalizedRideToOrder);
+        if (existingAfterDupKey) {
+          return { kind: 'duplicate', ...existingAfterDupKey };
+        }
+      }
       throw error;
     } finally {
+      await releaseRideToOrderLock(connection, orderLockName);
       connection.release();
     }
   };
@@ -622,9 +700,21 @@ const confirmBooking = (pool) => async (req, res) => {
     // }
     return res.status(400).json({ message: 'Course is not locked', school_course_id });
   }
+  if (result.kind === 'busy') {
+    logRequest(503, 'RideTo confirm lock timeout', { school_course_id, rideto_order_number });
+    return res.status(503).json({ message: 'Please retry', school_course_id });
+  }
   if (result.kind === 'duplicate') {
-    logRequest(200, 'Course is already confirmed', { school_course_id }, ALREADY_CONFIRMED_LOG);
-    return res.status(200).json({ message: 'Course is confirmed', school_course_id });
+    logRequest(200, 'Course is already confirmed', {
+      school_course_id,
+      booking_ref: result.booking_ref,
+      rideto_order_number,
+    }, ALREADY_CONFIRMED_LOG);
+    return res.status(200).json({
+      message: 'Course is confirmed',
+      school_course_id,
+      booking_ref: result.booking_ref,
+    });
   }
   if (result.kind === 'event_missing') {
     logRequest(404, 'Course event not found', { course_event_id });
