@@ -70,6 +70,91 @@ function utf8ByteLength(str) {
   function phpSerialize(value) {
     return serializeValue(value);
   }
-  
-  module.exports = { phpSerialize };
+
+  // Inverse of serializeValue — handles the same types produced by PHP
+  // `serialize()` for settings.extra and deleted_bookings snapshots.
+  function phpUnserialize(input) {
+    if (input === null || typeof input === 'undefined') return null;
+    if (typeof input !== 'string' || input.length === 0) return null;
+
+    const str = input;
+    let pos = 0;
+
+    function expect(ch) {
+      if (str[pos] !== ch) {
+        throw new Error(`Unexpected character at ${pos}, expected ${ch}`);
+      }
+      pos += 1;
+    }
+
+    function readUntil(sep) {
+      const idx = str.indexOf(sep, pos);
+      if (idx === -1) throw new Error(`Expected ${sep}`);
+      const value = str.slice(pos, idx);
+      pos = idx + sep.length;
+      return value;
+    }
+
+    function readValue() {
+      const type = str[pos];
+      if (type === 'N') {
+        pos += 2;
+        return null;
+      }
+      if (type === 'b') {
+        pos += 2;
+        const val = str[pos];
+        pos += 2;
+        return val === '1';
+      }
+      if (type === 'i') {
+        pos += 2;
+        const num = readUntil(';');
+        return parseInt(num, 10);
+      }
+      if (type === 'd') {
+        pos += 2;
+        const num = readUntil(';');
+        return parseFloat(num);
+      }
+      if (type === 's') {
+        pos += 2;
+        const len = parseInt(readUntil(':'), 10);
+        expect('"');
+        let end = pos;
+        let bytesRead = 0;
+        while (bytesRead < len && end < str.length) {
+          bytesRead += Buffer.byteLength(str[end], 'utf8');
+          end += 1;
+        }
+        const content = str.slice(pos, end);
+        pos = end;
+        expect('"');
+        expect(';');
+        return content;
+      }
+      if (type === 'a') {
+        pos += 2;
+        const count = parseInt(readUntil(':'), 10);
+        expect('{');
+        const result = {};
+        for (let i = 0; i < count; i += 1) {
+          const key = readValue();
+          const value = readValue();
+          result[key] = value;
+        }
+        expect('}');
+        return result;
+      }
+      throw new Error(`Unsupported type ${type} at ${pos}`);
+    }
+
+    try {
+      return readValue();
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  module.exports = { phpSerialize, phpUnserialize };
   

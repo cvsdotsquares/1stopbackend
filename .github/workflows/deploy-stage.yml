@@ -71,8 +71,9 @@ jobs:
             GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
             GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
             GOOGLE_REFRESH_TOKEN=${{ secrets.GOOGLE_REFRESH_TOKEN }}
-            GOOGLE_CONTACTS_SYNC_DELAY_MINUTES=${{ secrets.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES }}        
             RIDETO_CONFIRM_LOCK_TIMEOUT_SEC=${{ secrets.RIDETO_CONFIRM_LOCK_TIMEOUT_SEC }}
+            GOOGLE_CONTACTS_SYNC_DELAY_MINUTES=${{ secrets.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES }}     
+            CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}       
             EOF
 
             echo "Setting .env file permissions..."
