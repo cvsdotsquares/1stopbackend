@@ -215,14 +215,16 @@ function getCurrentSpaceRequired(session, evId) {
   return 0;
 }
 
-function computeSeatsAvailable(event, isFrozenFlag, currBookSeates) {
+function computeSeatsAvailable(event, isFrozenFlag, currBookSeates, confirmedCount) {
   if (isFrozenFlag) {
     return 0;
   }
+  const done =
+    confirmedCount != null
+      ? Number(confirmedCount) || 0
+      : Math.max(0, Number(event.bookings_done) || 0);
   const raw =
-    Number(event.booking_limit) -
-    (Number(event.bookings_done) + Number(event.current_locks)) +
-    currBookSeates;
+    Number(event.booking_limit) - (done + Number(event.current_locks)) + currBookSeates;
   return raw < 0 ? 0 : raw;
 }
 
@@ -232,11 +234,11 @@ function computeBookingInProcess(event, currBookSeates) {
 
 function computeConfirmedBookings(event, isFrozenFlag, frozenRow) {
   if (isFrozenFlag && frozenRow) {
-    const done = Number(frozenRow.bookings_done) || 0;
+    const done = Math.max(0, Number(frozenRow.bookings_done) || 0);
     const limit = Number(frozenRow.booking_limit) || 0;
     return done > limit ? limit : done;
   }
-  const done = Number(event.bookings_done) || 0;
+  const done = Math.max(0, Number(event.bookings_done) || 0);
   const limit = Number(event.booking_limit) || 0;
   return done > limit ? limit : done;
 }
@@ -424,10 +426,17 @@ async function loadBookingDetails(pool, req, evId, page) {
   const frozenFlag = await isFrozen(pool, evId);
   const frozenRow = frozenFlag ? await frozenData(pool, evId) : null;
   const currBookSeates = getCurrentSpaceRequired(req.session, evId);
-  const seatsAvailable = computeSeatsAvailable(event, frozenFlag, currBookSeates);
-  const bookingInProcess = computeBookingInProcess(event, currBookSeates);
-  const confirmedBookings = computeConfirmedBookings(event, frozenFlag, frozenRow);
   const bookings = await getEventBookings(pool, evId, page);
+  // Match Confirmed Bookings table: count live status=1 rows, not bookings_done counter
+  // (counter can drift negative after move/delete — e.g. event 21611 showing -1).
+  const confirmedBookings = bookings.pagination.total;
+  const seatsAvailable = computeSeatsAvailable(
+    event,
+    frozenFlag,
+    currBookSeates,
+    confirmedBookings
+  );
+  const bookingInProcess = computeBookingInProcess(event, currBookSeates);
   const processLocks = await getProcessLocks(pool, evId);
   const showDepositWarning = showDepositPrice(event);
   const lockTimer = buildLockTimer(req.session);
@@ -810,4 +819,5 @@ module.exports = {
   getLockBooking,
   buildLockTimer,
   getCourseEventRow,
+  buildEventDates,
 };
