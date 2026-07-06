@@ -70,6 +70,23 @@ function createBookingsRoutes(pool) {
     wizardController.getCashConfirmation(req, res)
   );
 
+  router.get('/:id/view', requireAdminSession, (req, res) => controller.view(req, res));
+  router.get('/:id/edit/preview-event', requireAdminSession, (req, res) =>
+    controller.previewEvent(req, res)
+  );
+  router.get('/:id/edit', requireAdminSession, (req, res) => controller.edit(req, res));
+  router.patch('/:id', requireAdminSession, (req, res) => controller.patch(req, res));
+
+  router.post('/:id/invoice/email', requireAdminSession, (req, res) =>
+    controller.emailInvoice(req, res)
+  );
+  router.post('/:id/invoice', requireAdminSession, (req, res) =>
+    controller.saveInvoice(req, res)
+  );
+  router.get('/:id/invoice', requireAdminSession, (req, res) =>
+    controller.getInvoice(req, res)
+  );
+
   return router;
 }
 

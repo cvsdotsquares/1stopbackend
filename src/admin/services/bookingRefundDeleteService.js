@@ -266,7 +266,7 @@ async function sendRefundMail(pool, bookingId, req) {
     return;
   }
 
-  const pupil = `${bData.first_name} ${bData.first_name}`;
+  const pupil = `${bData.first_name} ${bData.sur_name}`;
   const siteUrl =
     getSiteUrl(req) ||
     String(process.env.PHP_SITE_URL || process.env.SITE_URL || '').replace(/\/$/, '');
