@@ -1,5 +1,6 @@
 const { mc_decrypt } = require('../../utils/universalPassword');
 const { loadAdminSettings } = require('../services/settingsService');
+const { processForgotPassword } = require('../services/forgotPasswordService');
 const { sanitizeLoggedInAdmin } = require('../middleware/adminAuth');
 const { getAdminSessionCookieOptions } = require('../sessionCookie');
 
@@ -122,6 +123,24 @@ class AdminAuthController {
       return res.status(500).json({
         success: false,
         message: 'Login failed',
+      });
+    }
+  }
+
+  async forgotPassword(req, res) {
+    const user = req.body?.user;
+
+    try {
+      const result = await processForgotPassword(this.pool, user);
+      return res.status(result.status).json({
+        success: result.ok,
+        message: result.message,
+      });
+    } catch (err) {
+      console.error('[ADMIN][AUTH][FORGOT-PASSWORD]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Mail could not be sent. Please contact Site Super Administrator',
       });
     }
   }
