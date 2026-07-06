@@ -1,4 +1,5 @@
 const { removeExpirelocks } = require('../services/bookingService');
+const { abandonAdminBookingSession } = require('../services/bookingDetailsService');
 const {
   courseAvailsDashboard,
   selectFutureCourses,
@@ -68,6 +69,14 @@ class DashboardController {
       syncCalendarSession(req);
 
       await removeExpirelocks(this.pool, req.session);
+
+      if (
+        req.session?.adminBooking?.lock_session?.id ||
+        req.session?.adminBooking?.lock_countdown ||
+        req.session?.worldPaymentBookings?.length
+      ) {
+        await abandonAdminBookingSession(this.pool, req);
+      }
 
       const searchterm = parseSearchTerm(req.query);
       const hasDateParam =

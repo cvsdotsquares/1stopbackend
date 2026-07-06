@@ -1,6 +1,7 @@
 function formatDateValue(value) {
   if (!value) return null;
   if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
     const y = value.getFullYear();
     const m = String(value.getMonth() + 1).padStart(2, '0');
     const d = String(value.getDate()).padStart(2, '0');
