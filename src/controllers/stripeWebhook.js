@@ -44,6 +44,11 @@ class StripeWebhookController {
           const paymentIntent = event.data.object;
           if (paymentIntent.metadata?.type === 'gift_voucher') {
             await this.handleGiftVoucherPaymentIntent(paymentIntent);
+          } else if (paymentIntent.metadata?.source === 'admin_moto') {
+            const {
+              finalizeAdminMotoFromWebhook,
+            } = require('../admin/services/adminMotoStripeService');
+            await finalizeAdminMotoFromWebhook(this.pool, paymentIntent);
           } else {
             await this.handlePaymentSuccess(paymentIntent);
           }
