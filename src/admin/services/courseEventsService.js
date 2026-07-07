@@ -1,3 +1,9 @@
+const { getEventFromDb } = require('./courseEventWizardService');
+const {
+  updateApiEventCourse,
+  deleteApiEventCourse,
+} = require('./bookingApiAdminService');
+
 const RECORDS_PER_PAGE = 40;
 
 const MONTHS = [
@@ -302,6 +308,57 @@ async function updateCourseEventStatus(pool, id, status) {
   return { ok: false, message: 'Error in change status' };
 }
 
+function sortEventsDatesForView(eventsDates) {
+  const entries = Object.entries(eventsDates || {});
+  entries.sort(([a], [b]) => {
+    if (a === '0000-00-00') return 1;
+    if (b === '0000-00-00') return -1;
+    return a.localeCompare(b);
+  });
+  return Object.fromEntries(entries);
+}
+
+async function getCourseEventView(pool, id) {
+  const eventsData = await getEventFromDb(pool, id);
+  if (!eventsData) {
+    return { ok: false, message: 'Event not found to view' };
+  }
+
+  const multi = eventsData.multi?.[0] || {};
+  const courseId = multi.course;
+  const locationId = eventsData.location_id;
+  const franchiseId = eventsData.franchise_id;
+
+  const [[courseRows], [locationRows], [franchiseRows]] = await Promise.all([
+    courseId
+      ? pool.query('SELECT course_name FROM courses WHERE id = ? LIMIT 1', [courseId])
+      : Promise.resolve([[]]),
+    locationId
+      ? pool.query('SELECT location_name FROM locations WHERE id = ? LIMIT 1', [
+          locationId,
+        ])
+      : Promise.resolve([[]]),
+    franchiseId
+      ? pool.query('SELECT franchise_name FROM franchise WHERE id = ? LIMIT 1', [
+          franchiseId,
+        ])
+      : Promise.resolve([[]]),
+  ]);
+
+  return {
+    ok: true,
+    data: {
+      event_type: eventsData.event_type,
+      booking_limit: eventsData.booking_limit,
+      course_name: courseRows?.[0]?.course_name || '',
+      location_name: locationRows?.[0]?.location_name || '',
+      franchise_name: franchiseRows?.[0]?.franchise_name || '',
+      eventsDates: sortEventsDatesForView(eventsData.eventsDates),
+      multi: [multi],
+    },
+  };
+}
+
 async function getBookingCount(pool, id) {
   const [rows] = await pool.query(
     'SELECT COUNT(*) AS total FROM bookings WHERE course_event_id = ? AND status = 1',
@@ -382,7 +439,11 @@ async function deleteCourseEvent(pool, id, adminId) {
       );
 
       message = 'Course delete with all the bookings successfully.';
+
+      await updateApiEventCourse(pool, id);
     }
+
+    await deleteApiEventCourse(pool, id);
 
     await connection.query('DELETE FROM course_events WHERE id = ?', [id]);
     await connection.query('DELETE FROM course_event_dates WHERE course_event_id = ?', [
@@ -453,6 +514,7 @@ async function getLocationFilterOptions(pool, courseId) {
 
 module.exports = {
   listCourseEvents,
+  getCourseEventView,
   updateCourseEventStatus,
   getBookingCount,
   deleteCourseEvent,

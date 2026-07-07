@@ -42,6 +42,7 @@ function createCourseEventsRoutes(pool) {
   );
 
   router.get('/', requireAdminSession, (req, res) => controller.list(req, res));
+  router.get('/:id', requireAdminSession, (req, res) => controller.getOne(req, res));
   router.patch('/:id/status', requireAdminSession, (req, res) =>
     controller.updateStatus(req, res)
   );

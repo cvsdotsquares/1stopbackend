@@ -1,5 +1,6 @@
 const {
   listCourseEvents,
+  getCourseEventView,
   updateCourseEventStatus,
   getBookingCount,
   deleteCourseEvent,
@@ -65,6 +66,37 @@ class CourseEventsController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load location filters',
+      });
+    }
+  }
+
+  async getOne(req, res) {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Event not found to view',
+        });
+      }
+
+      const result = await getCourseEventView(this.pool, id);
+      if (!result.ok) {
+        return res.status(404).json({
+          success: false,
+          message: result.message,
+        });
+      }
+
+      return res.json({
+        success: true,
+        data: result.data,
+      });
+    } catch (err) {
+      console.error('[ADMIN][COURSE-EVENTS][VIEW]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load course event',
       });
     }
   }
