@@ -533,4 +533,5 @@ module.exports = {
   listDeletedBookings,
   purgeDeletedBooking,
   getDeletedBookingView,
+  getResultLabels,
 };
