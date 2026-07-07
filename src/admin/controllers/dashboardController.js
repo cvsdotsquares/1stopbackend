@@ -1,4 +1,7 @@
 const { removeExpirelocks } = require('../services/bookingService');
+const {
+  listInProgressBookings,
+} = require('../services/inProgressBookingsService');
 const { abandonAdminBookingSession } = require('../services/bookingDetailsService');
 const {
   courseAvailsDashboard,
@@ -134,6 +137,25 @@ class DashboardController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load dashboard',
+      });
+    }
+  }
+
+  async getInProgressBookings(req, res) {
+    try {
+      const items = await listInProgressBookings(this.pool);
+      return res.json({
+        success: true,
+        data: {
+          items,
+          server_time: Math.floor(Date.now() / 1000),
+        },
+      });
+    } catch (err) {
+      console.error('[ADMIN][DASHBOARD][IN-PROGRESS]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load in-progress bookings',
       });
     }
   }
