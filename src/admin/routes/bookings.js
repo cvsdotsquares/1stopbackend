@@ -2,6 +2,7 @@ const express = require('express');
 const BookingsController = require('../controllers/bookingsController');
 const BookingDetailsController = require('../controllers/bookingDetailsController');
 const BookingWizardController = require('../controllers/bookingWizardController');
+const DeletedBookingsController = require('../controllers/deletedBookingsController');
 const { requireAdminSession } = require('../middleware/adminAuth');
 
 function createBookingsRoutes(pool) {
@@ -9,6 +10,7 @@ function createBookingsRoutes(pool) {
   const controller = new BookingsController(pool);
   const detailsController = new BookingDetailsController(pool);
   const wizardController = new BookingWizardController(pool);
+  const deletedController = new DeletedBookingsController(pool);
 
   router.post('/:id/refund', requireAdminSession, (req, res) =>
     controller.refund(req, res)
@@ -68,6 +70,10 @@ function createBookingsRoutes(pool) {
   );
   router.get('/confirmation/cash', requireAdminSession, (req, res) =>
     wizardController.getCashConfirmation(req, res)
+  );
+
+  router.get('/deleted/:id', requireAdminSession, (req, res) =>
+    deletedController.view(req, res)
   );
 
   router.get('/:id/view', requireAdminSession, (req, res) => controller.view(req, res));
