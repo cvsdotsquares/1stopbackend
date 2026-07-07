@@ -12,6 +12,9 @@ function createDashboardRoutes(pool) {
   router.get('/current-lock-count', requireAdminSession, (req, res) =>
     controller.getCurrentLockCount(req, res)
   );
+  router.get('/in-progress-bookings', requireAdminSession, (req, res) =>
+    controller.getInProgressBookings(req, res)
+  );
 
   return router;
 }
