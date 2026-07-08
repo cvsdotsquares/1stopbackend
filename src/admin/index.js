@@ -18,6 +18,7 @@ const createFranchisesRoutes = require('./routes/franchises');
 const createCourseEventsRoutes = require('./routes/courseEvents');
 const createBookingsRoutes = require('./routes/bookings');
 const createCustomersRoutes = require('./routes/customers');
+const createItineraryRoutes = require('./routes/itinerary');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -45,6 +46,7 @@ function createAdminRoutes(pool) {
   router.use('/course-events', createCourseEventsRoutes(pool));
   router.use('/bookings', createBookingsRoutes(pool));
   router.use('/customers', createCustomersRoutes(pool));
+  router.use('/itinerary', createItineraryRoutes(pool));
 
   return router;
 }
