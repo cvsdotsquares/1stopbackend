@@ -23,6 +23,7 @@ function createCustomersRoutes(pool) {
   );
   router.patch('/contact-cards/:id/blacklist', requireAdminSession, (req, res) =>
     blacklistedController.updateBlacklist(req, res)
+  );
   router.get('/contact-cards', requireAdminSession, (req, res) =>
     contactCardsController.list(req, res)
   );
