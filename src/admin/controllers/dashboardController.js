@@ -6,6 +6,8 @@ const {
   expirePromos,
   getCurrentLocksTotal,
   buildCurrentLockCountHtml,
+  computeWeekSummary,
+  parseViewParams,
 } = require('../services/dashboardService');
 const {
   showMonthDashboard,
@@ -96,6 +98,8 @@ class DashboardController {
       }
 
       const { nextMonth, nextYear } = getNextMonthInfo(monthCal, yearCal);
+      const viewParams = parseViewParams(req.query);
+      const weekSummary = computeWeekSummary(courseAvails, viewParams.anchor);
 
       return res.json({
         success: true,
@@ -112,6 +116,8 @@ class DashboardController {
           currentLocksTotal,
           monthCal,
           yearCal,
+          weekSummary,
+          view: viewParams,
           filters: {
             crs_scr: searchterm[0],
             loc_scr: searchterm[1],

@@ -22,9 +22,50 @@ function formatTimeValue(value) {
   return str;
 }
 
+function isTbcDate(value) {
+  if (value == null || String(value).trim() === '') {
+    return true;
+  }
+
+  const raw = String(value).trim().slice(0, 10);
+  if (raw === '0000-00-00' || raw === '1111-11-11') {
+    return true;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return true;
+  }
+
+  return parsed.getFullYear() < 1900;
+}
+
+function filterConfirmedDates(dates) {
+  return [...dates]
+    .filter((date) => !isTbcDate(date))
+    .sort((a, b) => String(a).localeCompare(String(b)));
+}
+
+function getPrimaryEventDate(dates, fallback) {
+  const confirmed = filterConfirmedDates(dates);
+  if (confirmed.length) {
+    return confirmed[0];
+  }
+  if (fallback && !isTbcDate(fallback)) {
+    return formatDateValue(fallback);
+  }
+  return null;
+}
+
+const CONFIRMED_DATE_SQL = `
+  course_event_dates.event_date != '0000-00-00'
+  AND course_event_dates.event_date != '1111-11-11'
+  AND YEAR(course_event_dates.event_date) >= 1900
+`;
+
 function buildSearchWhere(searchterm) {
   let where =
-    " WHERE course_events.status = '1' AND courses.status IN ('1', '2') AND course_event_dates.event_date != '0000-00-00' ";
+    ` WHERE course_events.status = '1' AND courses.status IN ('1', '2') AND ${CONFIRMED_DATE_SQL} `;
   const params = [];
 
   if (searchterm[0] != null && String(searchterm[0]).trim() !== '') {
@@ -92,10 +133,24 @@ async function enrichCourseAvails(pool, rows) {
   }
 
   const eventIds = rows.map((r) => r.course_event_id);
+  const [allDateRows] = await pool.query(
+    `SELECT course_event_id, event_date
+     FROM course_event_dates
+     WHERE course_event_id IN (?)`,
+    [eventIds]
+  );
+
+  const dayCountByEvent = {};
+  for (const row of allDateRows) {
+    const id = row.course_event_id;
+    dayCountByEvent[id] = (dayCountByEvent[id] || 0) + 1;
+  }
+
   const [dateRows] = await pool.query(
     `SELECT course_event_id, event_date
      FROM course_event_dates
-     WHERE course_event_id IN (?) AND event_date != '0000-00-00'`,
+     WHERE course_event_id IN (?)
+       AND ${CONFIRMED_DATE_SQL}`,
     [eventIds]
   );
 
@@ -106,22 +161,33 @@ async function enrichCourseAvails(pool, rows) {
       datesByEvent[id] = [];
     }
     const formatted = formatDateValue(row.event_date);
-    if (formatted && !datesByEvent[id].includes(formatted)) {
+    if (formatted && !isTbcDate(formatted) && !datesByEvent[id].includes(formatted)) {
       datesByEvent[id].push(formatted);
     }
+  }
+
+  for (const id of Object.keys(datesByEvent)) {
+    datesByEvent[id] = filterConfirmedDates(datesByEvent[id]);
   }
 
   const frozenIds = await getFrozenEventIds(pool, eventIds);
 
   return rows.map((row) => {
-    const eventDates = datesByEvent[row.course_event_id] || [
-      formatDateValue(row.event_date),
-    ];
+    const rawDates = datesByEvent[row.course_event_id] || [];
+    const fallbackDate = formatDateValue(row.event_date);
+    const eventDates =
+      rawDates.length > 0
+        ? rawDates
+        : fallbackDate && !isTbcDate(fallbackDate)
+          ? [fallbackDate]
+          : [];
+    const primaryDate = getPrimaryEventDate(eventDates, fallbackDate);
+
     return {
       course_event_id: row.course_event_id,
       course_name: row.course_name,
       course_id: row.course_id,
-      event_date: formatDateValue(row.event_date),
+      event_date: primaryDate,
       event_type: row.event_type,
       loc_abb: row.loc_abb,
       event_start_time: formatTimeValue(row.event_start_time),
@@ -130,9 +196,10 @@ async function enrichCourseAvails(pool, rows) {
       bookings_done: Number(row.bookings_done) || 0,
       current_locks: Number(row.current_locks) || 0,
       eventDates,
+      eventDayCount: dayCountByEvent[row.course_event_id] || eventDates.length,
       isFrozen: frozenIds.has(row.course_event_id),
     };
-  });
+  }).filter((row) => row.event_date != null);
 }
 
 async function getFrozenEventIds(pool, eventIds) {
@@ -152,7 +219,7 @@ async function getFrozenEventIds(pool, eventIds) {
 async function selectFutureCourses(pool) {
   const now = new Date().toISOString().slice(0, 10);
   const where = ` WHERE course_events.status = '1' AND courses.status IN ('1', '2')
-    AND course_event_dates.event_date != '0000-00-00'
+    AND ${CONFIRMED_DATE_SQL}
     AND (
       course_event_dates.event_date >= ?
       OR (
@@ -187,7 +254,7 @@ async function selectFutureCourses(pool) {
  */
 async function selectLocations(pool) {
   const where =
-    " WHERE course_events.status = '1' AND courses.status IN ('1', '2') AND course_event_dates.event_date != '0000-00-00' ";
+    ` WHERE course_events.status = '1' AND courses.status IN ('1', '2') AND ${CONFIRMED_DATE_SQL} `;
 
   const sql = `SELECT * FROM (
     SELECT course_event_dates.event_date,
@@ -231,6 +298,105 @@ function buildCurrentLockCountHtml(total) {
   return 'Bookings Currently In Progress: 0';
 }
 
+function pad2Local(n) {
+  return String(n).padStart(2, '0');
+}
+
+function toIsoDateValue(date) {
+  return `${date.getFullYear()}-${pad2Local(date.getMonth() + 1)}-${pad2Local(date.getDate())}`;
+}
+
+function parseIsoDateValue(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function mondayOfWeek(iso) {
+  const date = parseIsoDateValue(iso);
+  const day = date.getDay() || 7;
+  date.setDate(date.getDate() - (day - 1));
+  return toIsoDateValue(date);
+}
+
+function addDaysIso(iso, days) {
+  const date = parseIsoDateValue(iso);
+  date.setDate(date.getDate() + days);
+  return toIsoDateValue(date);
+}
+
+function getEventDatesForAvail(avail) {
+  if (Array.isArray(avail.eventDates) && avail.eventDates.length) {
+    return filterConfirmedDates(avail.eventDates);
+  }
+  const fallback = avail.event_date ? formatDateValue(avail.event_date) : null;
+  return fallback && !isTbcDate(fallback) ? [fallback] : [];
+}
+
+function getCalendarDatesForAvail(avail) {
+  const confirmed = getEventDatesForAvail(avail);
+  if (!confirmed.length) {
+    return [];
+  }
+  if (avail.event_type === 'multi') {
+    return [confirmed[0]];
+  }
+  return confirmed;
+}
+
+/**
+ * Week summary for dashboard v2 — one session per event in the week.
+ */
+function computeWeekSummary(courseAvails, anchorIso) {
+  const weekStart = mondayOfWeek(anchorIso);
+  const weekEnd = addDaysIso(weekStart, 6);
+
+  let sessionCount = 0;
+  let spacesLeft = 0;
+  let coursesFull = 0;
+
+  for (const avail of courseAvails || []) {
+    const capacity = Number(avail.booking_limit) || 0;
+    const booked =
+      Number(avail.bookings_done || 0) + Number(avail.current_locks || 0);
+    const spaces = avail.isFrozen ? 0 : Math.max(0, capacity - booked);
+
+    const displayDates = getCalendarDatesForAvail(avail);
+    const appearsInWeek = displayDates.some(
+      (dateStr) => dateStr >= weekStart && dateStr <= weekEnd
+    );
+
+    if (!appearsInWeek) {
+      continue;
+    }
+
+    sessionCount += 1;
+    if (avail.isFrozen || spaces === 0) {
+      coursesFull += 1;
+    } else {
+      spacesLeft += spaces;
+    }
+  }
+
+  return {
+    sessionCount,
+    spacesLeft,
+    coursesFull,
+    weekStart,
+    weekEnd,
+  };
+}
+
+function parseViewParams(query) {
+  const view = query.view === 'month' ? 'month' : 'week';
+  const anchorRaw =
+    query.anchor != null ? String(query.anchor).trim() : '';
+  const anchor = /^\d{4}-\d{2}-\d{2}$/.test(anchorRaw)
+    ? anchorRaw
+    : new Date().toISOString().slice(0, 10);
+
+  return { view, anchor };
+}
+
 module.exports = {
   courseAvailsDashboard,
   selectFutureCourses,
@@ -239,4 +405,8 @@ module.exports = {
   getCurrentLocksTotal,
   buildCurrentLockCountHtml,
   formatDateValue,
+  computeWeekSummary,
+  parseViewParams,
+  isTbcDate,
+  filterConfirmedDates,
 };
