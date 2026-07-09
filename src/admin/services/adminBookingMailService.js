@@ -150,6 +150,128 @@ async function sendAdminBookingMail(pool, bookingId, resendConf, req) {
   }
 }
 
+function normalizeSiteUrl(url) {
+  return String(url || '')
+    .replace(/http:\/\/https:\/\//g, 'https://')
+    .replace(/^http:\/\//g, 'https://')
+    .replace(/https:\/\/www\.pepmo\.co\.uk/g, 'http://www.pepmo.co.uk');
+}
+
+async function saveEmailLog(pool, payload) {
+  if (!pool) return;
+  await pool.query(
+    `INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, status, type, book_ref, created)
+     VALUES (?, '', '', ?, ?, ?, ?, 'Feedback', ?, NOW())`,
+    [
+      payload.to,
+      payload.from,
+      payload.subject,
+      payload.body,
+      payload.status,
+      payload.bookingRef,
+    ]
+  );
+}
+
+async function sendFeedbackMail(pool, bookId) {
+  const bookingId = Number(bookId);
+  if (!Number.isFinite(bookingId) || bookingId <= 0) {
+    return false;
+  }
+
+  const [rows] = await pool.query(
+    `SELECT booking_attendees.booking_ref, settings.site_contact, settings.site_email,
+      courses.course_name, courses.send_feedback_mail, courses.feedback_content, courses.email_header,
+      booking_attendees.first_name, booking_attendees.sur_name, booking_attendees.email,
+      bookings.id AS bid
+     FROM bookings
+     JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
+     JOIN courses ON courses.id = bookings.course_id
+     JOIN settings ON settings.id = 1
+     WHERE bookings.id = ?
+     LIMIT 1`,
+    [bookingId]
+  );
+  const bData = rows[0];
+  if (!bData || Number(bData.send_feedback_mail) !== 1) {
+    return false;
+  }
+
+  const email = trim(bData.email);
+  if (!isValidEmail(email)) {
+    return false;
+  }
+
+  const pupil = `${trim(bData.first_name)} ${trim(bData.sur_name)}`.trim();
+  const siteUrl = normalizeSiteUrl(process.env.PHP_SITE_URL || 'https://www.1stopinstruction.com');
+  const adminUrl = normalizeSiteUrl(
+    process.env.ADMIN_SITE_URL || process.env.PHP_ADMIN_URL || siteUrl
+  );
+  const headerPath = bData.email_header
+    ? `${adminUrl}/admin/uploads/${bData.email_header}`
+    : `${siteUrl}/images/header-img.jpg`;
+  const logoPath = `${siteUrl}/images/logo.png`;
+  const feedbackContent = normalizeSiteUrl(bData.feedback_content || '');
+  const subject = `You have completed your ${bData.course_name} Course`;
+  const body = `<!Doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><title>1stopinstruction.com</title></head>
+<body style="margin:0;padding:0;">
+<div align="center">
+<table width="800" border="0" align="center" style="background:#f5f5f5;border:1px solid #e0e0e0;padding:5px;">
+<tr><td><img src="${headerPath}" width="784" height="177" alt="" /></td></tr>
+<tr><td style="background:#fff;padding:10px;font-family:Arial,sans-serif;font-size:9pt;">
+Dear ${trim(bData.first_name)},<p></p>${feedbackContent}<p></p>
+Kind Regards,<br /><strong><i>1 Stop Instruction</i></strong>
+</td></tr>
+<tr><td style="text-align:center;background:#e6e6e8;padding:10px;">
+<img src="${logoPath}" width="90" alt="" />
+</td></tr>
+</table>
+</div>
+</body></html>`;
+
+  const nodemailer = require('nodemailer');
+  const { getMailFrom, getMailFromAddress } = require('../../utils/mailFrom');
+  const smtpSecure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: smtpSecure,
+    requireTLS:
+      !smtpSecure &&
+      String(process.env.SMTP_REQUIRE_TLS ?? 'true').toLowerCase() !== 'false',
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+
+  let status = 0;
+  try {
+    await transporter.sendMail({
+      from: getMailFrom(),
+      to: email,
+      subject,
+      html: body,
+    });
+    status = 1;
+  } catch (err) {
+    console.error('[ADMIN][FEEDBACK-MAIL]', err.message);
+  }
+
+  await saveEmailLog(pool, {
+    to: email,
+    from: getMailFromAddress(),
+    subject,
+    body,
+    status,
+    bookingRef: trim(bData.booking_ref),
+  });
+
+  return status === 1;
+}
+
 module.exports = {
   sendAdminBookingMail,
+  sendFeedbackMail,
 };
