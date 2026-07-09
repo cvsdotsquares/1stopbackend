@@ -41,14 +41,19 @@ async function queryVehicleStatusGroup(pool, column, fieldOrder) {
   const [rows] = await pool.query(
     `SELECT COUNT(*) AS cnt, ${column} AS color
      FROM vehicles
-     WHERE include_into_alert = 1 AND status = 1
+     WHERE include_into_alert = 1
+       AND status = 1
+       AND ${column} IS NOT NULL
+       AND ${column} != ''
+       AND ${column} != 'none'
      GROUP BY ${column}
+     HAVING cnt > 0
      ORDER BY FIELD(${column}, ${fieldList})`
   );
 
   return rows.map((row) => ({
     cnt: Number(row.cnt),
-    color: row.color,
+    color: String(row.color),
   }));
 }
 
