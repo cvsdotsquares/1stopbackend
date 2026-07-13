@@ -96,6 +96,24 @@ async function enrichCourseAvails(pool, rows) {
     `SELECT course_event_id, event_date
      FROM course_event_dates
      WHERE course_event_id IN (?) AND event_date != '0000-00-00'`,
+  const [allDateRows] = await pool.query(
+    `SELECT course_event_id, event_date
+     FROM course_event_dates
+     WHERE course_event_id IN (?)`,
+    [eventIds]
+  );
+
+  const dayCountByEvent = {};
+  for (const row of allDateRows) {
+    const id = row.course_event_id;
+    dayCountByEvent[id] = (dayCountByEvent[id] || 0) + 1;
+  }
+
+  const [dateRows] = await pool.query(
+    `SELECT course_event_id, event_date
+     FROM course_event_dates
+     WHERE course_event_id IN (?)
+       AND ${CONFIRMED_DATE_SQL}`,
     [eventIds]
   );
 
