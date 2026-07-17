@@ -9,8 +9,9 @@
  *   POST https://(try.)access.worldpay.com/payment_pages
  *   with "channel": "moto" (SAQ-A, no card data on our servers)
  *
- * Legacy parity: bookings/make_a_payment.php → WorldPay MOTO form → callbacks.
+ * Legacy parity: make_a_payment.php → world_pay_moto.php → callbacks.
  */
+const crypto = require('crypto');
 const { mc_decrypt, mc_decrypt_old } = require('../../utils/universalPassword');
 
 function trim(value) {
@@ -50,6 +51,55 @@ function isWorldpayLive() {
 
 function getWorldpayCurrency() {
   return trim(process.env.WORLDPAY_CURRENCY) || 'GBP';
+}
+
+/**
+ * WorldPay Payment Pages testMode:
+ * - 100 = test (secure-test.worldpay.com)
+ * - 0   = live (secure.worldpay.com)
+ * Override with WORLDPAY_TEST_MODE when needed.
+ */
+function getWorldpayTestMode() {
+  const explicit = trim(process.env.WORLDPAY_TEST_MODE);
+  if (explicit !== '') return explicit;
+  return isWorldpayLive() ? '0' : '100';
+}
+
+/** Legacy posts whole pounds as "1", not "1.00". Signature must use the same string. */
+function formatWorldpayAmount(amount) {
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return String(amount);
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(2);
+}
+
+/**
+ * Legacy MD5 password signature (make_a_payment.php / world_pay_moto.php):
+ * md5(secret:instId:accId:amount:GBP:cartId)
+ * Form field is named accId1 even though PHP stores it as accId2.
+ */
+function buildWorldpaySignature({ instId, accId, amount, cartId, currency }) {
+  const secret = trim(process.env.WORLDPAY_MD5_SECRET);
+  if (!secret) {
+    const err = new Error(
+      'WORLDPAY_MD5_SECRET is not configured (required for Payment Pages signature)'
+    );
+    err.status = 500;
+    throw err;
+  }
+  const currencyCode = currency || getWorldpayCurrency();
+  const encValues = [
+    secret,
+    instId,
+    accId,
+    amount,
+    currencyCode,
+    cartId,
+  ].join(':');
+  return {
+    signatureFields: 'instId:amount:currency:cartId',
+    signature: crypto.createHash('md5').update(encValues, 'utf8').digest('hex'),
+  };
 }
 
 function getAccessHppBaseUrl() {
@@ -284,7 +334,7 @@ async function createAccessHostedPayment({
 }
 
 /**
- * Classic Business Gateway form fields — same flow as staging legacy MOTO page.
+ * Classic Business Gateway form fields — mirrors world_pay_moto.php POST body.
  */
 function buildPaymentPagesFields({
   franchise,
@@ -304,38 +354,52 @@ function buildPaymentPagesFields({
     franchise.acc_id,
     'account ID'
   );
+  const currency = getWorldpayCurrency();
+  const amountStr = formatWorldpayAmount(amount);
+  const cartId = String(bookingId);
   const successURL = `${completeUrl}?status=success&cartId=${encodeURIComponent(bookingId)}`;
   const failureURL = `${completeUrl}?status=failed&cartId=${encodeURIComponent(bookingId)}`;
   const errorURL = `${completeUrl}?status=failed&cartId=${encodeURIComponent(bookingId)}`;
   const cancelURL = `${cancelUrl}?status=cancel&cartId=${encodeURIComponent(bookingId)}`;
-
-  return {
-    // Exact legacy PHP WorldPay payload.
-    testMode: '0',
+  const { signatureFields, signature } = buildWorldpaySignature({
     instId: installationId,
-    cartId: String(bookingId),
-    amount: Number(amount).toFixed(2),
+    accId: accountId,
+    amount: amountStr,
+    cartId,
+    currency,
+  });
+
+  // Address/tel left blank for custom MOTO (make_a_payment.php sets empty strings).
+  return {
+    testMode: getWorldpayTestMode(),
+    instId: installationId,
+    cartId,
+    amount: amountStr,
     cancelURL,
     successURL,
     failureURL,
     errorURL,
     email: payeeEmail,
     name: payeeName,
-    country: 'GB',
-    currency: 'GBP',
-    desc: '1 Stop Booking',
-    address1: trim(franchise.franchise_address1),
-    address2: trim(franchise.franchise_address2),
-    address3: trim(franchise.franchise_address3),
-    town: trim(franchise.franchise_address4),
+    address1: '',
+    address2: '',
+    address3: '',
+    town: '',
     region: '',
-    postcode: trim(franchise.franchise_postcode),
-    accId2: accountId,
-    tel: trim(franchise.telephone),
+    postcode: '',
+    country: 'GB',
+    currency,
+    hideCurrency: 'true',
+    desc: '1 Stop Booking',
+    // Form posts accId1; PHP only stores the value under accId2.
+    accId1: accountId,
+    tel: '',
     MC_CancelURL: cancelURL,
     MC_callback: notifyUrl,
     M_paymentType: 'custom_moto_payment',
     M_voucherId: '0',
+    signatureFields,
+    signature,
   };
 }
 
