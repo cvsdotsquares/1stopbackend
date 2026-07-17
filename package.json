@@ -30,6 +30,7 @@
     "nodemailer": "^6.9.3",
     "nodemon": "^3.1.11",
     "normalize-path": "^3.0.0",
+    "rijndael-js": "^2.0.0",
     "stripe": "^17.3.1"
   }
 }
