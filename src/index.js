@@ -204,6 +204,16 @@ app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
 app.use('/api/faq', createFAQRoutes(pool));
 app.use('/api/admin', createAdminRoutes(pool));
 
+// Legacy WorldPay Payment Response URL (configured in WorldPay MAI for old admin)
+// Same handler as POST /api/admin/payments/moto/notify
+{
+  const MotoPaymentController = require('./admin/controllers/motoPaymentController');
+  const worldpayCallback = new MotoPaymentController(pool);
+  const legacyWorldpayNotify = (req, res) => worldpayCallback.notify(req, res);
+  app.post('/bookings/worldpayCallbackUpdated', legacyWorldpayNotify);
+  app.get('/bookings/worldpayCallbackUpdated', legacyWorldpayNotify);
+}
+
 // API Documentation endpoint
 app.get('/api', (req, res) => {
   res.json({
