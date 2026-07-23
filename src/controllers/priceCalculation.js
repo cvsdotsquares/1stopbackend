@@ -186,9 +186,19 @@ class PriceCalculationController {
 
     // Get earliest course date
     const validDates = courseEventDates
-      .filter(date => date.event_date !== '0000-00-00' && date.event_date !== '1111-11-11')
-      .map(date => new Date(date.event_date))
-      .sort((a, b) => a - b);
+    .flatMap(({ event_date }) => {
+      if (
+        !event_date ||
+        event_date === '0000-00-00' ||
+        event_date === '1111-11-11'
+      ) {
+        return [];
+      }
+  
+      const date = new Date(event_date);
+      return isNaN(date.getTime()) ? [] : [date];
+    })
+    .sort((a, b) => a - b);
 
 
     if (validDates.length === 0) {

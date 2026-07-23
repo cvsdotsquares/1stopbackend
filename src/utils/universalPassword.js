@@ -17,9 +17,22 @@
 //   forward compatibility.
 
 const crypto = require('crypto');
+const Rijndael = require('rijndael-js');
 
 const CIPHER = 'aes-256-cbc';
 const MAC_HEX_LEN = 64; // sha256 -> 32 bytes -> 64 hex chars
+const RIJNDAEL_256_BLOCK_BYTES = 32;
+
+// PHP trim() default charset: space, tab, LF, VT, CR, NUL
+function phpTrim(value) {
+  const s = Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
+  return s.replace(/^[\x00\x09\x0A\x0B\x0D\x20]+|[\x00\x09\x0A\x0B\x0D\x20]+$/g, '');
+}
+
+function phpSerializeString(value) {
+  const s = String(value);
+  return `s:${Buffer.byteLength(s, 'utf8')}:"${s}";`;
+}
 
 function packHex(hex) {
   // Mirror PHP `pack('H*', $key)`: an odd-length hex string is treated as if
@@ -47,6 +60,25 @@ function parsePhpSerializedString(s) {
   if (Number.isNaN(declared)) return null;
   if (Buffer.byteLength(content, 'utf8') !== declared) return null;
   return content;
+}
+
+// Parse common PHP `serialize()` scalars used by franchise credentials.
+// Numeric installation IDs were sometimes stored as `i:123;` rather than `s:…`.
+function parsePhpSerialized(s) {
+  const asString = parsePhpSerializedString(s);
+  if (asString !== null) return asString;
+
+  if (typeof s !== 'string') return null;
+
+  const asInt = /^i:(-?\d+);$/.exec(s);
+  if (asInt) return asInt[1];
+
+  const asBool = /^b:([01]);$/.exec(s);
+  if (asBool) return asBool[1] === '1';
+
+  if (s === 'N;') return null;
+
+  return null;
 }
 
 function mc_encrypt(value, keyHex) {
@@ -101,9 +133,9 @@ function mc_decrypt(encrypted, keyHex) {
     if (macBuf.length !== calcBuf.length) return false;
     if (!crypto.timingSafeEqual(macBuf, calcBuf)) return false;
 
-    // PHP admin panel uses `serialize()` (s:<len>:"<value>";), not JSON.
+    // PHP admin panel uses `serialize()` (s:<len>:"…" / i:N;), not JSON.
     // Try that first; fall back to JSON for forward compatibility.
-    let parsed = parsePhpSerializedString(value);
+    let parsed = parsePhpSerialized(value);
     if (parsed === null) {
       try {
         parsed = JSON.parse(value);
@@ -116,6 +148,87 @@ function mc_decrypt(encrypted, keyHex) {
     // Intentionally swallow: never leak which step failed or any payload content.
     return false;
   }
+}
+
+/**
+ * PHP `mc_decrypt_old` / `$general->getDecrypted()` — franchise payment fields
+ * (inst_id, acc_id, moto_id, …) were encrypted with MCRYPT_RIJNDAEL_256 CBC
+ * (32-byte blocks), not OpenSSL AES-256-CBC (16-byte blocks).
+ *
+ * Wire format is still `${base64(ciphertext)}|${base64(iv)}`.
+ */
+function mc_decrypt_old(encrypted, keyHex) {
+  try {
+    if (typeof encrypted !== 'string' || !encrypted.includes('|')) return false;
+
+    const key = packHex(keyHex);
+    if (![16, 24, 32].includes(key.length)) return false;
+
+    // Mirror PHP: explode('|', $decrypt.'|')
+    const parts = `${encrypted}|`.split('|');
+    const dataB64 = parts[0];
+    const ivB64 = parts[1];
+    if (!dataB64 || !ivB64) return false;
+
+    const iv = Buffer.from(ivB64, 'base64');
+    const encryptedData = Buffer.from(dataB64, 'base64');
+    if (iv.length !== RIJNDAEL_256_BLOCK_BYTES || encryptedData.length === 0) {
+      return false;
+    }
+    if (encryptedData.length % RIJNDAEL_256_BLOCK_BYTES !== 0) return false;
+
+    const cipher = new Rijndael(key, 'cbc');
+    const decrypted = phpTrim(
+      Buffer.from(cipher.decrypt(encryptedData, 256, iv))
+    );
+
+    if (decrypted.length < MAC_HEX_LEN) return false;
+
+    const mac = decrypted.slice(-MAC_HEX_LEN);
+    const value = decrypted.slice(0, -MAC_HEX_LEN);
+    const calcMac = crypto
+      .createHmac('sha256', deriveMacKey(key))
+      .update(value)
+      .digest('hex');
+
+    const macBuf = Buffer.from(mac, 'hex');
+    const calcBuf = Buffer.from(calcMac, 'hex');
+    if (macBuf.length !== calcBuf.length) return false;
+    if (!crypto.timingSafeEqual(macBuf, calcBuf)) return false;
+
+    let parsed = parsePhpSerialized(value);
+    if (parsed === null) {
+      try {
+        parsed = JSON.parse(value);
+      } catch (_parseErr) {
+        return false;
+      }
+    }
+    return parsed;
+  } catch (_err) {
+    return false;
+  }
+}
+
+/** Round-trip helper matching PHP `mc_encrypt_old` (for tests / migration). */
+function mc_encrypt_old(value, keyHex) {
+  const key = packHex(keyHex);
+  if (![16, 24, 32].includes(key.length)) {
+    throw new Error('ENCRYPTION_KEY must decode to a 16/24/32-byte key');
+  }
+
+  const serialized = phpSerializeString(value);
+  const mac = crypto
+    .createHmac('sha256', deriveMacKey(key))
+    .update(serialized)
+    .digest('hex');
+  const payload = serialized + mac;
+
+  const iv = crypto.randomBytes(RIJNDAEL_256_BLOCK_BYTES);
+  const cipher = new Rijndael(key, 'cbc');
+  const encrypted = Buffer.from(cipher.encrypt(payload, 256, iv));
+
+  return `${encrypted.toString('base64')}|${iv.toString('base64')}`;
 }
 
 async function getEncryptedUniversalPassword(pool) {
@@ -164,6 +277,8 @@ async function verifyUniversalPassword(pool, plainPassword) {
 module.exports = {
   mc_encrypt,
   mc_decrypt,
+  mc_encrypt_old,
+  mc_decrypt_old,
   getEncryptedUniversalPassword,
   verifyUniversalPassword,
 };
