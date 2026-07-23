@@ -13,6 +13,7 @@
  */
 const crypto = require('crypto');
 const { mc_decrypt, mc_decrypt_old } = require('../../utils/universalPassword');
+const { phpSerialize } = require('../../utils/phpSerialize');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -162,6 +163,23 @@ function buildOrderId(invPrefix, bookingId) {
 function defaultPaymentDescription(description) {
   const desc = trim(description);
   return desc || 'Custom Payment';
+}
+
+/** Legacy make_a_payment.php → booking_payments.transation_extra_info (PHP serialize). */
+function buildMotoTransactionExtraInfo({
+  payeeName,
+  payeeEmail,
+  paymentDescription,
+  franchiseId,
+  franchiseName,
+}) {
+  return phpSerialize({
+    payee_name: payeeName,
+    payee_email: payeeEmail,
+    payment_description: paymentDescription,
+    franchise: String(franchiseId),
+    franchise_name: franchiseName,
+  });
 }
 
 async function listMotoFranchises(pool) {
@@ -505,17 +523,26 @@ async function initiateMotoPayment(pool, body, adminSession) {
       status: 'pending',
     };
 
+    const transactionExtraInfo = buildMotoTransactionExtraInfo({
+      payeeName,
+      payeeEmail,
+      paymentDescription: description,
+      franchiseId: franchise.id,
+      franchiseName: franchise.franchise_name,
+    });
+
     const [paymentInsert] = await connection.query(
       `INSERT INTO booking_payments
        (booking_id, payment_type, transation_id, amount, transation_type, response,
-        created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
-       VALUES (?, 'SALE', ?, ?, 'custom_payment', ?, ?, 1, ?, '')`,
+        created, isDelete, transation_extra_info, custom_payment_booking_ref, voucher_serilized_response)
+       VALUES (?, 'MOTO', ?, ?, 'custom_payment', ?, ?, 1, ?, ?, '')`,
       [
         bookingId,
         orderId,
         amount,
         JSON.stringify(pendingPayload),
         created,
+        transactionExtraInfo,
         orderId,
       ]
     );
@@ -773,8 +800,7 @@ async function completeMotoFromCallback(pool, body, options = {}) {
 
     await connection.query(
       `UPDATE booking_payments
-       SET payment_type = 'SALE',
-           transation_id = ?,
+       SET transation_id = ?,
            amount = ?,
            response = ?,
            isDelete = 0,
@@ -880,4 +906,5 @@ module.exports = {
   resolveIntegrationMode,
   getAdminFrontendBase,
   getWorldpayCurrency,
+  buildMotoTransactionExtraInfo,
 };
