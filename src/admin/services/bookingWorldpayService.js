@@ -3,14 +3,19 @@
  */
 const {
   buildWorldpaySignature,
+  createAccessHostedPayment,
   formatWorldpayAmount,
   getAdminFrontendBase,
   getApiPublicBase,
   getWorldpayCurrency,
   getWorldpayPurchaseUrl,
   getWorldpayTestMode,
+  getEnvWorldpayCredentials,
+  hasAccessCredentials,
   isMockMode,
+  isWorldpayTestEnvironment,
   pickCallbackField,
+  resolveIntegrationMode,
 } = require('./motoPaymentService');
 
 function trim(value) {
@@ -24,15 +29,13 @@ function nowMysql() {
 }
 
 function getBookingWorldpayCredentials() {
+  const envCreds = getEnvWorldpayCredentials();
+  if (envCreds.instId && envCreds.accId) {
+    return envCreds;
+  }
   return {
-    instId:
-      trim(process.env.WORLDPAY_BOOKING_INST_ID) ||
-      trim(process.env.WORLDPAY_INST_ID) ||
-      '1461358',
-    accId:
-      trim(process.env.WORLDPAY_BOOKING_ACC_ID) ||
-      trim(process.env.WORLDPAY_ACC_ID) ||
-      '1STOPINSTRUCM2',
+    instId: isWorldpayTestEnvironment() ? '1382788' : '1461358',
+    accId: '1STOPINSTRUCM2',
   };
 }
 
@@ -224,14 +227,6 @@ async function getBookingWorldpayPayload(pool, session) {
   const cancelUrl = `${apiBase}/api/admin/bookings/wizard/worldpay/cancel`;
   const failedUrl = `${adminBase}/admin/bookings/worldpay/failed?evId=${evId}&cartId=${encodeURIComponent(cartId)}`;
   const returnUrl = `${adminBase}/admin/bookings/worldpay/return?evId=${evId}&cartId=${encodeURIComponent(cartId)}`;
-  const { instId, accId } = getBookingWorldpayCredentials();
-  const { signatureFields, signature } = buildWorldpaySignature({
-    instId,
-    accId,
-    amount: amountStr,
-    cartId,
-    currency,
-  });
 
   if (isMockMode()) {
     return {
@@ -246,8 +241,69 @@ async function getBookingWorldpayPayload(pool, session) {
     };
   }
 
+  const integration = resolveIntegrationMode();
+  if (integration === 'access_hpp') {
+    if (!hasAccessCredentials()) {
+      const err = new Error(
+        'Access WorldPay credentials are not configured (WORLDPAY_ACCESS_USERNAME / PASSWORD / ENTITY)'
+      );
+      err.status = 400;
+      throw err;
+    }
+
+    const description = trim(event.course_name) || '1 Stop Booking';
+    const bookingDisable3ds =
+      process.env.WORLDPAY_HPP_DISABLE_3DS_BOOKING ??
+      process.env.WORLDPAY_HPP_DISABLE_3DS ??
+      'true';
+    const { redirectUrl } = await createAccessHostedPayment({
+      orderId: cartId,
+      amount: totAmount,
+      currency,
+      description,
+      payeeName: customerName,
+      payeeEmail: emailAddress,
+      resultUrls: {
+        successURL: `${completeUrl}?status=success&cartId=${encodeURIComponent(cartId)}&M_evId=${evId}`,
+        cancelURL: `${cancelUrl}?status=cancel&cartId=${encodeURIComponent(cartId)}&M_evId=${evId}`,
+        failureURL: failedUrl,
+        errorURL: failedUrl,
+        pendingURL: `${completeUrl}?status=pending&cartId=${encodeURIComponent(cartId)}&M_evId=${evId}`,
+        expiryURL: `${cancelUrl}?status=expiry&cartId=${encodeURIComponent(cartId)}&M_evId=${evId}`,
+      },
+      options: {
+        disable3ds:
+          String(bookingDisable3ds).toLowerCase() !== 'false',
+        disableFraud:
+          String(process.env.WORLDPAY_HPP_DISABLE_FRAUD || 'true').toLowerCase() !==
+          'false',
+      },
+    });
+
+    return {
+      mock: false,
+      integration: 'access_hpp',
+      event_id: evId,
+      cart_id: cartId,
+      amount: totAmount,
+      currency,
+      redirect_url: redirectUrl,
+      message: 'Redirecting to WorldPay Hosted Payment Pages',
+    };
+  }
+
+  const { instId, accId } = getBookingWorldpayCredentials();
+  const { signatureFields, signature } = buildWorldpaySignature({
+    instId,
+    accId,
+    amount: amountStr,
+    cartId,
+    currency,
+  });
+
   return {
     mock: false,
+    integration: 'payment_pages',
     event_id: evId,
     cart_id: cartId,
     amount: totAmount,
@@ -278,8 +334,23 @@ async function getBookingWorldpayPayload(pool, session) {
       signatureFields,
       signature,
     },
-    message: 'Redirecting to WorldPay MOTO payment page',
+    message: 'Redirecting to WorldPay payment page',
   };
+}
+
+function isWorldpayAuthorised(body) {
+  const transStatus = pickCallbackField(body, 'transStatus', 'transstatus', 'outcome');
+  const statusHint = pickCallbackField(body, 'status');
+  const mock = pickCallbackField(body, 'mock');
+  if (mock === '1' || statusHint === 'success') return true;
+  const statusUpper = transStatus.toUpperCase();
+  return (
+    statusUpper === 'Y' ||
+    statusUpper === 'AUTHORIZED' ||
+    statusUpper === 'AUTHORISED' ||
+    statusUpper === 'SENT_FOR_SETTLEMENT' ||
+    statusUpper === 'SUCCESS'
+  );
 }
 
 async function buildCartIdFromSession(pool, session) {
@@ -348,13 +419,17 @@ async function completeBookingWorldpayNotify(pool, body) {
     return { success: false, skipped: true, message: 'Not a course booking payment' };
   }
 
-  const paymentStatus = pickCallbackField(body, 'transStatus', 'transstatus');
-  if (paymentStatus !== 'Y') {
+  if (!isWorldpayAuthorised(body)) {
     return { success: false, message: 'Payment was not authorised' };
   }
 
-  const cartId = pickCallbackField(body, 'cartId', 'cartid');
-  const orderKey = pickCallbackField(body, 'transId', 'transid');
+  const cartId = pickCallbackField(
+    body,
+    'cartId',
+    'cartid',
+    'transactionReference'
+  );
+  const orderKey = pickCallbackField(body, 'transId', 'transid', 'paymentId');
   const transactionType =
     pickCallbackField(body, 'transaction_type') || 'SALE';
   const refs = await bookingRefsFromCartId(pool, cartId);
@@ -546,10 +621,12 @@ function clearBookingWorldpaySession(session) {
 }
 
 async function handleBookingWorldpayBrowserComplete(pool, session, body) {
-  const transStatus = pickCallbackField(body, 'transStatus', 'transstatus');
-  const statusHint = pickCallbackField(body, 'status');
-  const mock = pickCallbackField(body, 'mock');
-  let cartId = pickCallbackField(body, 'cartId', 'cartid');
+  let cartId = pickCallbackField(
+    body,
+    'cartId',
+    'cartid',
+    'transactionReference'
+  );
 
   let evId =
     Number(pickCallbackField(body, 'M_evId', 'evId')) ||
@@ -560,8 +637,7 @@ async function handleBookingWorldpayBrowserComplete(pool, session, body) {
     cartId = await buildCartIdFromSession(pool, session);
   }
 
-  const shouldRecordPayment =
-    transStatus === 'Y' || mock === '1' || statusHint === 'success';
+  const shouldRecordPayment = isWorldpayAuthorised(body);
 
   if (shouldRecordPayment && cartId) {
     try {
