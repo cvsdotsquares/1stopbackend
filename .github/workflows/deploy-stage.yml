@@ -56,9 +56,14 @@ jobs:
             CONTACT_FROM=${{ secrets.CONTACT_FROM }}
             BOOKING_BCC=${{ secrets.BOOKING_BCC }}
             WORLDPAY_INST_ID=${{ secrets.WORLDPAY_INST_ID }}
+            WORLDPAY_ACC_ID=${{ secrets.WORLDPAY_ACC_ID }}
+            WORLDPAY_BOOKING_INST_ID=${{ secrets.WORLDPAY_BOOKING_INST_ID }}
+            WORLDPAY_BOOKING_ACC_ID=${{ secrets.WORLDPAY_BOOKING_ACC_ID }}
             WORLDPAY_MD5_SECRET=${{ secrets.WORLDPAY_MD5_SECRET }}
+            WORLDPAY_TEST_MD5_SECRET=${{ secrets.WORLDPAY_TEST_MD5_SECRET }}
             WORLDPAY_TEST_MODE=${{ secrets.WORLDPAY_TEST_MODE }}
             WORLDPAY_PURCHASE_URL=${{ secrets.WORLDPAY_PURCHASE_URL }}
+            ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
             API_PUBLIC_URL=${{ secrets.API_PUBLIC_URL }}
             ADMIN_FRONTEND_URL=${{ secrets.ADMIN_FRONTEND_URL }}
             SITE_URL=${{ secrets.SITE_URL }}
@@ -79,6 +84,14 @@ jobs:
             RIDETO_CONFIRM_LOCK_TIMEOUT_SEC=${{ secrets.RIDETO_CONFIRM_LOCK_TIMEOUT_SEC }}
             GOOGLE_CONTACTS_SYNC_DELAY_MINUTES=${{ secrets.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES }}
             CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}
+            WORLDPAY_INTEGRATION=${{ secrets.WORLDPAY_INTEGRATION }}
+            WORLDPAY_MOCK_MODE=${{ secrets.WORLDPAY_MOCK_MODE }}
+            WORLDPAY_ACCESS_USERNAME=${{ secrets.WORLDPAY_ACCESS_USERNAME }}
+            WORLDPAY_ACCESS_PASSWORD=${{ secrets.WORLDPAY_ACCESS_PASSWORD }}
+            WORLDPAY_ACCESS_ENTITY=${{ secrets.WORLDPAY_ACCESS_ENTITY }}
+            WORLDPAY_ACCESS_LIVE=${{ secrets.WORLDPAY_ACCESS_LIVE }}
+            WORLDPAY_NARRATIVE=${{ secrets.WORLDPAY_NARRATIVE }}
+            WORLDPAY_CURRENCY=${{ secrets.WORLDPAY_CURRENCY }}
             EOF
 
             echo "Setting .env file permissions..."

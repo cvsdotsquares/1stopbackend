@@ -7,7 +7,7 @@
  *
  * Latest (when Access credentials configured): Access Hosted Payment Pages
  *   POST https://(try.)access.worldpay.com/payment_pages
- *   with "channel": "moto" (SAQ-A, no card data on our servers)
+ *   MOTO: threeDS.type=disabled (admin-entered card, no 3DS challenge)
  *
  * Legacy parity: make_a_payment.php → world_pay_moto.php → callbacks.
  */
@@ -74,12 +74,21 @@ function formatWorldpayAmount(amount) {
   return n.toFixed(2);
 }
 
+function isWorldpayTestEnvironment() {
+  if (getWorldpayTestMode() === '100') return true;
+  const url = trim(process.env.WORLDPAY_PURCHASE_URL).toLowerCase();
+  return url.includes('secure-test.worldpay.com');
+}
+
 /**
- * Legacy MD5 password signature (make_a_payment.php / world_pay_moto.php):
- * md5(secret:instId:accId:amount:GBP:cartId)
- * Form field is named accId1 even though PHP stores it as accId2.
+ * MD5 secret from WorldPay MAI — must match the installation ID sent in the form.
+ * Optional WORLDPAY_TEST_MD5_SECRET when test/live installations use different secrets.
  */
-function buildWorldpaySignature({ instId, accId, amount, cartId, currency }) {
+function getWorldpayMd5Secret() {
+  if (isWorldpayTestEnvironment()) {
+    const testSecret = trim(process.env.WORLDPAY_TEST_MD5_SECRET);
+    if (testSecret) return testSecret;
+  }
   const secret = trim(process.env.WORLDPAY_MD5_SECRET);
   if (!secret) {
     const err = new Error(
@@ -88,6 +97,61 @@ function buildWorldpaySignature({ instId, accId, amount, cartId, currency }) {
     err.status = 500;
     throw err;
   }
+  return secret;
+}
+
+/** Env-based instId/accId (used for course bookings and test-gateway MOTO). */
+function getEnvWorldpayCredentials() {
+  const testEnv = isWorldpayTestEnvironment();
+  const instId = trim(
+    testEnv
+      ? process.env.WORLDPAY_INST_ID ||
+          process.env.WORLDPAY_BOOKING_INST_ID ||
+          process.env.WORLDPAY_TEST_INST_ID
+      : process.env.WORLDPAY_BOOKING_INST_ID ||
+          process.env.WORLDPAY_INST_ID ||
+          process.env.WORLDPAY_LIVE_INST_ID
+  );
+  const accId = trim(
+    testEnv
+      ? process.env.WORLDPAY_ACC_ID ||
+          process.env.WORLDPAY_BOOKING_ACC_ID ||
+          process.env.WORLDPAY_TEST_ACC_ID
+      : process.env.WORLDPAY_BOOKING_ACC_ID ||
+          process.env.WORLDPAY_ACC_ID ||
+          process.env.WORLDPAY_LIVE_ACC_ID
+  );
+  return { instId, accId };
+}
+
+/**
+ * MOTO Payment Pages credentials.
+ * On secure-test, franchise DB rows often hold live installation IDs — use env test IDs instead.
+ */
+function resolveMotoWorldpayCredentials(franchise) {
+  if (isWorldpayTestEnvironment()) {
+    const envCreds = getEnvWorldpayCredentials();
+    return {
+      instId: envCreds.instId || '1382788',
+      accId: envCreds.accId || '1STOPINSTRUCM2',
+      source: envCreds.instId && envCreds.accId ? 'env' : 'default_test',
+    };
+  }
+
+  return {
+    instId: decryptLegacyPaymentCredential(franchise.inst_id, 'installation ID'),
+    accId: decryptLegacyPaymentCredential(franchise.acc_id, 'account ID'),
+    source: 'franchise',
+  };
+}
+
+/**
+ * Legacy MD5 password signature (make_a_payment.php / world_pay_moto.php):
+ * md5(secret:instId:accId:amount:GBP:cartId)
+ * Form field is named accId1 even though PHP stores it as accId2.
+ */
+function buildWorldpaySignature({ instId, accId, amount, cartId, currency }) {
+  const secret = getWorldpayMd5Secret();
   const currencyCode = currency || getWorldpayCurrency();
   const encValues = [
     secret,
@@ -146,7 +210,7 @@ function hasAccessCredentials() {
 
 /**
  * payment_pages = classic wcc/purchase (current stage / legacy)
- * access_hpp    = Access Hosted Payment Pages + channel moto (latest)
+ * access_hpp    = Access Hosted Payment Pages (try/access.worldpay.com/payment_pages)
  * auto          = access_hpp if credentials present, else payment_pages
  */
 function resolveIntegrationMode() {
@@ -259,9 +323,49 @@ function toMinorUnits(amount) {
   return Math.round(Number(amount) * 100);
 }
 
+function buildAccessHppRiskData(payeeName, payeeEmail) {
+  const email = trim(payeeEmail);
+  if (!email) return null;
+
+  const riskData = {
+    account: { email },
+  };
+
+  const parts = String(payeeName || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts[0]) {
+    riskData.transaction = {
+      firstName: parts[0].slice(0, 22),
+    };
+    if (parts.length > 1) {
+      riskData.transaction.lastName = parts.slice(1).join(' ').slice(0, 22);
+    }
+  }
+
+  return riskData;
+}
+
+function formatAccessHppError(data, status) {
+  if (!data) return `Access HPP setup failed (${status})`;
+  if (Array.isArray(data.validationErrors) && data.validationErrors.length) {
+    const details = data.validationErrors
+      .map((item) => item.message || item.errorName || JSON.stringify(item))
+      .filter(Boolean)
+      .join('; ');
+    if (details) return details;
+  }
+  if (typeof data.message === 'string' && data.message) return data.message;
+  if (typeof data.errorName === 'string' && data.errorName) return data.errorName;
+  if (typeof data.raw === 'string' && data.raw) return data.raw;
+  return `Access HPP setup failed (${status})`;
+}
+
 /**
- * Latest WorldPay path: Access Hosted Payment Pages with channel=moto.
- * Card data never touches our servers (SAQ-A).
+ * Access Hosted Payment Pages — POST /payment_pages.
+ * MOTO admin flow: disable 3DS (no cardholder challenge) via threeDS.type per HPP API.
+ * @see http://worldpay-portal.eu.redocly.app/access/products/hosted-payment-pages/changelog
  */
 async function createAccessHostedPayment({
   orderId,
@@ -271,15 +375,22 @@ async function createAccessHostedPayment({
   payeeName,
   payeeEmail,
   resultUrls,
+  options = {},
 }) {
   const username = trim(process.env.WORLDPAY_ACCESS_USERNAME);
   const password = trim(process.env.WORLDPAY_ACCESS_PASSWORD);
   const entity = trim(process.env.WORLDPAY_ACCESS_ENTITY);
   const auth = Buffer.from(`${username}:${password}`).toString('base64');
   const url = `${getAccessHppBaseUrl()}/payment_pages`;
+  const minorAmount = toMinorUnits(amount);
+  if (!Number.isFinite(minorAmount) || minorAmount <= 0) {
+    const err = new Error('Payment amount must be greater than zero');
+    err.status = 400;
+    throw err;
+  }
 
   const payload = {
-    transactionReference: orderId,
+    transactionReference: String(orderId),
     merchant: { entity },
     narrative: {
       line1: trim(process.env.WORLDPAY_NARRATIVE || '1 Stop Instruction').slice(
@@ -287,26 +398,40 @@ async function createAccessHostedPayment({
         24
       ),
     },
-    description: description.slice(0, 128),
     value: {
       currency,
-      amount: toMinorUnits(amount),
+      amount: minorAmount,
     },
-    channel: 'moto',
     resultURLs: resultUrls,
   };
 
-  if (payeeEmail) {
-    payload.riskData = {
-      account: { email: payeeEmail },
-      transaction: {},
-    };
-    const parts = String(payeeName || '').trim().split(/\s+/);
-    if (parts[0]) payload.riskData.transaction.firstName = parts[0].slice(0, 22);
-    if (parts.length > 1) {
-      payload.riskData.transaction.lastName = parts.slice(1).join(' ').slice(0, 22);
-    }
+  const disable3ds =
+    options.disable3ds !== false &&
+    String(process.env.WORLDPAY_HPP_DISABLE_3DS || 'true').toLowerCase() !==
+      'false';
+  if (disable3ds) {
+    payload.threeDS = { type: 'disabled' };
   }
+
+  const disableFraud =
+    options.disableFraud !== false &&
+    String(process.env.WORLDPAY_HPP_DISABLE_FRAUD || 'true').toLowerCase() !==
+      'false';
+  if (disableFraud) {
+    payload.fraud = { type: 'disabled' };
+  }
+
+  const descriptionText = trim(description);
+  if (descriptionText) {
+    payload.description = descriptionText.slice(0, 128);
+  }
+
+  const riskData = buildAccessHppRiskData(payeeName, payeeEmail);
+  if (riskData) {
+    payload.riskData = riskData;
+  }
+
+  const correlationId = crypto.randomUUID();
 
   const response = await fetch(url, {
     method: 'POST',
@@ -314,6 +439,8 @@ async function createAccessHostedPayment({
       Authorization: `Basic ${auth}`,
       'Content-Type': 'application/vnd.worldpay.payment_pages-v1.hal+json',
       Accept: 'application/vnd.worldpay.payment_pages-v1.hal+json',
+      'WP-CorrelationId': correlationId,
+      'User-Agent': '1stopAdmin/1.0',
     },
     body: JSON.stringify(payload),
   });
@@ -327,16 +454,10 @@ async function createAccessHostedPayment({
   }
 
   if (!response.ok) {
-    const message =
-      data?.message ||
-      data?.errorName ||
-      data?.raw ||
-      `Access HPP setup failed (${response.status})`;
-    const err = new Error(
-      typeof message === 'string' ? message : JSON.stringify(message)
-    );
+    const message = formatAccessHppError(data, response.status);
+    const err = new Error(message);
     err.status = 502;
-    err.details = data;
+    err.details = { ...data, correlationId };
     throw err;
   }
 
@@ -344,11 +465,11 @@ async function createAccessHostedPayment({
   if (!redirectUrl) {
     const err = new Error('Access HPP response did not include a redirect url');
     err.status = 502;
-    err.details = data;
+    err.details = { ...data, correlationId };
     throw err;
   }
 
-  return { redirectUrl, raw: data };
+  return { redirectUrl, raw: data, correlationId };
 }
 
 /**
@@ -364,14 +485,8 @@ function buildPaymentPagesFields({
   cancelUrl,
   bookingId,
 }) {
-  const installationId = decryptLegacyPaymentCredential(
-    franchise.inst_id,
-    'installation ID'
-  );
-  const accountId = decryptLegacyPaymentCredential(
-    franchise.acc_id,
-    'account ID'
-  );
+  const { instId: installationId, accId: accountId } =
+    resolveMotoWorldpayCredentials(franchise);
   const currency = getWorldpayCurrency();
   const amountStr = formatWorldpayAmount(amount);
   const cartId = String(bookingId);
@@ -935,6 +1050,8 @@ module.exports = {
   mockCompleteMoto,
   isMockMode,
   resolveIntegrationMode,
+  hasAccessCredentials,
+  createAccessHostedPayment,
   getAdminFrontendBase,
   getApiPublicBase,
   getWorldpayCurrency,
@@ -944,4 +1061,8 @@ module.exports = {
   buildWorldpaySignature,
   pickCallbackField,
   buildMotoTransactionExtraInfo,
+  isWorldpayTestEnvironment,
+  getEnvWorldpayCredentials,
+  resolveMotoWorldpayCredentials,
+  getWorldpayMd5Secret,
 };
