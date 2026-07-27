@@ -682,6 +682,65 @@ function safeParseJson(value) {
   }
 }
 
+/**
+ * Resolve a MOTO custom payment row by WorldPay cartId / order ref.
+ * cartId may be numeric booking id (Payment Pages) or prefixed order id (Access HPP).
+ * Legacy PHP deletes the placeholder booking after payment — use LEFT JOIN.
+ */
+async function findMotoPaymentRow(executor, ref, { forUpdate = false, bookingIdHint = null } = {}) {
+  const orderRef = trim(ref);
+  const clauses = [];
+  const params = [];
+
+  if (orderRef) {
+    clauses.push('bp.custom_payment_booking_ref = ?');
+    clauses.push('bp.transation_id = ?');
+    params.push(orderRef, orderRef);
+    if (/^\d+$/.test(orderRef)) {
+      clauses.push('bp.booking_id = ?');
+      clauses.push(`bp.custom_payment_booking_ref LIKE CONCAT('%', ?)`);
+      params.push(Number(orderRef), orderRef);
+    }
+  }
+
+  if (bookingIdHint) {
+    clauses.push('bp.booking_id = ?');
+    params.push(Number(bookingIdHint));
+  }
+
+  if (!clauses.length) {
+    return null;
+  }
+
+  const lock = forUpdate ? ' FOR UPDATE' : '';
+  const [rows] = await executor.query(
+    `SELECT bp.*,
+            b.status AS booking_status,
+            b.admin_payment_received,
+            b.type_of_book,
+            b.booking_made_by
+     FROM booking_payments bp
+     LEFT JOIN bookings b ON b.id = bp.booking_id
+     WHERE bp.transation_type = 'custom_payment'
+       AND (${clauses.join(' OR ')})
+     ORDER BY bp.id DESC
+     LIMIT 1${lock}`,
+    params
+  );
+  return rows?.[0] || null;
+}
+
+function isMotoPaymentCompleted(row) {
+  if (!row || Number(row.isDelete) !== 0) {
+    return false;
+  }
+  // Placeholder booking removed after legacy MOTO complete (booking row absent).
+  if (row.booking_status == null) {
+    return true;
+  }
+  return Number(row.booking_status) === 1;
+}
+
 async function completeMotoFromCallback(pool, body, options = {}) {
   const cartId = pickCallbackField(body, 'cartId', 'cartid', 'MC_order_id', 'transactionReference');
   const transStatus = pickCallbackField(body, 'transStatus', 'transstatus', 'outcome');
@@ -707,38 +766,16 @@ async function completeMotoFromCallback(pool, body, options = {}) {
   try {
     await connection.beginTransaction();
 
-    let paymentRows;
-    if (cartId) {
-      const numericBookingId = /^\d+$/.test(cartId) ? Number(cartId) : -1;
-      [paymentRows] = await connection.query(
-        `SELECT * FROM booking_payments
-         WHERE custom_payment_booking_ref = ?
-            OR transation_id = ?
-            OR booking_id = ?
-         ORDER BY id DESC
-         LIMIT 1
-         FOR UPDATE`,
-        [cartId, cartId, numericBookingId]
-      );
-    }
-    if ((!paymentRows || !paymentRows.length) && bookingIdHint) {
-      [paymentRows] = await connection.query(
-        `SELECT * FROM booking_payments
-         WHERE booking_id = ? AND transation_type = 'custom_payment'
-         ORDER BY id DESC
-         LIMIT 1
-         FOR UPDATE`,
-        [bookingIdHint]
-      );
-    }
+    const payment = await findMotoPaymentRow(connection, cartId, {
+      forUpdate: true,
+      bookingIdHint,
+    });
 
-    if (!paymentRows?.length) {
+    if (!payment) {
       const err = new Error('MOTO payment record not found');
       err.status = 404;
       throw err;
     }
-
-    const payment = paymentRows[0];
     const bookingId = payment.booking_id;
     const statusUpper = transStatus.toUpperCase();
     const authorised =
@@ -820,6 +857,13 @@ async function completeMotoFromCallback(pool, body, options = {}) {
       ]
     );
 
+    // Legacy booking-payment-moto-complete.php removes the placeholder booking row.
+    await connection.query(
+      `DELETE FROM bookings
+       WHERE id = ? AND booking_made_by = 'moto' AND type_of_book = 'm'`,
+      [bookingId]
+    );
+
     await connection.commit();
     return {
       success: true,
@@ -845,35 +889,22 @@ async function getMotoPaymentStatus(pool, orderRef) {
     throw err;
   }
 
-  const [rows] = await pool.query(
-    `SELECT bp.id, bp.booking_id, bp.amount, bp.transation_id, bp.isDelete,
-            bp.custom_payment_booking_ref, bp.response, bp.created,
-            b.status AS booking_status, b.admin_payment_received, b.type_of_book
-     FROM booking_payments bp
-     JOIN bookings b ON b.id = bp.booking_id
-     WHERE bp.custom_payment_booking_ref = ?
-        OR bp.transation_id = ?
-        OR bp.booking_id = ?
-     ORDER BY bp.id DESC
-     LIMIT 1`,
-    [ref, ref, /^\d+$/.test(ref) ? Number(ref) : -1]
-  );
-
-  if (!rows?.length) {
+  const row = await findMotoPaymentRow(pool, ref);
+  if (!row) {
     const err = new Error('Payment not found');
     err.status = 404;
     throw err;
   }
 
-  const row = rows[0];
-  const completed = Number(row.isDelete) === 0 && Number(row.booking_status) === 1;
+  const completed = isMotoPaymentCompleted(row);
 
   return {
     booking_id: row.booking_id,
     order_id: row.custom_payment_booking_ref || row.transation_id,
     amount: Number(row.amount) || 0,
     completed,
-    booking_status: Number(row.booking_status),
+    booking_status:
+      row.booking_status == null ? null : Number(row.booking_status),
     admin_payment_received: Number(row.admin_payment_received) || 0,
     created: row.created,
   };
