@@ -905,6 +905,12 @@ module.exports = {
   isMockMode,
   resolveIntegrationMode,
   getAdminFrontendBase,
+  getApiPublicBase,
   getWorldpayCurrency,
+  getWorldpayPurchaseUrl,
+  getWorldpayTestMode,
+  formatWorldpayAmount,
+  buildWorldpaySignature,
+  pickCallbackField,
   buildMotoTransactionExtraInfo,
 };

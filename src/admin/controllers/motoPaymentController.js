@@ -53,6 +53,20 @@ class MotoPaymentController {
   async notify(req, res) {
     try {
       const body = { ...(req.query || {}), ...(req.body || {}) };
+      const paymentType = String(
+        body.M_paymentType || body.m_paymenttype || ''
+      ).toLowerCase();
+      if (paymentType === 'course_booking') {
+        const {
+          completeBookingWorldpayNotify,
+        } = require('../services/bookingWorldpayService');
+        const result = await completeBookingWorldpayNotify(this.pool, body);
+        res
+          .status(200)
+          .type('text/plain')
+          .send(result.success ? 'OK' : 'FAILED');
+        return;
+      }
       const result = await completeMotoFromCallback(this.pool, body);
       // WorldPay Payment Response expects a simple acknowledgement
       res.status(200).type('text/plain').send(result.success ? 'OK' : 'FAILED');

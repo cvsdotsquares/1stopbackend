@@ -212,6 +212,13 @@ app.use('/api/admin', createAdminRoutes(pool));
   const legacyWorldpayNotify = (req, res) => worldpayCallback.notify(req, res);
   app.post('/bookings/worldpayCallbackUpdated', legacyWorldpayNotify);
   app.get('/bookings/worldpayCallbackUpdated', legacyWorldpayNotify);
+
+  const BookingsController = require('./admin/controllers/bookingsController');
+  const bookingWorldpayController = new BookingsController(pool);
+  const legacyBookingPaymentComplete = (req, res) =>
+    bookingWorldpayController.notifyWizardWorldpay(req, res);
+  app.post('/bookings/booking-payment-complete.php', legacyBookingPaymentComplete);
+  app.get('/bookings/booking-payment-complete.php', legacyBookingPaymentComplete);
 }
 
 // API Documentation endpoint
