@@ -94,12 +94,13 @@ class MotoPaymentController {
           transStatus === 'Y');
 
       if (treatAsSuccess || statusHint === 'success') {
-        await completeMotoFromCallback(this.pool, body, {
+        const result = await completeMotoFromCallback(this.pool, body, {
           forceSuccess: statusHint === 'success' || transStatus === 'Y',
           allowMissingStatus: statusHint === 'success',
         });
+        const resultRef = result.order_id || cartId;
         return res.redirect(
-          `${adminBase}/admin/payments/moto/result?status=success&ref=${encodeURIComponent(cartId)}`
+          `${adminBase}/admin/payments/moto/result?status=success&ref=${encodeURIComponent(resultRef)}`
         );
       }
 
