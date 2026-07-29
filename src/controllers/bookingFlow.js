@@ -174,7 +174,7 @@ class BookingFlowController {
             own_one_off_price: event.own_one_off_price,
             own_deposit_price: event.own_deposit_price,
             own_total_price: event.own_total_price,
-            deposit_days: event.cancel_days, // Assuming deposit_days is stored in courses table as cancel_days
+            deposit_days: event.deposit_days,
             dates: []
           };
         }
@@ -1037,9 +1037,60 @@ class BookingFlowController {
   }
 
   /**
+   * Normalize course_event_dates into valid chronological Date objects.
+   * mysql2 can turn placeholder rows (0000-00-00) into:
+   *   - Invalid Date (NaN), or
+   *   - a real Date around year 1899/1900 (zero-date conversion on some TZ stacks)
+   * Both must be excluded or they become the "earliest" date and force full payment.
+   */
+  normalizeValidCourseDates(eventDates) {
+    return (eventDates || [])
+      .map((d) => (d && typeof d === 'object' && 'event_date' in d ? d.event_date : d))
+      .flatMap((eventDate) => {
+        if (
+          eventDate == null ||
+          eventDate === '' ||
+          eventDate === '0000-00-00' ||
+          eventDate === '1111-11-11'
+        ) {
+          return [];
+        }
+
+        // String form from DATE_FORMAT / dateStrings — reject placeholders early
+        if (typeof eventDate === 'string') {
+          const ymd = eventDate.slice(0, 10);
+          if (ymd === '0000-00-00' || ymd === '1111-11-11' || ymd.startsWith('0000-')) {
+            return [];
+          }
+        }
+
+        let date;
+        if (eventDate instanceof Date) {
+          date = eventDate;
+        } else if (typeof eventDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(eventDate)) {
+          date = new Date(`${eventDate.slice(0, 10)}T00:00:00`);
+        } else {
+          date = new Date(eventDate);
+        }
+
+        if (Number.isNaN(date.getTime())) {
+          return [];
+        }
+
+        // Reject MySQL zero-date / TBC conversions (commonly land in 1899–1900)
+        const year = date.getFullYear();
+        if (year < 2000 || year === 1111) {
+          return [];
+        }
+
+        return [date];
+      })
+      .sort((a, b) => a.getTime() - b.getTime());
+  }
+
+  /**
    * Validates whether a deposit payment is still eligible at booking-creation time.
    * Returns { eligible: true } or { eligible: false, reason } when the cutoff has passed.
-   * Mirrors the frontend resolvePaymentType() logic so both layers agree.
    */
   validateDepositEligibility(courseEvent, eventDates) {
     const hasDepositPricing =
@@ -1062,10 +1113,7 @@ class BookingFlowController {
       return { eligible: false, reason: 'Deposit period not configured' };
     }
 
-    const validDates = (eventDates || [])
-      .map(d => d.event_date)
-      .filter(d => d && d !== '1111-11-11' && d !== '0000-00-00')
-      .sort();
+    const validDates = this.normalizeValidCourseDates(eventDates);
 
     if (validDates.length === 0) {
       return { eligible: false, reason: 'Course dates are not yet confirmed' };
@@ -1109,10 +1157,7 @@ class BookingFlowController {
       return false;
     }
 
-    const validDates = (eventDates || [])
-      .map(d => d.event_date)
-      .filter(d => d && d !== '1111-11-11' && d !== '0000-00-00')
-      .sort();
+    const validDates = this.normalizeValidCourseDates(eventDates);
 
     if (validDates.length === 0) {
       return false;
@@ -1216,7 +1261,6 @@ class BookingFlowController {
         if (!event.length) {
           throw new Error('Event not found');
         }
-
         const groupAvail = await getGroupAvailability(connection, course_event_id);
         const currentLocks = groupAvail?.current_locks ?? (event[0].current_locks || 0);
         const bookingsDone = groupAvail?.bookings_done ?? (event[0].bookings_done || 0);
@@ -1315,7 +1359,7 @@ class BookingFlowController {
         }
 
         const [eventDates] = await connection.query(`
-          SELECT event_date
+          SELECT DATE_FORMAT(event_date, '%Y-%m-%d') as event_date
           FROM course_event_dates
           WHERE course_event_id = ?
           ORDER BY event_date ASC
