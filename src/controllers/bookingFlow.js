@@ -175,8 +175,6 @@ class BookingFlowController {
             own_deposit_price: event.own_deposit_price,
             own_total_price: event.own_total_price,
             deposit_days: event.deposit_days,
-            _raw_deposit_days: event.deposit_days,
-            _raw_cancel_days: event.cancel_days,
             dates: []
           };
         }
@@ -307,13 +305,6 @@ class BookingFlowController {
             } else {
               depositNote = `Deposit option is only available when booking at least ${depositDays} days before the course start date. Full payment is required for this date.`;
             }
-
-            // #region agent log
-            if ([22016, 22019, 22022].includes(Number(eventGroup.course_event_id))) {
-              const safeIso = (d) => { try { return d instanceof Date && !isNaN(d.getTime()) ? d.toISOString() : String(d); } catch { return 'invalid'; } };
-              fetch('http://127.0.0.1:7754/ingest/c18bc69e-8d88-4061-b122-09beb44daa5b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'642795'},body:JSON.stringify({sessionId:'642795',runId:'pre-fix',hypothesisId:'B,C,D,E',location:'bookingFlow.js:getCourseAvailability',message:'availability deposit decision',data:{courseEventId:eventGroup.course_event_id,effectiveDepositDaysUsed:depositDays,raw_deposit_days:eventGroup._raw_deposit_days,raw_cancel_days:eventGroup._raw_cancel_days,usingCancelDaysBug:Number(depositDays)===Number(eventGroup._raw_cancel_days)&&Number(depositDays)!==Number(eventGroup._raw_deposit_days),is_deposit:eventGroup.is_deposit,groupFirstDate,firstNonTBCDate:firstNonTBCDate?.event_date,depositReferenceDate:String(depositReferenceDate),courseStartIso:safeIso(courseStartDate),todayIso:safeIso(today),tzOffsetMin:today.getTimezoneOffset(),diffDays,depositAvailable,outcome:depositAvailable?'DEPOSIT':'FULL'},timestamp:Date.now()})}).catch(()=>{});
-            }
-            // #endregion
           } else {
             depositNote = 'Deposit option is unavailable as the course dates are yet to be confirmed.';
           }
@@ -1046,11 +1037,6 @@ class BookingFlowController {
   }
 
   /**
-   * Validates whether a deposit payment is still eligible at booking-creation time.
-   * Returns { eligible: true } or { eligible: false, reason } when the cutoff has passed.
-   * Mirrors the frontend resolvePaymentType() logic so both layers agree.
-   */
-  /**
    * Normalize course_event_dates into valid chronological Date objects.
    * mysql2 can turn placeholder rows (0000-00-00) into:
    *   - Invalid Date (NaN), or
@@ -1102,6 +1088,10 @@ class BookingFlowController {
       .sort((a, b) => a.getTime() - b.getTime());
   }
 
+  /**
+   * Validates whether a deposit payment is still eligible at booking-creation time.
+   * Returns { eligible: true } or { eligible: false, reason } when the cutoff has passed.
+   */
   validateDepositEligibility(courseEvent, eventDates) {
     const hasDepositPricing =
       (Number.parseFloat(courseEvent.school_deposit_price) || 0) > 0 ||
@@ -1182,18 +1172,7 @@ class BookingFlowController {
     const diffTime = firstDate.getTime() - today.getTime();
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-    const allowed = diffDays > depositDays;
-
-    // #region agent log
-    const safeIso = (d) => { try { return d instanceof Date && !isNaN(d.getTime()) ? d.toISOString() : String(d); } catch { return 'invalid'; } };
-    const rawPreview = (eventDates || []).slice(0, 5).map((d) => {
-      const v = d && typeof d === 'object' && 'event_date' in d ? d.event_date : d;
-      return { type: typeof v, str: String(v), iso: safeIso(v), year: v instanceof Date && !isNaN(v.getTime()) ? v.getFullYear() : null };
-    });
-    fetch('http://127.0.0.1:7754/ingest/c18bc69e-8d88-4061-b122-09beb44daa5b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'642795'},body:JSON.stringify({sessionId:'642795',runId:'post-fix-2',hypothesisId:'D2',location:'bookingFlow.js:shouldChargeDeposit',message:'deposit decision (createBooking)',data:{is_deposit:courseEvent.is_deposit,depositDays,rawPreview,validDates:validDates.map(safeIso),firstDateIso:safeIso(firstDate),todayIso:safeIso(today),tzOffsetMin:today.getTimezoneOffset(),diffDays,allowed,outcome:allowed?'DEPOSIT':'FULL',school_deposit_price:courseEvent.school_deposit_price,school_total_price:courseEvent.school_total_price},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-
-    return allowed;
+    return diffDays > depositDays;
   }
 
   async createBookingWithAttendees(req, res) {

@@ -235,11 +235,6 @@ class PriceCalculationController {
     // If days until course <= deposit_days, require full payment
     const shouldCharge = diffDays > depositPeriod;
 
-    // #region agent log
-    const safeIso = (d) => { try { return d instanceof Date && !isNaN(d.getTime()) ? d.toISOString() : String(d); } catch { return 'invalid'; } };
-    fetch('http://127.0.0.1:7754/ingest/c18bc69e-8d88-4061-b122-09beb44daa5b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'642795'},body:JSON.stringify({sessionId:'642795',runId:'pre-fix',hypothesisId:'A,C,D',location:'priceCalculation.js:shouldChargeDeposit',message:'deposit decision (calculatePrice)',data:{courseEventId:courseEvent.id,is_deposit:courseEvent.is_deposit,school_deposit_price:courseEvent.school_deposit_price,depositDays,depositPeriod,rawDates:(courseEventDates||[]).map(d=>({type:typeof d?.event_date,iso:safeIso(d?.event_date),str:String(d?.event_date)})),validDatesIso:validDates.map(safeIso),firstDateIso:safeIso(courseStartDate),todayIso:safeIso(today),tzOffsetMin:today.getTimezoneOffset(),diffDays,shouldChargeDeposit:shouldCharge,outcome:shouldCharge?'DEPOSIT':'FULL'},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-
     if (shouldCharge) {
       return { allowed: true, note: null };
     } else {
