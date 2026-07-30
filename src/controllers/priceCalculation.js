@@ -194,9 +194,26 @@ class PriceCalculationController {
       ) {
         return [];
       }
+
+      if (typeof event_date === 'string') {
+        const ymd = event_date.slice(0, 10);
+        if (ymd === '0000-00-00' || ymd === '1111-11-11' || ymd.startsWith('0000-')) {
+          return [];
+        }
+      }
   
       const date = new Date(event_date);
-      return isNaN(date.getTime()) ? [] : [date];
+      if (isNaN(date.getTime())) {
+        return [];
+      }
+
+      // Reject MySQL zero-date conversions (often land in 1899/1900)
+      const year = date.getFullYear();
+      if (year < 2000 || year === 1111) {
+        return [];
+      }
+
+      return [date];
     })
     .sort((a, b) => a - b);
 
