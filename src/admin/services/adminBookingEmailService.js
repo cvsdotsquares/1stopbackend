@@ -1,7 +1,12 @@
 /**
- * Admin add-booking confirmation emails (legacy Booking::sendBookingMail parity).
+ * Admin booking emails (legacy Booking class parity).
  */
-const { sendBookingConfirmation } = require('../../utils/emailService');
+const {
+  sendBookingConfirmation,
+  sendBookingRefundEmail,
+  sendBookingDeleteEmail,
+  sendBookingFeedbackEmail,
+} = require('../../utils/emailService');
 
 async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) {
   const id = Number(bookingId);
@@ -119,6 +124,66 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
   }
 }
 
+async function sendAdminBookingRefundEmail(pool, bookingId, options = {}) {
+  const id = Number(bookingId);
+  if (!Number.isFinite(id) || id <= 0) return { sent: false, reason: 'invalid_id' };
+
+  try {
+    const result = await sendBookingRefundEmail(pool, id, options);
+    if (result?.sent) {
+      console.log(`[ADMIN][BOOKING][EMAIL] Refund sent for booking ${id}`);
+    }
+    return result;
+  } catch (error) {
+    console.error(
+      `[ADMIN][BOOKING][EMAIL] Refund failed for booking ${id}:`,
+      error.message || error
+    );
+    return { sent: false, reason: error.message || 'send_failed' };
+  }
+}
+
+async function sendAdminBookingDeleteEmail(pool, bookingId, options = {}) {
+  const id = Number(bookingId);
+  if (!Number.isFinite(id) || id <= 0) return { sent: false, reason: 'invalid_id' };
+
+  try {
+    const result = await sendBookingDeleteEmail(pool, id, options);
+    if (result?.sent) {
+      console.log(`[ADMIN][BOOKING][EMAIL] Delete notification sent for booking ${id}`);
+    }
+    return result;
+  } catch (error) {
+    console.error(
+      `[ADMIN][BOOKING][EMAIL] Delete email failed for booking ${id}:`,
+      error.message || error
+    );
+    return { sent: false, reason: error.message || 'send_failed' };
+  }
+}
+
+async function sendAdminBookingFeedbackEmail(pool, bookingId, options = {}) {
+  const id = Number(bookingId);
+  if (!Number.isFinite(id) || id <= 0) return { sent: false, reason: 'invalid_id' };
+
+  try {
+    const result = await sendBookingFeedbackEmail(pool, id, options);
+    if (result?.sent) {
+      console.log(`[ADMIN][BOOKING][EMAIL] Feedback sent for booking ${id}`);
+    }
+    return result;
+  } catch (error) {
+    console.error(
+      `[ADMIN][BOOKING][EMAIL] Feedback failed for booking ${id}:`,
+      error.message || error
+    );
+    return { sent: false, reason: error.message || 'send_failed' };
+  }
+}
+
 module.exports = {
   sendAdminBookingConfirmationEmail,
+  sendAdminBookingRefundEmail,
+  sendAdminBookingDeleteEmail,
+  sendAdminBookingFeedbackEmail,
 };

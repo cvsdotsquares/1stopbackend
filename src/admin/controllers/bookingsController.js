@@ -10,6 +10,8 @@ const {
   searchExistingCustomers,
   submitAddBookingAttendees,
   cancelAddBookingWizard,
+  checkAdminBookingPromoCode,
+  cancelAdminBookingPromoCode,
 } = require('../services/addBookingWizardService');
 const {
   getBookingWorldpayPayload,
@@ -18,7 +20,18 @@ const {
   handleBookingWorldpayBrowserComplete,
   getBookingConfirmationDetails,
 } = require('../services/bookingWorldpayService');
+const {
+  getBookingView,
+  getEditBookingForm,
+  updateBooking,
+} = require('../services/editBookingService');
+const {
+  getDeleteMailTemplate,
+  refundBooking: refundAdminBooking,
+  deleteBooking: deleteAdminBookingRecord,
+} = require('../services/adminBookingRefundDeleteService');
 const { getAdminFrontendBase } = require('../services/motoPaymentService');
+const { getInProgressBookings } = require('../services/inProgressBookingsService');
 
 class BookingsController {
   constructor(pool) {
@@ -59,6 +72,9 @@ class BookingsController {
         req.session,
         this.getAdminId(req)
       );
+      await new Promise((resolve, reject) => {
+        req.session.save((err) => (err ? reject(err) : resolve()));
+      });
       return res.json({
         success: true,
         data,
@@ -210,6 +226,49 @@ class BookingsController {
     }
   }
 
+  async checkWizardPromo(req, res) {
+    try {
+      const data = await checkAdminBookingPromoCode(
+        this.pool,
+        req.session,
+        req.body || {}
+      );
+      const ok = Number(data.is_promo_code_valid) === 1;
+      return res.json({
+        success: ok,
+        data,
+        message:
+          data.promo_message ||
+          (ok ? 'Promo Code Accepted.' : 'Promo Code is not valid.'),
+      });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][PROMO]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to validate promo code',
+      });
+    }
+  }
+
+  async cancelWizardPromo(req, res) {
+    try {
+      const data = cancelAdminBookingPromoCode(req.session);
+      return res.json({
+        success: true,
+        data,
+        message: data.promo_message || 'Promo code removed',
+      });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][PROMO][CANCEL]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to remove promo code',
+      });
+    }
+  }
+
   async getWizardWorldpay(req, res) {
     try {
       const data = await getBookingWorldpayPayload(this.pool, req.session);
@@ -310,6 +369,131 @@ class BookingsController {
       return res.status(500).json({
         success: false,
         message: err.message || 'Unable to load booking confirmation',
+      });
+    }
+  }
+
+  async getBooking(req, res) {
+    try {
+      const data = await getBookingView(this.pool, req.params.id);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][VIEW]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load booking',
+        code: err.code,
+        deleted_booking_id: err.deleted_booking_id,
+      });
+    }
+  }
+
+  async getBookingEditForm(req, res) {
+    try {
+      const newEventId = req.query.newEventId || req.query.new_event_id || null;
+      const data = await getEditBookingForm(this.pool, req.params.id, {
+        newEventId,
+      });
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][EDIT]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load edit booking form',
+      });
+    }
+  }
+
+  async patchBooking(req, res) {
+    try {
+      const data = await updateBooking(
+        this.pool,
+        req.params.id,
+        req.body || {},
+        this.getAdminId(req),
+        req.session
+      );
+      await new Promise((resolve, reject) => {
+        req.session.save((err) => (err ? reject(err) : resolve()));
+      });
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][UPDATE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to update booking',
+        code: err.code,
+      });
+    }
+  }
+
+  async getDeleteMailTemplate(req, res) {
+    try {
+      const data = await getDeleteMailTemplate(this.pool, req.params.id);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][DELETE-TEMPLATE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load delete email template',
+      });
+    }
+  }
+
+  async refundBooking(req, res) {
+    try {
+      const bookingId =
+        req.body?.recordRefund ?? req.body?.booking_id ?? req.params.id;
+      const data = await refundAdminBooking(
+        this.pool,
+        bookingId,
+        this.getAdminId(req)
+      );
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][REFUND]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to refund booking',
+      });
+    }
+  }
+
+  async deleteBooking(req, res) {
+    try {
+      const bookingId =
+        req.body?.recordDelete ?? req.body?.booking_id ?? req.params.id;
+      const data = await deleteAdminBookingRecord(
+        this.pool,
+        bookingId,
+        this.getAdminId(req),
+        req.body || {}
+      );
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][DELETE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to delete booking',
+      });
+    }
+  }
+
+  async getInProgressBookings(req, res) {
+    try {
+      const data = await getInProgressBookings(this.pool, req.session);
+      return res.json({ success: true, data });
+    } catch (err) {
+      console.error('[ADMIN][BOOKINGS][IN-PROGRESS]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load in-progress bookings',
       });
     }
   }

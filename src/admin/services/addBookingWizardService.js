@@ -1,4 +1,12 @@
 const { removeExpirelocks } = require('./bookingService');
+const { LOCK_EXPIRE_TIME_MINUTES } = require('../constants');
+const { phpSerialize } = require('../../utils/phpSerialize');
+const {
+  checkAdminBookingPromoCode,
+  cancelAdminBookingPromoCode,
+  syncAdminOriginalAmount,
+  showDepositPrice,
+} = require('./adminBookingPromoService');
 
 const TBC_DATE = '0000-00-00';
 
@@ -259,6 +267,40 @@ function getVehiclePricingMap(event, showCancellation) {
   return map;
 }
 
+function parseMysqlDateTime(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(raw)) {
+    const d = new Date(raw.replace(' ', 'T'));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function getLockExpiryIso(lockSession, lockCountdown) {
+  if (lockCountdown) {
+    return new Date(
+      (Number(lockCountdown) + LOCK_EXPIRE_TIME_MINUTES * 60) * 1000
+    ).toISOString();
+  }
+  const created = parseMysqlDateTime(lockSession?.created);
+  if (created) {
+    return new Date(
+      created.getTime() + LOCK_EXPIRE_TIME_MINUTES * 60 * 1000
+    ).toISOString();
+  }
+  return null;
+}
+
+function firstEventDateFromDates(dates) {
+  const keys = Object.keys(dates || {}).filter((k) => k !== 'TBC').sort();
+  return keys[0] || null;
+}
 async function getEventContext(pool, eventId) {
   const [rows] = await pool.query(
     `SELECT course_events.*,
@@ -635,6 +677,15 @@ async function saveBookingRecord(pool, attendee, event, adminId, moto, lockId, s
   const vatRate = getVatRate(session);
   const vat = computeVat(amount, event, vatRate);
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const promoData = session?.adminBooking?.BookingPromoData;
+  const isPromoApplied =
+    promoData?.is_promo_code_valid && Number(promoData.promo_id) > 0 ? 1 : 0;
+  const promoCodeId = isPromoApplied ? Number(promoData.promo_id) : 0;
+  const promoCodeData = phpSerialize({
+    original_amount: session?.adminBooking?.adminOriginalAmount || {},
+    promo_code: promoData?.promo_code || '',
+    promo_id: promoCodeId,
+  });
 
   const [insertResult] = await pool.query(
     `INSERT INTO bookings
@@ -642,7 +693,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, moto, lockId, s
        type_of_book, spaces, payment_due, total_fees, vatrate, vat, total_amount,
        status, lockid, created, modified, admin_payment_received,
        is_promo_applied, promo_code_id, promo_code_data)
-     VALUES (?, ?, 0, ?, 'admin', ?, 1, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0, 0, ?)`,
+     VALUES (?, ?, 0, ?, 'admin', ?, 1, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
     [
       event.course_id,
       event.id,
@@ -657,7 +708,9 @@ async function saveBookingRecord(pool, attendee, event, adminId, moto, lockId, s
       now,
       now,
       paymentReceived,
-      "a:1:{s:15:\"original_amount\";a:0:{}}",
+      isPromoApplied,
+      promoCodeId,
+      promoCodeData,
     ]
   );
 
@@ -760,6 +813,23 @@ async function getAddBookingWizard(pool, session) {
   await removeExpirelocks(pool, session);
   const adminBooking = requireActiveBookingSession(session);
 
+  const lockId = Number(adminBooking.lock_session?.id);
+  if (lockId) {
+    const [lockRows] = await pool.query(
+      'SELECT * FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
+      [lockId]
+    );
+    if (!lockRows?.[0]) {
+      if (session) delete session.adminBooking;
+      const err = new Error(
+        'Your session has been timed out and your booking has been cancelled.'
+      );
+      err.status = 400;
+      throw err;
+    }
+    adminBooking.lock_session = lockRows[0];
+  }
+
   const eventId = Number(adminBooking.eventId);
   const spaceRequired = Number(adminBooking.space_required) || 0;
   const event = await getEventContext(pool, eventId);
@@ -800,10 +870,27 @@ async function getAddBookingWizard(pool, session) {
   const vehiclePricing = getVehiclePricingMap(event, showCancellation);
   const savedAttendees = adminBooking.Booking_data || {};
   const blacklisted = session?.blacklisted || null;
+  const promoData = adminBooking.BookingPromoData || null;
+  const firstEventDate = firstEventDateFromDates(dates);
+  const vehicleTypes = Array.from({ length: spaceRequired }, (_, i) => {
+    const saved = savedAttendees[String(i + 1)];
+    return saved?.vehicle_type != null && saved?.vehicle_type !== ''
+      ? String(saved.vehicle_type)
+      : '';
+  });
+  syncAdminOriginalAmount(
+    adminBooking,
+    event,
+    showDepositPrice(event, firstEventDate),
+    vehicleTypes,
+    savedAttendees
+  );
 
   return {
     event_id: eventId,
     space_required: spaceRequired,
+    lock_expires_at: getLockExpiryIso(lockSession, adminBooking.lock_countdown),
+    lock_expire_minutes: LOCK_EXPIRE_TIME_MINUTES,
     event: {
       id: event.id,
       course_id: event.course_id,
@@ -840,6 +927,21 @@ async function getAddBookingWizard(pool, session) {
     saved_attendees: savedAttendees,
     blacklisted,
     cancellation_notice: buildCancellationNotice(event),
+    promo: promoData?.is_promo_code_valid
+      ? {
+          applied: true,
+          code: promoData.promo_code || '',
+          message: promoData.promo_message || '',
+          payment_type: promoData.payment_type || 'deposit',
+          amounts: promoData.amtArr || {},
+        }
+      : {
+          applied: false,
+          code: '',
+          message: '',
+          payment_type: 'deposit',
+          amounts: {},
+        },
   };
 }
 
@@ -1059,4 +1161,6 @@ module.exports = {
   searchExistingCustomers,
   submitAddBookingAttendees,
   cancelAddBookingWizard,
+  checkAdminBookingPromoCode,
+  cancelAdminBookingPromoCode,
 };

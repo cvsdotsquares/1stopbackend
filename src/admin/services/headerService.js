@@ -36,43 +36,55 @@ async function getCbtCertificatesAvailability(pool) {
   }));
 }
 
-async function queryVehicleStatusGroup(pool, column, fieldOrder) {
+async function queryVehicleStatusGroup(pool, column, fieldOrder, locationId = 0) {
   const fieldList = fieldOrder.map((c) => `'${c}'`).join(', ');
+  const locationSql = locationId > 0 ? ' AND location_id = ?' : '';
+  const params = locationId > 0 ? [locationId] : [];
   const [rows] = await pool.query(
     `SELECT COUNT(*) AS cnt, ${column} AS color
      FROM vehicles
      WHERE include_into_alert = 1
-       AND status = 1
-       AND ${column} IS NOT NULL
-       AND ${column} != ''
-       AND ${column} != 'none'
+       AND status = 1${locationSql}
      GROUP BY ${column}
-     HAVING cnt > 0
-     ORDER BY FIELD(${column}, ${fieldList})`
+     ORDER BY FIELD(${column}, ${fieldList})`,
+    params
   );
 
-  return rows.map((row) => ({
-    cnt: Number(row.cnt),
-    color: String(row.color),
-  }));
+  return (rows || [])
+    .map((row) => ({
+      cnt: Number(row.cnt),
+      color: String(row.color ?? '').trim(),
+    }))
+    .filter(
+      (row) =>
+        row.cnt > 0 &&
+        row.color &&
+        row.color !== 'none'
+    );
 }
 
-async function getVehicleHeaderStatus(pool) {
+async function getVehicleHeaderStatus(pool, locationId = 0) {
+  const locId = Number(locationId) || 0;
   const [issue, mot, road_tax, service] = await Promise.all([
-    queryVehicleStatusGroup(pool, 'issue_color', [
-      'green',
-      'red',
-      'yellow',
-      'purple',
-    ]),
-    queryVehicleStatusGroup(pool, 'mot_color', ['green', 'red', 'yellow']),
-    queryVehicleStatusGroup(pool, 'road_tax_color', [
-      'green',
-      'red',
-      'yellow',
-      'blue',
-    ]),
-    queryVehicleStatusGroup(pool, 'service_color', ['green', 'red', 'yellow']),
+    queryVehicleStatusGroup(
+      pool,
+      'issue_color',
+      ['green', 'red', 'yellow', 'purple'],
+      locId
+    ),
+    queryVehicleStatusGroup(pool, 'mot_color', ['green', 'red', 'yellow'], locId),
+    queryVehicleStatusGroup(
+      pool,
+      'road_tax_color',
+      ['green', 'red', 'yellow', 'blue'],
+      locId
+    ),
+    queryVehicleStatusGroup(
+      pool,
+      'service_color',
+      ['green', 'red', 'yellow'],
+      locId
+    ),
   ]);
 
   return { issue, mot, road_tax, service };

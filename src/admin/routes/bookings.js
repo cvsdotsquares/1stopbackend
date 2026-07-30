@@ -18,6 +18,9 @@ function createBookingsRoutes(pool) {
   router.delete('/locks/:lockId', requireAdminSession, (req, res) =>
     controller.deleteProcessLock(req, res)
   );
+  router.get('/in-progress', requireAdminSession, (req, res) =>
+    controller.getInProgressBookings(req, res)
+  );
   router.get('/wizard', requireAdminSession, (req, res) =>
     controller.getWizard(req, res)
   );
@@ -62,6 +65,31 @@ function createBookingsRoutes(pool) {
   );
   router.post('/wizard/cancel', requireAdminSession, (req, res) =>
     controller.cancelWizard(req, res)
+  );
+  router.post('/wizard/promo/validate', requireAdminSession, (req, res) =>
+    controller.checkWizardPromo(req, res)
+  );
+  router.post('/wizard/promo/cancel', requireAdminSession, (req, res) =>
+    controller.cancelWizardPromo(req, res)
+  );
+
+  router.get('/:id/edit', requireAdminSession, (req, res) =>
+    controller.getBookingEditForm(req, res)
+  );
+  router.get('/:id/delete/mail-template', requireAdminSession, (req, res) =>
+    controller.getDeleteMailTemplate(req, res)
+  );
+  router.post('/:id/refund', requireAdminSession, (req, res) =>
+    controller.refundBooking(req, res)
+  );
+  router.post('/:id/delete', requireAdminSession, (req, res) =>
+    controller.deleteBooking(req, res)
+  );
+  router.get('/:id', requireAdminSession, (req, res) =>
+    controller.getBooking(req, res)
+  );
+  router.patch('/:id', requireAdminSession, (req, res) =>
+    controller.patchBooking(req, res)
   );
 
   return router;
