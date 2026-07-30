@@ -2,6 +2,7 @@ const { mc_decrypt } = require('../../utils/universalPassword');
 const { loadAdminSettings } = require('../services/settingsService');
 const { sanitizeLoggedInAdmin } = require('../middleware/adminAuth');
 const { getAdminSessionCookieOptions } = require('../sessionCookie');
+const { requestAdminForgotPassword } = require('../services/adminForgotPasswordService');
 
 function getEncryptionKey() {
   return process.env.UNIVERSAL_PASSWORD_KEY || process.env.ENCRYPTION_KEY;
@@ -161,6 +162,29 @@ class AdminAuthController {
 
       return res.json({ success: true });
     });
+  }
+
+  async forgotPassword(req, res) {
+    const email = req.body?.user ?? req.body?.email ?? '';
+
+    try {
+      const data = await requestAdminForgotPassword(this.pool, email);
+      return res.json({
+        success: true,
+        data,
+        message: data.message,
+      });
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) {
+        console.error('[ADMIN][AUTH][FORGOT-PASSWORD]', err.message);
+      }
+      return res.status(status).json({
+        success: false,
+        code: err.code,
+        message: err.message || 'Unable to reset password',
+      });
+    }
   }
 }
 
