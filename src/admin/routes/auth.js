@@ -8,6 +8,9 @@ function createAdminAuthRoutes(pool) {
 
   router.get('/branding', (req, res) => controller.branding(req, res));
   router.post('/login', (req, res) => controller.login(req, res));
+  router.post('/forgot-password', (req, res) =>
+    controller.forgotPassword(req, res)
+  );
   router.get('/me', requireAdminSession, (req, res) => controller.me(req, res));
   router.post('/logout', requireAdminSession, (req, res) => controller.logout(req, res));
 

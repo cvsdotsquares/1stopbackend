@@ -1280,3 +1280,111 @@ ${feedbackBody}
     connection.release();
   }
 };
+
+/** F-005 — Admin forgot password email (legacy Emails/html/forgot_password.php). */
+exports.sendAdminForgotPasswordEmail = async ({ email, firstName, newPassword }) => {
+  const siteUrl = (process.env.PHP_SITE_URL || process.env.SITE_URL || 'https://www.1stopinstruction.com').replace(/\/$/, '');
+  const safeFirstName = String(firstName || '').trim() || 'Admin';
+  const subject = 'Forgot Password mail';
+
+  const html = `<!Doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<title>1stopinstruction.com</title>
+</head>
+<body style="margin:0; padding:0;">
+<div align="center">
+  <table width="800" border="0" align="center" style="background: #f5f5f5 none repeat scroll 0 0; border: 1px solid #e0e0e0; padding: 5px;">
+    <tbody>
+      <tr>
+        <td class="header">
+          <img src="${siteUrl}/images/header-img.jpg" width="784" height="177" alt=""/>
+        </td>
+      </tr>
+      <tr>
+        <td class="content">
+          <table width="100%" border="0" style="background: #ffffff none repeat scroll 0 0; padding: 10px; margin:0;">
+            <tbody>
+              <tr>
+                <td style="font-size:9.0pt;font-family:Arial,sans-serif;"><span style="float:left;">Dear ${safeFirstName},</span></td>
+              </tr>
+              <tr>
+                <td style="font-size:9.0pt;font-family:Arial,sans-serif;">
+                  <p>Your new password is <strong>${newPassword}</strong></p>
+                </td>
+              </tr>
+              <tr>
+                <td style="font-size:9.0pt;font-family:Arial,sans-serif;">
+                  <p style="margin-top:0px">Please use above password for login into admin dashboard.</p>
+                </td>
+              </tr>
+              <tr>
+                <td>&nbsp;</td>
+              </tr>
+              <tr>
+                <td>
+                  <table width="100%" border="0">
+                    <tbody>
+                      <tr>
+                        <td><p class="MsoNormal" style="margin: 10px 0px; font-family: arial;"><span><b><i><span style="font-size:13.5pt">1 Stop Instruction</span></i></b></span></p></td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <table cellspacing="0" cellpadding="0" border="0" width="99%" style="width:99.0%">
+                            <tbody>
+                              <tr>
+                                <td align="left" valign="middle">
+                                  <a href="${siteUrl}/"><img src="${siteUrl}/images/logo.png" width="90" alt=""/></a>
+                                </td>
+                                <td width="45%" valign="top" style="width:45.0%;padding:0in 0in 0in 0in">
+                                  <p class="MsoNormal"><strong><span style="font-size:9.0pt;font-family:Arial,sans-serif;color:navy">Contact:</span></strong><br/>
+                                  <span style="font-size:9.0pt;color:navy; font-family:Arial,sans-serif;">Tel: <a target="_blank" href="tel:02085977333">020 8597 7333</a><br/>
+                                  Freephone: <a target="_blank" href="tel:08008488418">0800 848 8418</a><br/>
+                                  Email: <a target="_blank" href="mailto:info@1stopinstruction.com">info@1stopinstruction.com</a><br/>
+                                  Web: <a target="_blank" href="www.1stopinstruction.com">www.1stopinstruction.com</a></span></p>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td class="footer">
+          <p align="center" style="text-align:center;background:#e6e6e8" class="MsoNormal"><span><b><i><span style="font-size:10.0pt;font-family:Arial,sans-serif;">"Roadcraft professionals for all categories of driving"</span></i></b></span></p>
+          <p style="font-family: Arial, sans-serif; text-align:center; font-size:9.5pt;">Please visit our website for <a href="${siteUrl}/contactus.php">directions</a> and our <a href="${siteUrl}/termsandconditions.php">terms &amp; conditions </a></p>
+          <p style="margin-bottom:0;"><img src="${siteUrl}/images/footer-img.jpg" width="786" height="55" alt=""/></p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>`;
+
+  const mailOptions = {
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+    to: email,
+    subject,
+    html,
+    text: `Dear ${safeFirstName},\n\nYour new password is ${newPassword}\n\nPlease use above password for login into admin dashboard.`,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error('[ADMIN][FORGOT-PASSWORD][EMAIL]', error.message);
+    return false;
+  }
+};
