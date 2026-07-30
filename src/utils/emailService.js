@@ -918,3 +918,365 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
 
   return { success: emailStatus === 1, status: emailStatus };
 };
+
+exports.sendBookingRefundEmail = async (pool, bookingId, options = {}) => {
+  const id = Number(bookingId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { sent: false, reason: 'invalid_id' };
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT
+         booking_attendees.booking_ref,
+         booking_attendees.first_name,
+         booking_attendees.sur_name,
+         booking_attendees.email,
+         courses.course_name,
+         courses.email_header,
+         courses.email_logo,
+         courses.email_footer,
+         courses.website,
+         franchise.email_header AS franchise_email_header,
+         franchise.email_footer AS franchise_email_footer,
+         franchise.email_logo AS franchise_email_logo,
+         franchise.website AS franchise_website
+       FROM bookings
+       JOIN courses ON courses.id = bookings.course_id
+       JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
+       LEFT JOIN course_events ON course_events.id = bookings.course_event_id
+       LEFT JOIN franchise ON franchise.id = course_events.franchise_id
+       WHERE bookings.id = ?
+       ORDER BY booking_attendees.\`primary\` DESC, booking_attendees.id ASC
+       LIMIT 1`,
+      [id]
+    );
+
+    const row = rows?.[0];
+    if (!row?.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(row.email))) {
+      return { sent: false, reason: 'no_attendee_email' };
+    }
+
+    const pupil = `${row.first_name || ''} ${row.sur_name || ''}`.trim();
+    const courseName = row.course_name || 'Course';
+    const siteUrl = process.env.PHP_SITE_URL || process.env.SITE_URL || 'https://www.1stopinstruction.com';
+    const adminUrl = process.env.ADMIN_SITE_URL || `${siteUrl}/admin`;
+    const headerPath = row.franchise_email_header || row.email_header
+      ? `${adminUrl}/uploads/${row.franchise_email_header || row.email_header}`
+      : `${siteUrl}/images/header-img.jpg`;
+    const logoPath = row.franchise_email_logo || row.email_logo
+      ? `${siteUrl}/admin/uploads/${row.franchise_email_logo || row.email_logo}`
+      : `${siteUrl}/images/logo.png`;
+    const footerPath = row.franchise_email_footer || row.email_footer
+      ? `${siteUrl}/admin/uploads/${row.franchise_email_footer || row.email_footer}`
+      : `${siteUrl}/images/footer-img.jpg`;
+    const website = row.franchise_website || row.website || siteUrl;
+
+    const html = `<!Doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+<title>1stopinstruction.com</title>
+</head>
+<body style="margin:0; padding:0;">
+<div align="center">
+  <table width="800" border="0" align="center" style="background: #f5f5f5 none repeat scroll 0 0; border: 1px solid #e0e0e0; padding: 5px;">
+    <tbody>
+      <tr>
+        <td><img src="${headerPath}" width="784" height="177" alt=""/></td>
+      </tr>
+      <tr>
+        <td>
+          <table width="100%" border="0" style="background: #ffffff none repeat scroll 0 0; padding: 10px; margin:0;">
+            <tr>
+              <td style="font-size:9pt;font-family:Arial,sans-serif;">
+                Hello ${pupil},<br>
+                <p>A refund has been made to your booking on ${courseName} Course with 1 Stop Instruction.<br>
+                Your booking ${courseName} now stands Cancel.</p>
+                <p>If you want another booking, please visit our site
+                  <a href="${siteUrl}/bookings"> Booking Here</a></p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <p style="font-size:13.5pt;font-family:Arial,sans-serif;"><b><i>1 Stop Instruction</i></b></p>
+          <a href="${website}"><img src="${logoPath}" width="90" alt=""/></a>
+        </td>
+      </tr>
+      <tr>
+        <td style="text-align:center;background:#e6e6e8;padding:10px;">
+          <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
+          <img src="${footerPath}" width="786" height="55" alt=""/>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>`;
+
+    const [settingsData] = await connection.query(
+      'SELECT booking_bcc FROM settings LIMIT 1'
+    );
+    const bcc =
+      settingsData[0]?.booking_bcc ||
+      process.env.BOOKING_BCC ||
+      'bookings@1stopinstruction.com';
+
+    const mailOptions = {
+      from: getMailFrom(),
+      ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+      to: row.email,
+      bcc,
+      subject: '1Stop Instruction Booking Refund',
+      html,
+    };
+
+    let emailStatus = 0;
+    try {
+      await transporter.sendMail(mailOptions);
+      emailStatus = 1;
+    } catch (error) {
+      console.error('Error sending booking refund email:', error);
+    } finally {
+      try {
+        await pool.query(
+          `INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, book_ref, ip, created)
+           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [
+            row.email,
+            bcc || '',
+            getMailFromAddress(),
+            mailOptions.subject,
+            html,
+            options.emailBy || 'a',
+            emailStatus,
+            'Booking Refund',
+            row.booking_ref || '',
+            options.clientIp || '',
+          ]
+        );
+      } catch (logError) {
+        console.error('Error logging refund email:', logError);
+      }
+    }
+
+    return { sent: emailStatus === 1, booking_ref: row.booking_ref };
+  } finally {
+    connection.release();
+  }
+};
+
+exports.sendBookingDeleteEmail = async (pool, bookingId, options = {}) => {
+  const email = String(options.email || '').trim();
+  const subject = String(options.subject || '').trim();
+  const content = String(options.content || '').trim();
+  const bookingRef = String(options.bookingRef || '').trim();
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { sent: false, reason: 'invalid_email' };
+  }
+  if (!subject || !content) {
+    return { sent: false, reason: 'missing_subject_or_content' };
+  }
+
+  const siteUrl = process.env.PHP_SITE_URL || process.env.SITE_URL || 'https://www.1stopinstruction.com';
+  const escapedContent = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+
+  const html = `<!Doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<title>1stopinstruction.com</title>
+</head>
+<body style="margin:0; padding:0;">
+<div align="center">
+  <table width="800" border="0" align="center" style="background: #f5f5f5 none repeat scroll 0 0; border: 1px solid #e0e0e0; padding: 5px;">
+    <tbody>
+      <tr>
+        <td><img src="${siteUrl}/images/header-img.jpg" width="784" height="177" alt=""/></td>
+      </tr>
+      <tr>
+        <td>
+          <table width="100%" border="0" style="background: #ffffff none repeat scroll 0 0;padding: 10px; margin:0;">
+            <tr>
+              <td style="font-size:9pt;font-family:Arial,sans-serif;">
+                <p>${escapedContent}</p>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <p style="font-size:13.5pt;font-family:Arial,sans-serif;"><b><i>1 Stop Instruction</i></b></p>
+                <a href="${siteUrl}"><img src="${siteUrl}/images/logo.png" width="90" alt=""/></a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td style="text-align:center;background:#e6e6e8;padding:10px;">
+          <p style="font-size:10pt;font-family:Arial,sans-serif"><strong><i>"Roadcraft professionals for all categories of driving"</i></strong></p>
+          <p style="font-family: Arial, sans-serif; text-align:center; font-size:9.5pt;">Please visit our website for <a href="${siteUrl}/contactus.php">directions</a> and our <a href="${siteUrl}/termsandconditions.php">terms &amp; conditions </a></p>
+          <img src="${siteUrl}/images/footer-img.jpg" width="786" height="55" alt=""/>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>`;
+
+  const [settingsData] = await pool.query(
+    'SELECT booking_bcc FROM settings LIMIT 1'
+  );
+  const bcc =
+    settingsData[0]?.booking_bcc ||
+    process.env.BOOKING_BCC ||
+    'bookings@1stopinstruction.com';
+
+  const mailOptions = {
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+    to: email,
+    bcc,
+    subject,
+    html,
+  };
+
+  let emailStatus = 0;
+  try {
+    await transporter.sendMail(mailOptions);
+    emailStatus = 1;
+  } catch (error) {
+    console.error('Error sending booking delete email:', error);
+  } finally {
+    try {
+      await pool.query(
+        `INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, book_ref, created)
+         VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          email,
+          bcc || '',
+          getMailFromAddress(),
+          subject,
+          html,
+          options.emailBy || 'a',
+          emailStatus,
+          `Delete Booking - ${bookingRef || bookingId}`,
+          bookingRef || '',
+        ]
+      );
+    } catch (logError) {
+      console.error('Error logging delete email:', logError);
+    }
+  }
+
+  return { sent: emailStatus === 1 };
+};
+
+exports.sendBookingFeedbackEmail = async (pool, bookingId) => {
+  const id = Number(bookingId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { sent: false, reason: 'invalid_id' };
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      `SELECT
+         booking_attendees.booking_ref,
+         booking_attendees.first_name,
+         booking_attendees.sur_name,
+         booking_attendees.email,
+         courses.course_name,
+         courses.feedback_content,
+         courses.send_feedback_mail,
+         courses.email_header,
+         settings.site_contact,
+         settings.site_email
+       FROM settings, bookings
+       JOIN courses ON courses.id = bookings.course_id
+       JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
+       WHERE bookings.id = ?
+       ORDER BY booking_attendees.\`primary\` DESC, booking_attendees.id ASC
+       LIMIT 1`,
+      [id]
+    );
+
+    const row = rows?.[0];
+    if (!row || Number(row.send_feedback_mail) !== 1) {
+      return { sent: false, reason: 'feedback_mail_disabled' };
+    }
+    if (!row.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(row.email))) {
+      return { sent: false, reason: 'no_attendee_email' };
+    }
+
+    const siteUrl = process.env.PHP_SITE_URL || process.env.SITE_URL || 'https://www.1stopinstruction.com';
+    const adminUrl = process.env.ADMIN_SITE_URL || `${siteUrl}/admin`;
+    const headerPath = row.email_header
+      ? `${adminUrl}/uploads/${row.email_header}`
+      : `${siteUrl}/images/header-img.jpg`;
+    const feedbackBody = row.feedback_content || '';
+    const html = `<!Doctype html>
+<html><head><title>1stopinstruction.com</title></head>
+<body style="margin:0;padding:0;">
+<div align="center">
+<table width="800" border="0" align="center" style="background:#f5f5f5;border:1px solid #e0e0e0;padding:5px;">
+<tr><td><img src="${headerPath}" width="784" height="177" alt=""/></td></tr>
+<tr><td style="background:#fff;padding:10px;font-family:Arial,sans-serif;font-size:9pt;">
+Dear ${row.first_name || 'Customer'},<br><br>
+${feedbackBody}
+<br><br>Kind Regards,
+</td></tr>
+</table>
+</div>
+</body></html>`;
+
+    const subject = `You have completed your ${row.course_name || 'Course'} Course`;
+    const mailOptions = {
+      from: getMailFrom(),
+      ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+      to: row.email,
+      subject,
+      html,
+    };
+
+    let emailStatus = 0;
+    try {
+      await transporter.sendMail(mailOptions);
+      emailStatus = 1;
+    } catch (error) {
+      console.error('Error sending booking feedback email:', error);
+    } finally {
+      try {
+        await pool.query(
+          `INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, book_ref, created)
+           VALUES (?, '', '', ?, ?, ?, 'a', ?, 'Feedback', ?, NOW())`,
+          [
+            row.email,
+            getMailFromAddress(),
+            subject,
+            html,
+            emailStatus,
+            row.booking_ref || '',
+          ]
+        );
+      } catch (logError) {
+        console.error('Error logging feedback email:', logError);
+      }
+    }
+
+    return { sent: emailStatus === 1, booking_ref: row.booking_ref };
+  } finally {
+    connection.release();
+  }
+};

@@ -439,6 +439,11 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
   let lockId = 0;
   const adminBookingSession = adminBooking || {};
 
+  if (!adminBookingSession.lock_session?.id && session) {
+    session.adminBooking = session.adminBooking || {};
+    session.adminBooking.lock_countdown = Math.floor(Date.now() / 1000);
+  }
+
   if (adminBookingSession.lock_session?.id) {
     const existingId = Number(adminBookingSession.lock_session.id);
     const [existingRows] = await pool.query(
@@ -454,28 +459,32 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
         );
       }
       lockId = existingId;
+    } else {
+      delete adminBookingSession.lock_session;
     }
-  } else if (session) {
-    session.adminBooking = session.adminBooking || {};
-    session.adminBooking.lock_countdown = Math.floor(Date.now() / 1000);
   }
 
-  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
   if (lockId) {
     await pool.query(
       `UPDATE lock_bookings
-       SET event_id = ?, parent = ?, space_required = ?, modified = ?, locked_by = ?
+       SET event_id = ?, parent = ?, space_required = ?, modified = NOW(), locked_by = ?
        WHERE id = ?`,
-      [eventId, parentId, spaces, now, 'terminal', lockId]
+      [eventId, parentId, spaces, 'terminal', lockId]
     );
   } else {
     const [insertResult] = await pool.query(
       `INSERT INTO lock_bookings
         (event_id, parent, space_required, created, modified, user_id, payment_page_stauts, locked_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [eventId, parentId, spaces, now, now, adminId || 0, 1, 'terminal']
+       VALUES (?, ?, ?, NOW(), NOW(), ?, 1, 'terminal')`,
+      [eventId, parentId, spaces, adminId || 0]
     );
     lockId = insertResult.insertId;
+  }
+
+  if (!lockId) {
+    const err = new Error('Unable to create booking lock');
+    err.status = 500;
+    throw err;
   }
 
   for (const edata of linkedEvents) {
@@ -490,10 +499,16 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
     [lockId]
   );
   const lock = lockRows?.[0];
+  if (!lock) {
+    const err = new Error('Unable to create booking lock');
+    err.status = 500;
+    throw err;
+  }
   if (session) {
     session.adminBooking = session.adminBooking || {};
     session.adminBooking.eventId = eventId;
     session.adminBooking.space_required = spaces;
+    session.adminBooking.courseId = page.event?.course_id || adminBookingSession.courseId;
     session.adminBooking.lock_session = lock;
   }
 

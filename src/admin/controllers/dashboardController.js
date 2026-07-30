@@ -1,4 +1,5 @@
 const { removeExpirelocks } = require('../services/bookingService');
+const { cancelAddBookingWizard } = require('../services/addBookingWizardService');
 const {
   courseAvailsDashboard,
   selectFutureCourses,
@@ -13,6 +14,7 @@ const {
   showMonthDashboard,
   showMonthDashboardNew,
 } = require('../services/moncalService');
+const { getInProgressBookings } = require('../services/inProgressBookingsService');
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -70,6 +72,10 @@ class DashboardController {
       syncCalendarSession(req);
 
       await removeExpirelocks(this.pool, req.session);
+
+      if (req.session?.adminBooking?.lock_session?.id) {
+        await cancelAddBookingWizard(this.pool, req.session, false);
+      }
 
       const searchterm = parseSearchTerm(req.query);
       const hasDateParam =
@@ -150,6 +156,19 @@ class DashboardController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load lock count',
+      });
+    }
+  }
+
+  async getInProgressBookings(req, res) {
+    try {
+      const data = await getInProgressBookings(this.pool, req.session);
+      return res.json({ success: true, data });
+    } catch (err) {
+      console.error('[ADMIN][DASHBOARD][IN-PROGRESS]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load in-progress bookings',
       });
     }
   }

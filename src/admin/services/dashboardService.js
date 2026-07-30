@@ -293,7 +293,7 @@ async function getCurrentLocksTotal(pool) {
 
 function buildCurrentLockCountHtml(total) {
   if (total > 0) {
-    return `<a href="/admin/coming-soon?feature=F-020" style="color:red;">Bookings Currently In Progress: ${total}</a>`;
+    return `<a href="/admin/bookings/in-progress" style="color:red;">Bookings Currently In Progress: ${total}</a>`;
   }
   return 'Bookings Currently In Progress: 0';
 }
