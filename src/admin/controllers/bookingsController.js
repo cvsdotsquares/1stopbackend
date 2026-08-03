@@ -32,6 +32,7 @@ const {
 } = require('../services/adminBookingRefundDeleteService');
 const { getAdminFrontendBase } = require('../services/motoPaymentService');
 const { getInProgressBookings } = require('../services/inProgressBookingsService');
+const { resolveHeaderBookingSearch } = require('../services/bookingSearchService');
 
 class BookingsController {
   constructor(pool) {
@@ -494,6 +495,23 @@ class BookingsController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load in-progress bookings',
+      });
+    }
+  }
+
+  async searchByRef(req, res) {
+    try {
+      const id = req.query.id ?? req.query.q ?? '';
+      const data = await resolveHeaderBookingSearch(this.pool, id);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) {
+        console.error('[ADMIN][BOOKINGS][SEARCH_REF]', err.message);
+      }
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Booking not found to view',
       });
     }
   }

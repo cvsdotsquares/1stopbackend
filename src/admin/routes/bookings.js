@@ -21,6 +21,9 @@ function createBookingsRoutes(pool) {
   router.get('/in-progress', requireAdminSession, (req, res) =>
     controller.getInProgressBookings(req, res)
   );
+  router.get('/search-by-ref', requireAdminSession, (req, res) =>
+    controller.searchByRef(req, res)
+  );
   router.get('/wizard', requireAdminSession, (req, res) =>
     controller.getWizard(req, res)
   );

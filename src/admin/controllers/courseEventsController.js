@@ -19,6 +19,10 @@ const {
   isEventFrozen,
   saveWizard,
 } = require('../services/courseEventWizardService');
+const {
+  getDayFreezePreview,
+  bulkDayFreeze,
+} = require('../services/dayFreezeService');
 
 class CourseEventsController {
   constructor(pool) {
@@ -276,6 +280,37 @@ class CourseEventsController {
       return res.status(err.status || 500).json({
         success: false,
         message: err.message || 'Error in saving course event',
+      });
+    }
+  }
+
+  async getDayFreezePreview(req, res) {
+    try {
+      const day = req.query.day;
+      const data = await getDayFreezePreview(this.pool, day);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][COURSE_EVENTS][DAY_FREEZE_PREVIEW]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load day freeze preview',
+      });
+    }
+  }
+
+  async applyDayFreeze(req, res) {
+    try {
+      const day = req.body?.day ?? req.query?.day;
+      const fstatus = req.body?.fstatus ?? req.query?.fstatus;
+      const data = await bulkDayFreeze(this.pool, day, fstatus);
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][COURSE_EVENTS][DAY_FREEZE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to update day freeze',
       });
     }
   }

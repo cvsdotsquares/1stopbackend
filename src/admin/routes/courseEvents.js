@@ -37,6 +37,12 @@ function createCourseEventsRoutes(pool) {
   router.post('/bulk-delete', requireAdminSession, (req, res) =>
     controller.bulkRemove(req, res)
   );
+  router.get('/day-freeze/preview', requireAdminSession, (req, res) =>
+    controller.getDayFreezePreview(req, res)
+  );
+  router.post('/day-freeze', requireAdminSession, (req, res) =>
+    controller.applyDayFreeze(req, res)
+  );
   router.get('/:id/booking-count', requireAdminSession, (req, res) =>
     controller.bookingCount(req, res)
   );
