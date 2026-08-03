@@ -15,7 +15,7 @@ const VALID_DATE_FILTER = `
   AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
 `;
 
-const GROUP_MATCH_SQL = '(id = ? OR parent = ?)';
+const GROUP_MATCH_SQL = '(id = ?)';
 const GROUP_MATCH_CE_SQL = '(ce.id = ? OR ce.parent = ?)';
 const MULTI_GROUP_MATCH_SQL = `event_type = '${EVENT_TYPE_MULTI}' AND ${GROUP_MATCH_SQL}`;
 const MULTI_GROUP_MATCH_CE_SQL = `ce.event_type = '${EVENT_TYPE_MULTI}' AND ${GROUP_MATCH_CE_SQL}`;
@@ -605,16 +605,6 @@ async function applyGroupSpaceDelta(connection, courseEventId, { lockDelta = 0, 
       result = fallbackResult;
     }
   }
-
-  console.log('[courseEventGroup] applyGroupSpaceDelta', {
-    courseEventId,
-    groupRootId: rootId,
-    linkedCohort: cohortIds.length > 1,
-    cohortIds,
-    lockDelta,
-    bookingsDoneDelta,
-    affectedRows: result?.affectedRows,
-  });
 }
 
 /**

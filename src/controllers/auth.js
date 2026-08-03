@@ -476,8 +476,8 @@ class AuthController {
       );
 
       await this.pool.query(
-        'INSERT INTO email_verification_otps (user_id, email, otp, purpose, expires_at) VALUES (?, ?, ?, ?, ?)',
-        [user.id, email, otp, otpPurpose, expiresAt]
+        'INSERT INTO email_verification_otps (user_id, email, otp, purpose, expires_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))',
+        [user.id, email, otp, otpPurpose]
       );
 
       await sendOTPEmail(email, user.first_name, otp);
