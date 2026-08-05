@@ -40,8 +40,7 @@ class CMSPagesController {
       const result = await this.buildPagePayload(pages[0], pages_menu);
       return res.json({
         success: true,
-        data: result.data,
-        debug: result.debug
+        data: result.data
       });
     } catch (error) {
       console.error('Error fetching page by nested slug:', error);
@@ -89,8 +88,7 @@ class CMSPagesController {
       const result = await this.buildPagePayload(pages[0], []);
       return res.json({
         success: true,
-        data: { ...result.data, preview: true },
-        debug: result.debug
+        data: { ...result.data, preview: true }
       });
     } catch (error) {
       console.error('Error fetching page preview:', error);
@@ -927,27 +925,7 @@ class CMSPagesController {
       const processedData = await replaceTokensInObject(this.pool, responseData);
 
       return {
-        data: processedData,
-        debug: {
-          page_id: page.id,
-          sliders_count: sliders.length,
-          slider_images_count: sliderImages.length,
-          about_count: about.length,
-          services_count: services.length,
-          training_slider_count: trainingSlider.length,
-          why_us_count: whyUs.length,
-          cbt_test_london_count: cbtTestLondonRows.length,
-          exceptional_count: exceptional.length,
-          banners_count: banners.length,
-          info_card_section_count: infoCardSections.length,
-          price_card_section_count: priceCardSections.length,
-          service_areas_section_count: serviceAreasSections.length,
-          accordion_section_count: accordionSections.length,
-          content_cards_section_count: contentCardsSections.length,
-          cms_sidebar_count: cmsSidebar.length,
-          tab_section_count: tabSections.length,
-          process_steps_count: processStepsSections.length
-        }
+        data: processedData
       };
   }
 
