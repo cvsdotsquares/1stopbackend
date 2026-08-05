@@ -37,6 +37,8 @@ const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
+const path = require('path');
+const { getUploadsRoot } = require('./admin/services/pageSections/uploadService');
 const app = express();
 
 // MySQL pool (uses env vars)
@@ -138,6 +140,31 @@ app.use((req, res, next) => {
     next();
   }
 });
+
+// Public CMS / section images (same tree write path as admin uploadService).
+// Front site uses NEXT_PUBLIC_FILES_URL + /uploads/<folder>/<file>.
+const uploadsRoot = getUploadsRoot();
+app.use(
+  '/uploads',
+  express.static(uploadsRoot, {
+    fallthrough: true,
+    index: false,
+    maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+  })
+);
+// Also expose maps when stored under FRONT_IMG_DIR/maps or local uploads/maps.
+const mapsRoot = path.join(
+  process.env.FRONT_IMG_DIR || path.join(process.cwd(), 'uploads'),
+  'maps'
+);
+app.use(
+  '/maps',
+  express.static(mapsRoot, {
+    fallthrough: true,
+    index: false,
+    maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+  })
+);
 
 // Health check
 app.get('/health', (req, res) => {

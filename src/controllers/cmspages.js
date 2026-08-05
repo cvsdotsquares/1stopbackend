@@ -1,4 +1,5 @@
 const { replaceTokensInObject } = require('../utils/tokenReplacer');
+const { verifyPreviewToken } = require('../utils/pagePreviewToken');
 
 class CMSPagesController {
   constructor(pool) {
@@ -12,8 +13,6 @@ class CMSPagesController {
     try {
       const fullPath = req.path.slice(1);
 
-      // Get page by exact slug from menu
-      // Get page by slug
       const [pages_menu] = await this.pool.query(`
         SELECT
           id, page_slug, page_link_id
@@ -21,8 +20,6 @@ class CMSPagesController {
         WHERE page_slug = ?
       `, [fullPath]);
 
-
-      // Get page by slug
       const [pages] = await this.pool.query(`
         SELECT
           id, page_title, slug , meta_title, meta_keyword, meta_desc,
@@ -40,8 +37,75 @@ class CMSPagesController {
         });
       }
 
-      const page = pages[0];
+      const result = await this.buildPagePayload(pages[0], pages_menu);
+      return res.json({
+        success: true,
+        data: result.data,
+        debug: result.debug
+      });
+    } catch (error) {
+      console.error('Error fetching page by nested slug:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch page by nested slug',
+        error: error.message
+      });
+    }
+  }
 
+  /**
+   * Token-gated preview: load page by id (no page_menus required).
+   */
+  async getPagePreview(req, res) {
+    try {
+      const pageId = Number(req.params.pageId);
+      const token = String(req.query.token || '');
+
+      if (!Number.isFinite(pageId) || pageId <= 0 || !verifyPreviewToken(token, pageId)) {
+        return res.status(404).json({
+          success: false,
+          message: 'Page not found'
+        });
+      }
+
+      const [pages] = await this.pool.query(`
+        SELECT
+          id, page_title, slug , meta_title, meta_keyword, meta_desc,
+          is_parent, parent_level, link_title, banner_type, overlay_caption, page_content, overlay_caption_text,
+          weight, carousel_static_image, carousel_static_caption, featured_service, featured_icon,
+          footer_link, testimonial_display, featured_display, accreditation_display, display_counter, created, updated
+        FROM pages
+        WHERE id = ?
+        LIMIT 1
+      `, [pageId]);
+
+      if (!pages.length) {
+        return res.status(404).json({
+          success: false,
+          message: 'Page not found'
+        });
+      }
+
+      const result = await this.buildPagePayload(pages[0], []);
+      return res.json({
+        success: true,
+        data: { ...result.data, preview: true },
+        debug: result.debug
+      });
+    } catch (error) {
+      console.error('Error fetching page preview:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch page preview',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Shared CMS page assembly used by public slug route and preview.
+   */
+  async buildPagePayload(page, pages_menu = []) {
       // Get section ordering from page_junction table
       const [pageJunctions] = await this.pool.query(`
         SELECT section_data, sort_order
@@ -862,8 +926,7 @@ class CMSPagesController {
 
       const processedData = await replaceTokensInObject(this.pool, responseData);
 
-      res.json({
-        success: true,
+      return {
         data: processedData,
         debug: {
           page_id: page.id,
@@ -885,17 +948,9 @@ class CMSPagesController {
           tab_section_count: tabSections.length,
           process_steps_count: processStepsSections.length
         }
-      });
-
-    } catch (error) {
-      console.error('Error fetching page by nested slug:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fetch page by nested slug',
-        error: error.message
-      });
-    }
+      };
   }
+
 }
 
 module.exports = CMSPagesController;
