@@ -1,19 +1,14 @@
 /**
- * Admin MOTO payments.
+ * Admin MOTO payments via Access Hosted Payment Pages (recommended).
  *
- * Default (matches staging legacy): WorldPay Business Gateway Payment Pages
- *   POST https://secure(-test).worldpay.com/wcc/purchase
- *   Decrypted franchise.inst_id + franchise.acc_id
- *   Card entry only — no Apple Pay / Google Pay.
+ * Access HPP: POST https://(try.)access.worldpay.com/payment_pages
+ *   - threeDS.type=disabled for admin-entered card (no 3DS challenge)
+ *   - Optional WORLDPAY_HPP_MOTO_CUSTOMISATION_ID for a card-only HPP channel
+ *     (disable Apple Pay / Google Pay in Payment Page Designer)
  *
- * Latest (when Access credentials configured): Access Hosted Payment Pages
- *   POST https://(try.)access.worldpay.com/payment_pages
- *   MOTO: threeDS.type=disabled (admin-entered card, no 3DS challenge)
- *   Pass WORLDPAY_HPP_MOTO_CUSTOMISATION_ID for a card-only HPP channel
- *   (wallets disabled in Payment Page Designer), or set
- *   WORLDPAY_MOTO_INTEGRATION=payment_pages to force classic Payment Pages.
+ * Legacy fallback (not recommended): Business Gateway Payment Pages
+ *   WORLDPAY_MOTO_INTEGRATION=payment_pages → wcc/purchase + MD5 signature
  *
- * Legacy parity: make_a_payment.php → world_pay_moto.php → callbacks.
  * Cancel/expiry removes the placeholder booking so no booking reference remains.
  */
 const crypto = require('crypto');
@@ -102,6 +97,17 @@ function getWorldpayMd5Secret() {
     err.status = 500;
     throw err;
   }
+  // Common misconfig: installation ID pasted as the MD5 secret.
+  const instId = trim(
+    process.env.WORLDPAY_INST_ID || process.env.WORLDPAY_BOOKING_INST_ID || ''
+  );
+  if (instId && secret === instId) {
+    const err = new Error(
+      'WORLDPAY_MD5_SECRET matches the installation ID — set it to the MD5 secret from WorldPay MAI (Installation Administration), not the instId'
+    );
+    err.status = 500;
+    throw err;
+  }
   return secret;
 }
 
@@ -151,24 +157,30 @@ function resolveMotoWorldpayCredentials(franchise) {
 }
 
 /**
- * Legacy MD5 password signature (make_a_payment.php / world_pay_moto.php):
- * md5(secret:instId:accId:amount:GBP:cartId)
- * Form field is named accId1 even though PHP stores it as accId2.
+ * WorldPay Payment Pages MD5 signature.
+ *
+ * Must match signatureFields order exactly (WorldPay verifies against those fields):
+ *   md5(secret:instId:amount:currency:cartId)
+ *
+ * Legacy make_a_payment.php also inserted accId between instId and amount while still
+ * declaring signatureFields without it — that fails verification on secure-test.
+ * Opt back into the legacy hash with WORLDPAY_MD5_INCLUDE_ACC_ID=true if your MAI
+ * SignatureFields include the account id.
  */
 function buildWorldpaySignature({ instId, accId, amount, cartId, currency }) {
   const secret = getWorldpayMd5Secret();
   const currencyCode = currency || getWorldpayCurrency();
-  const encValues = [
-    secret,
-    instId,
-    accId,
-    amount,
-    currencyCode,
-    cartId,
-  ].join(':');
+  const includeAccId =
+    String(process.env.WORLDPAY_MD5_INCLUDE_ACC_ID || '').toLowerCase() ===
+    'true';
+
+  const parts = includeAccId
+    ? [secret, instId, accId, amount, currencyCode, cartId]
+    : [secret, instId, amount, currencyCode, cartId];
+
   return {
     signatureFields: 'instId:amount:currency:cartId',
-    signature: crypto.createHash('md5').update(encValues, 'utf8').digest('hex'),
+    signature: crypto.createHash('md5').update(parts.join(':'), 'utf8').digest('hex'),
   };
 }
 
@@ -225,10 +237,9 @@ function resolveIntegrationMode() {
 }
 
 /**
- * MOTO must be card-entry only (no Apple Pay / Google Pay).
- * Prefer WORLDPAY_MOTO_INTEGRATION when set; otherwise fall back to global mode.
- * Classic payment_pages do not offer wallet express checkout.
- * For access_hpp, also pass WORLDPAY_HPP_MOTO_CUSTOMISATION_ID (card-only channel).
+ * MOTO uses the same integration as global unless overridden.
+ * Prefer Access HPP (WORLDPAY_INTEGRATION=access_hpp).
+ * Only set WORLDPAY_MOTO_INTEGRATION=payment_pages for legacy Business Gateway.
  */
 function resolveMotoIntegrationMode() {
   const motoMode = trim(process.env.WORLDPAY_MOTO_INTEGRATION || '').toLowerCase();
