@@ -4,12 +4,17 @@
  * Default (matches staging legacy): WorldPay Business Gateway Payment Pages
  *   POST https://secure(-test).worldpay.com/wcc/purchase
  *   Decrypted franchise.inst_id + franchise.acc_id
+ *   Card entry only — no Apple Pay / Google Pay.
  *
  * Latest (when Access credentials configured): Access Hosted Payment Pages
  *   POST https://(try.)access.worldpay.com/payment_pages
  *   MOTO: threeDS.type=disabled (admin-entered card, no 3DS challenge)
+ *   Pass WORLDPAY_HPP_MOTO_CUSTOMISATION_ID for a card-only HPP channel
+ *   (wallets disabled in Payment Page Designer), or set
+ *   WORLDPAY_MOTO_INTEGRATION=payment_pages to force classic Payment Pages.
  *
  * Legacy parity: make_a_payment.php → world_pay_moto.php → callbacks.
+ * Cancel/expiry removes the placeholder booking so no booking reference remains.
  */
 const crypto = require('crypto');
 const { mc_decrypt, mc_decrypt_old } = require('../../utils/universalPassword');
@@ -219,6 +224,27 @@ function resolveIntegrationMode() {
   return hasAccessCredentials() ? 'access_hpp' : 'payment_pages';
 }
 
+/**
+ * MOTO must be card-entry only (no Apple Pay / Google Pay).
+ * Prefer WORLDPAY_MOTO_INTEGRATION when set; otherwise fall back to global mode.
+ * Classic payment_pages do not offer wallet express checkout.
+ * For access_hpp, also pass WORLDPAY_HPP_MOTO_CUSTOMISATION_ID (card-only channel).
+ */
+function resolveMotoIntegrationMode() {
+  const motoMode = trim(process.env.WORLDPAY_MOTO_INTEGRATION || '').toLowerCase();
+  if (motoMode === 'payment_pages' || motoMode === 'access_hpp') return motoMode;
+  return resolveIntegrationMode();
+}
+
+/** Payment Page Designer channel with wallets disabled (MOTO card-only). */
+function getMotoHppCustomisationId() {
+  return (
+    trim(process.env.WORLDPAY_HPP_MOTO_CUSTOMISATION_ID) ||
+    trim(process.env.WORLDPAY_HPP_CUSTOMISATION_ID) ||
+    ''
+  );
+}
+
 function buildOrderId(invPrefix, bookingId) {
   const prefix = trim(invPrefix) || '1SRC';
   return `${prefix}${bookingId}`;
@@ -421,6 +447,24 @@ async function createAccessHostedPayment({
     payload.fraud = { type: 'disabled' };
   }
 
+  const customisationId =
+    trim(options.customisationId) ||
+    (options.moto ? getMotoHppCustomisationId() : '') ||
+    trim(process.env.WORLDPAY_HPP_CUSTOMISATION_ID);
+  if (customisationId) {
+    payload.customisation_id = customisationId;
+  }
+
+  // MOTO is admin card-entry; hide change-method UX that surfaces wallets.
+  if (options.moto) {
+    payload.hostedProperties = {
+      ...(options.hostedProperties || {}),
+      showChangePaymentMethodButton: 'false',
+    };
+  } else if (options.hostedProperties) {
+    payload.hostedProperties = options.hostedProperties;
+  }
+
   const descriptionText = trim(description);
   if (descriptionText) {
     payload.description = descriptionText.slice(0, 128);
@@ -586,7 +630,7 @@ async function initiateMotoPayment(pool, body, adminSession) {
     throw err;
   }
 
-  const integration = resolveIntegrationMode();
+  const integration = resolveMotoIntegrationMode();
   if (!isMockMode() && integration === 'payment_pages' && !trim(franchise.inst_id)) {
     const err = new Error(
       'Franchise is missing WorldPay installation ID (inst_id).'
@@ -682,7 +726,7 @@ async function initiateMotoPayment(pool, body, adminSession) {
         currency,
         franchise_name: franchise.franchise_name,
         result_url: `${resultPath}?status=success&ref=${encodeURIComponent(orderId)}&mock=1`,
-        cancel_url: `${resultPath}?status=cancel&ref=${encodeURIComponent(orderId)}`,
+        cancel_url: `${cancelUrl}?status=cancel&cartId=${encodeURIComponent(orderId)}`,
         message:
           'WORLDPAY_MOCK_MODE is on — no call to WorldPay. Set WORLDPAY_MOCK_MODE=false to use the real MOTO payment page.',
       };
@@ -703,6 +747,10 @@ async function initiateMotoPayment(pool, body, adminSession) {
           errorURL: `${completeUrl}?status=failed&cartId=${encodeURIComponent(orderId)}`,
           pendingURL: `${completeUrl}?status=pending&cartId=${encodeURIComponent(orderId)}`,
           expiryURL: `${cancelUrl}?status=expiry&cartId=${encodeURIComponent(orderId)}`,
+        },
+        options: {
+          moto: true,
+          customisationId: getMotoHppCustomisationId(),
         },
       });
 
@@ -856,6 +904,91 @@ function isMotoPaymentCompleted(row) {
   return Number(row.booking_status) === 1;
 }
 
+/**
+ * Cancel / abandon a pending standalone MOTO payment.
+ * Removes the placeholder booking and pending payment so no booking reference remains.
+ */
+async function cancelMotoPayment(pool, body = {}) {
+  const cartId = pickCallbackField(
+    body,
+    'cartId',
+    'cartid',
+    'MC_order_id',
+    'transactionReference',
+    'ref'
+  );
+  const bookingIdHint = pickCallbackField(body, 'MC_booking_id', 'mc_booking_id');
+
+  if (!cartId && !bookingIdHint) {
+    return {
+      success: true,
+      cancelled: true,
+      message: 'No MOTO order reference to cancel',
+    };
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const payment = await findMotoPaymentRow(connection, cartId, {
+      forUpdate: true,
+      bookingIdHint,
+    });
+
+    if (!payment) {
+      await connection.commit();
+      return {
+        success: true,
+        cancelled: true,
+        order_id: cartId || null,
+        message: 'MOTO payment already removed or not found',
+      };
+    }
+
+    // Do not undo a completed payment.
+    if (isMotoPaymentCompleted(payment)) {
+      await connection.commit();
+      return {
+        success: false,
+        cancelled: false,
+        already_completed: true,
+        order_id: payment.custom_payment_booking_ref || cartId,
+        message: 'Payment already completed; cancel ignored',
+      };
+    }
+
+    const bookingId = payment.booking_id;
+    const orderId = payment.custom_payment_booking_ref || cartId;
+
+    await connection.query(`DELETE FROM booking_payments WHERE id = ?`, [
+      payment.id,
+    ]);
+
+    if (bookingId) {
+      await connection.query(
+        `DELETE FROM bookings
+         WHERE id = ? AND booking_made_by = 'moto' AND type_of_book = 'm'`,
+        [bookingId]
+      );
+    }
+
+    await connection.commit();
+    return {
+      success: true,
+      cancelled: true,
+      booking_id: bookingId,
+      order_id: orderId,
+      message: 'MOTO payment cancelled; booking reference removed',
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function completeMotoFromCallback(pool, body, options = {}) {
   const cartId = pickCallbackField(body, 'cartId', 'cartid', 'MC_order_id', 'transactionReference');
   const transStatus = pickCallbackField(body, 'transStatus', 'transstatus', 'outcome');
@@ -917,6 +1050,16 @@ async function completeMotoFromCallback(pool, body, options = {}) {
           payment.id,
         ]
       );
+
+      // Remove placeholder booking so a cancelled/declined MOTO does not leave a reference.
+      if (bookingId) {
+        await connection.query(
+          `DELETE FROM bookings
+           WHERE id = ? AND booking_made_by = 'moto' AND type_of_book = 'm'`,
+          [bookingId]
+        );
+      }
+
       await connection.commit();
       return {
         success: false,
@@ -1046,10 +1189,13 @@ module.exports = {
   listMotoFranchises,
   initiateMotoPayment,
   completeMotoFromCallback,
+  cancelMotoPayment,
   getMotoPaymentStatus,
   mockCompleteMoto,
   isMockMode,
   resolveIntegrationMode,
+  resolveMotoIntegrationMode,
+  getMotoHppCustomisationId,
   hasAccessCredentials,
   createAccessHostedPayment,
   getAdminFrontendBase,

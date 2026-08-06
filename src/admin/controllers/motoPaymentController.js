@@ -2,10 +2,11 @@ const {
   listMotoFranchises,
   initiateMotoPayment,
   completeMotoFromCallback,
+  cancelMotoPayment,
   getMotoPaymentStatus,
   mockCompleteMoto,
   getAdminFrontendBase,
-  resolveIntegrationMode,
+  resolveMotoIntegrationMode,
   isMockMode,
   getWorldpayCurrency,
 } = require('../services/motoPaymentService');
@@ -24,7 +25,7 @@ class MotoPaymentController {
           franchises,
           currency: getWorldpayCurrency(),
           mock_mode: isMockMode(),
-          integration: isMockMode() ? 'mock' : resolveIntegrationMode(),
+          integration: isMockMode() ? 'mock' : resolveMotoIntegrationMode(),
         },
       });
     } catch (error) {
@@ -91,6 +92,7 @@ class MotoPaymentController {
         (statusHint !== 'cancel' &&
           statusHint !== 'failed' &&
           statusHint !== 'failure' &&
+          statusHint !== 'expiry' &&
           transStatus === 'Y');
 
       if (treatAsSuccess || statusHint === 'success') {
@@ -104,8 +106,23 @@ class MotoPaymentController {
         );
       }
 
+      // Cancel / expiry / abandon: remove placeholder booking + pending payment.
+      if (
+        statusHint === 'cancel' ||
+        statusHint === 'expiry' ||
+        statusHint === 'expired'
+      ) {
+        await cancelMotoPayment(this.pool, body);
+        return res.redirect(
+          `${adminBase}/admin/payments/moto/result?status=cancel&ref=${encodeURIComponent(cartId)}`
+        );
+      }
+
+      // Declined / failed: mark payment and drop placeholder booking.
       if (transStatus && transStatus !== 'Y') {
         await completeMotoFromCallback(this.pool, body);
+      } else {
+        await cancelMotoPayment(this.pool, body);
       }
 
       return res.redirect(
@@ -115,6 +132,11 @@ class MotoPaymentController {
       );
     } catch (error) {
       console.error('[moto] browserResult error', error);
+      try {
+        await cancelMotoPayment(this.pool, body);
+      } catch (cleanupError) {
+        console.error('[moto] cancel cleanup error', cleanupError);
+      }
       return res.redirect(
         `${adminBase}/admin/payments/moto/result?status=failed&ref=${encodeURIComponent(
           cartId
