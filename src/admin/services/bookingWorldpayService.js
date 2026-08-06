@@ -7,6 +7,7 @@ const {
   formatWorldpayAmount,
   getAdminFrontendBase,
   getApiPublicBase,
+  getMotoHppCustomisationId,
   getWorldpayCurrency,
   getWorldpayPurchaseUrl,
   getWorldpayTestMode,
@@ -15,7 +16,7 @@ const {
   isMockMode,
   isWorldpayTestEnvironment,
   pickCallbackField,
-  resolveIntegrationMode,
+  resolveMotoIntegrationMode,
 } = require('./motoPaymentService');
 
 function trim(value) {
@@ -241,7 +242,7 @@ async function getBookingWorldpayPayload(pool, session) {
     };
   }
 
-  const integration = resolveIntegrationMode();
+  const integration = resolveMotoIntegrationMode();
   if (integration === 'access_hpp') {
     if (!hasAccessCredentials()) {
       const err = new Error(
@@ -272,6 +273,8 @@ async function getBookingWorldpayPayload(pool, session) {
         expiryURL: `${cancelUrl}?status=expiry&cartId=${encodeURIComponent(cartId)}&M_evId=${evId}`,
       },
       options: {
+        moto: true,
+        customisationId: getMotoHppCustomisationId(),
         disable3ds:
           String(bookingDisable3ds).toLowerCase() !== 'false',
         disableFraud:
