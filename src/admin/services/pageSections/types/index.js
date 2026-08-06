@@ -283,10 +283,11 @@ const directionsParking = {
     return { ...section, tabs };
   },
 
-  async createEmpty(pool, pageId) {
+  async createEmpty(pool, pageId, pageType = 'page') {
+    const type = pageType === 'location' ? 'location' : 'page';
     const [result] = await pool.query(
-      `INSERT INTO tab_section (title, image_uri, page_type, page_id) VALUES (?, ?, 'page', ?)`,
-      ['Directions & Parking', '', pageId]
+      `INSERT INTO tab_section (title, image_uri, page_type, page_id) VALUES (?, ?, ?, ?)`,
+      ['Directions & Parking', '', type, pageId]
     );
     return result.insertId;
   },
@@ -342,11 +343,12 @@ const homeSlider = {
     return { ...slider, images, box: box || null };
   },
 
-  async createEmpty(pool, pageId) {
+  async createEmpty(pool, pageId, pageType = 'page') {
+    const type = pageType === 'location' ? 'location' : 'page';
     const [result] = await pool.query(
       `INSERT INTO pageSliders (page_id, page_type, title, next_available_text, page_course_id)
-       VALUES (?, 'page', '', '', NULL)`,
-      [pageId]
+       VALUES (?, ?, '', '', NULL)`,
+      [pageId, type]
     );
     const sliderId = result.insertId;
     await pool.query(

@@ -14,10 +14,11 @@ class FAQController {
    */
   async getFAQPageContent(req, res) {
     try {
-      // Get FAQ categories
+      // Get FAQ categories (active only — status 0 is soft-deleted)
       const [faqCategories] = await this.pool.query(`
         SELECT fc.id, fc.category_name, fc.weight
         FROM faq_categories fc
+        WHERE fc.status = 1
         ORDER BY fc.weight ASC
       `);
 

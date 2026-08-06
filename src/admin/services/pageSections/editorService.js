@@ -44,7 +44,7 @@ function mapPageForEditor(row) {
   };
 }
 
-async function listSectionTypes(pool, pageId = null) {
+async function listSectionTypes(pool, pageId = null, dataType = 'page') {
   const registered = registry.listRegisteredTypes();
   const [dbRows] = await pool.query(
     `SELECT title, title_slug FROM page_sections WHERE is_active = 1 ORDER BY id ASC`
@@ -70,7 +70,7 @@ async function listSectionTypes(pool, pageId = null) {
   }
 
   if (pageId) {
-    const instances = await listInstancesForPage(pool, pageId);
+    const instances = await listInstancesForPage(pool, pageId, dataType);
     const present = new Set(instances.map((i) => i.section_type));
     return types.map((t) => ({
       ...t,
@@ -276,14 +276,21 @@ async function saveEditor(pool, pageId, body = {}) {
  * Mirrors legacy add_page.php: page row first, then each section keyed to the
  * new page id, all inside one transaction.
  */
-async function insertSectionForPage(connection, pageId, section, sortOrder) {
+async function insertSectionForPage(
+  connection,
+  pageId,
+  section,
+  sortOrder,
+  dataType = 'page'
+) {
   const type = trim(section?.type);
   if (!registry.handlers[type]) {
     return { ok: false, message: `Unknown section type: ${type}` };
   }
 
+  const pageType = dataType === 'location' ? 'location' : 'page';
   const handler = registry.getHandler(type);
-  let contentId = await handler.createEmpty(connection, pageId);
+  let contentId = await handler.createEmpty(connection, pageId, pageType);
 
   if (section.data && typeof section.data === 'object') {
     const result = await handler.save(connection, contentId, section.data);
@@ -304,10 +311,11 @@ async function insertSectionForPage(connection, pageId, section, sortOrder) {
     `INSERT INTO cms_section_instances (
       uuid, page_id, data_type, section_type, content_id, sort_order,
       admin_label, status, is_enabled, legacy_junction_id, created_at, updated_at, deleted_at
-    ) VALUES (?, ?, 'page', ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)`,
     [
       newUuid(),
       pageId,
+      pageType,
       type,
       contentId,
       sortOrder,
@@ -435,6 +443,7 @@ module.exports = {
   getEditor,
   saveEditor,
   createPageWithSections,
+  insertSectionForPage,
   listSectionTypes,
   updatePageMeta,
   removeImage,

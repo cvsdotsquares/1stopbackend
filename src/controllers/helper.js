@@ -108,7 +108,7 @@ class HelperController {
         SELECT id, page_title, page_slug, parent_id, page_link_id, sort_order, front_menu_show
         FROM page_menus
         WHERE menu_group = ?
-        ORDER BY id ASC
+        ORDER BY sort_order ASC, id ASC
       `, [groupName]);
 
       // Build nested structure
@@ -420,7 +420,7 @@ class HelperController {
       const [sections] = await this.pool.query(`
         SELECT *
         FROM dynamic_content_sections
-        WHERE page_id = ?
+        WHERE page_id = ? AND page_type = 'location'
         ORDER BY sort_order ASC
       `, [pageId]);
 
@@ -446,7 +446,7 @@ class HelperController {
         SELECT psi.slider_image, psi.alt_title, psi.image_caption
         FROM pageSliders ps
         LEFT JOIN pageSliderImg psi ON ps.id = psi.pageSliders_id
-        WHERE ps.page_id = ? AND psi.slider_image IS NOT NULL
+        WHERE ps.page_id = ? AND ps.page_type = 'location' AND psi.slider_image IS NOT NULL
       `, [pageId]);
       if (sliders.length > 0) {
         sliderImages = sliders.map(img => ({
@@ -462,7 +462,7 @@ class HelperController {
                dai.img_title, dai.access_img
         FROM direct_access da
         LEFT JOIN direct_access_image dai ON da.id = dai.direct_access_id
-        WHERE da.page_id = ?
+        WHERE da.page_id = ? AND da.page_type = 'location'
       `, [pageId]);
       if (about.length > 0) {
         aboutData = {
@@ -482,7 +482,7 @@ class HelperController {
                si.service_img, si.img_title, si.img_caption, si.service_url
         FROM our_services os
         LEFT JOIN service_images si ON os.id = si.service_id
-        WHERE os.page_id = ?
+        WHERE os.page_id = ? AND os.page_type = 'location'
       `, [pageId]);
       if (services.length > 0) {
         servicesData = {
@@ -503,7 +503,7 @@ class HelperController {
                etsi.slider_img, etsi.slider_title as slide_title, etsi.img_caption
         FROM expert_training_slider ets
         LEFT JOIN expert_training_slider_images etsi ON ets.id = etsi.expert_training_slider_id
-        WHERE ets.page_id = ?
+        WHERE ets.page_id = ? AND ets.page_type = 'location'
       `, [pageId]);
       if (trainingSlider.length > 0) {
         trainingSliderData = {
@@ -524,7 +524,7 @@ class HelperController {
                w1si.icon_title, w1si.icon_img, w1si.icon_content
         FROM why_1stop w1s
         LEFT JOIN why_1stop_images w1si ON w1s.id = w1si.why_id
-        WHERE w1s.page_id = ?
+        WHERE w1s.page_id = ? AND w1s.page_type = 'location'
       `, [pageId]);
       if (whyUs.length > 0) {
         whyUsData = {
@@ -545,7 +545,7 @@ class HelperController {
       const [cbtLondon] = await this.pool.query(`
         SELECT title, subtitle, description, cbt_image
         FROM cbt_across_london
-        WHERE page_id = ?
+        WHERE page_id = ? AND page_type = 'location'
       `, [pageId]);
       if (cbtLondon.length > 0) {
         cbtLondonData = {
@@ -560,7 +560,7 @@ class HelperController {
       const [cbtTestLondon] = await this.pool.query(`
         SELECT title, subtitle, description, cbt_image
         FROM cbt_test_london
-        WHERE page_id = ?
+        WHERE page_id = ? AND page_type = 'location'
       `, [pageId]);
       if (cbtTestLondon.length > 0) {
         cbtTestLondonData = {
@@ -576,7 +576,7 @@ class HelperController {
         SELECT exceptional_title, exceptional_subtitle, exceptional_content,
                button_title, button_link, exp_image
         FROM our_exceptional
-        WHERE page_id = ?
+        WHERE page_id = ? AND page_type = 'location'
       `, [pageId]);
       if (exceptional.length > 0) {
         featuresData = [{
@@ -596,7 +596,7 @@ class HelperController {
       const [banners] = await this.pool.query(`
         SELECT bg_title, bg_image, button_title, button_link, bg_color, container_full_width, banner_position, title_color
         FROM pages_banner
-        WHERE page_id = ?
+        WHERE page_id = ? AND page_type = 'location'
         ORDER BY banner_position ASC
       `, [pageId]);
       if (banners.length > 0) {

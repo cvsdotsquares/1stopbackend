@@ -38,13 +38,13 @@ function createTableHandler({
       return data;
     },
 
-    async createEmpty(pool, pageId) {
+    async createEmpty(pool, pageId, pageType = 'page') {
       const fields = { ...defaults };
       const cols = [pageIdColumn];
       const vals = [pageId];
       if (pageTypeColumn) {
         cols.push(pageTypeColumn);
-        vals.push('page');
+        vals.push(pageType === 'location' ? 'location' : 'page');
       }
       for (const [key, value] of Object.entries(fields)) {
         cols.push(key);

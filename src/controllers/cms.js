@@ -802,7 +802,7 @@ class CMSController {
   async getFAQs(req, res) {
     try {
       const { category_id } = req.query;
-      let whereClause = 'WHERE f.status = 1';
+      let whereClause = 'WHERE f.status = 1 AND fc.status = 1';
       let queryParams = [];
 
       if (category_id) {
@@ -829,6 +829,7 @@ class CMSController {
       const [categories] = await this.pool.query(`
         SELECT id, category_name
         FROM faq_categories
+        WHERE status = 1
         ORDER BY weight ASC
       `);
 

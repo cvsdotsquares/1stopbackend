@@ -20,6 +20,9 @@ const createPaymentsRoutes = require('./routes/payments');
 const createBookingsRoutes = require('./routes/bookings');
 const createItineraryRoutes = require('./routes/itinerary');
 const createPagesRoutes = require('./routes/pages');
+const createLocationCoursePagesRoutes = require('./routes/locationCoursePages');
+const createPageMenusRoutes = require('./routes/pageMenus');
+const createFaqsRoutes = require('./routes/faqs');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -49,6 +52,9 @@ function createAdminRoutes(pool) {
   router.use('/bookings', createBookingsRoutes(pool));
   router.use('/itinerary', createItineraryRoutes(pool));
   router.use('/pages', createPagesRoutes(pool));
+  router.use('/location-course-pages', createLocationCoursePagesRoutes(pool));
+  router.use('/page-menus', createPageMenusRoutes(pool));
+  router.use('/faqs', createFaqsRoutes(pool));
 
   return router;
 }

@@ -67,7 +67,8 @@ async function addSection(pool, pageId, sectionType, dataType = 'page') {
   }
 
   const handler = registry.getHandler(sectionType);
-  const contentId = await handler.createEmpty(pool, pageId);
+  const pageType = dataType === 'location' ? 'location' : 'page';
+  const contentId = await handler.createEmpty(pool, pageId, pageType);
 
   const [maxRows] = await pool.query(
     `SELECT COALESCE(MAX(sort_order), 0) AS max_sort
@@ -203,9 +204,9 @@ async function restoreInstance(pool, pageId, instanceId) {
   if (isSingleUse(instance.section_type)) {
     const [existing] = await pool.query(
       `SELECT id FROM cms_section_instances
-       WHERE page_id = ? AND section_type = ? AND deleted_at IS NULL AND id != ?
+       WHERE page_id = ? AND data_type = ? AND section_type = ? AND deleted_at IS NULL AND id != ?
        LIMIT 1`,
-      [pageId, instance.section_type, instanceId]
+      [pageId, instance.data_type || 'page', instance.section_type, instanceId]
     );
     if (existing.length) {
       return { ok: false, message: 'This section type can only be added once' };
