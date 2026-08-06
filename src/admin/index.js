@@ -23,6 +23,7 @@ const createPagesRoutes = require('./routes/pages');
 const createLocationCoursePagesRoutes = require('./routes/locationCoursePages');
 const createPageMenusRoutes = require('./routes/pageMenus');
 const createFaqsRoutes = require('./routes/faqs');
+const createTestimonialsRoutes = require('./routes/testimonials');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -55,6 +56,7 @@ function createAdminRoutes(pool) {
   router.use('/location-course-pages', createLocationCoursePagesRoutes(pool));
   router.use('/page-menus', createPageMenusRoutes(pool));
   router.use('/faqs', createFaqsRoutes(pool));
+  router.use('/testimonials', createTestimonialsRoutes(pool));
 
   return router;
 }
