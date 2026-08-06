@@ -55,6 +55,7 @@ jobs:
             CONTACT_TO=${{ secrets.CONTACT_TO }}
             CONTACT_FROM=${{ secrets.CONTACT_FROM }}
             BOOKING_BCC=${{ secrets.BOOKING_BCC }}
+            # Legacy Business Gateway (fallback only — not used when WORLDPAY_INTEGRATION=access_hpp)
             WORLDPAY_INST_ID=${{ secrets.WORLDPAY_INST_ID }}
             WORLDPAY_ACC_ID=${{ secrets.WORLDPAY_ACC_ID }}
             WORLDPAY_BOOKING_INST_ID=${{ secrets.WORLDPAY_BOOKING_INST_ID }}
@@ -84,6 +85,7 @@ jobs:
             RIDETO_CONFIRM_LOCK_TIMEOUT_SEC=${{ secrets.RIDETO_CONFIRM_LOCK_TIMEOUT_SEC }}
             GOOGLE_CONTACTS_SYNC_DELAY_MINUTES=${{ secrets.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES }}
             CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}
+            # Access Hosted Payment Pages (recommended for MOTO + bookings)
             WORLDPAY_INTEGRATION=${{ secrets.WORLDPAY_INTEGRATION }}
             WORLDPAY_MOCK_MODE=${{ secrets.WORLDPAY_MOCK_MODE }}
             WORLDPAY_ACCESS_USERNAME=${{ secrets.WORLDPAY_ACCESS_USERNAME }}
@@ -92,6 +94,8 @@ jobs:
             WORLDPAY_ACCESS_LIVE=${{ secrets.WORLDPAY_ACCESS_LIVE }}
             WORLDPAY_NARRATIVE=${{ secrets.WORLDPAY_NARRATIVE }}
             WORLDPAY_CURRENCY=${{ secrets.WORLDPAY_CURRENCY }}
+            # Optional: card-only HPP channel (hides Apple Pay / Google Pay on MOTO)
+            WORLDPAY_HPP_MOTO_CUSTOMISATION_ID=${{ secrets.WORLDPAY_HPP_MOTO_CUSTOMISATION_ID }}
             EOF
 
             echo "Setting .env file permissions..."
