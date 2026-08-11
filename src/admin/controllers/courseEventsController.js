@@ -243,7 +243,10 @@ class CourseEventsController {
 
   async wizardFormOptions(req, res) {
     try {
-      const data = await getWizardFormOptions(this.pool);
+      const state = getWizardState(req.session);
+      const data = await getWizardFormOptions(this.pool, {
+        includeLocationId: state?.location_id,
+      });
       return res.json({ success: true, data });
     } catch (err) {
       console.error('[ADMIN][COURSE_EVENTS][WIZARD_OPTIONS]', err.message);

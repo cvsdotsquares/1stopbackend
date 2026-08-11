@@ -27,6 +27,31 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+/** Normalize mysql DATE / Date / string values to YYYY-MM-DD (or TBC). */
+function toDateKey(value) {
+  if (value == null || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    const key = `${y}-${m}-${d}`;
+    return key === TBC_DATE || y < 1900 ? 'TBC' : key;
+  }
+
+  const raw = trim(value);
+  if (!raw || raw === 'TBC') return raw === 'TBC' ? 'TBC' : '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const key = raw.slice(0, 10);
+    return key === TBC_DATE ? 'TBC' : key;
+  }
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return toDateKey(parsed);
+  }
+  return raw;
+}
+
 function formatTimeAmPm(timeRange) {
   if (!timeRange) return '';
   const parts = String(timeRange).split('-');
@@ -56,7 +81,9 @@ function formatBookingCreated(value) {
 
 function formatLongDate(value) {
   if (!value || value === TBC_DATE || value === 'TBC') return 'TBC';
-  const d = new Date(`${String(value).slice(0, 10)}T12:00:00`);
+  const key = toDateKey(value);
+  if (!key || key === 'TBC') return 'TBC';
+  const d = new Date(`${key}T12:00:00`);
   if (Number.isNaN(d.getTime())) return String(value);
   const weekdays = [
     'Sunday',
@@ -97,9 +124,8 @@ function buildEventDatesMap(dateRows) {
   const dates = {};
   let hasTbc = false;
   for (const row of dateRows || []) {
-    const raw = row.event_date;
-    if (raw && String(raw).slice(0, 10) !== TBC_DATE) {
-      const key = String(raw).slice(0, 10);
+    const key = toDateKey(row.event_date);
+    if (key && key !== 'TBC') {
       dates[key] = `${row.event_start_time || ''} - ${row.event_end_time || ''}`;
     } else {
       hasTbc = true;
@@ -354,6 +380,7 @@ async function getEventBookingPage(pool, evId, session) {
       course_id: event.course_id,
       course_name: event.course_name || '',
       description: event.description || '',
+      location_id: Number(event.location_id) || 0,
       location_name: event.location_name || '',
       address1: event.address1 || '',
       address2: event.address2 || '',
@@ -437,86 +464,138 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
 
   const parentId = linkedEvents[0].parent;
   let lockId = 0;
+  let previousSpaces = 0;
   const adminBookingSession = adminBooking || {};
+  const resolvedAdminId = Number(adminId) || 0;
+  const mutexName = `admin_event_lock_${resolvedAdminId}_${parentId}`;
 
-  if (!adminBookingSession.lock_session?.id && session) {
-    session.adminBooking = session.adminBooking || {};
-    session.adminBooking.lock_countdown = Math.floor(Date.now() / 1000);
-  }
+  // Serialize concurrent Take booking / resize requests for the same admin+event.
+  await pool.query('SELECT GET_LOCK(?, 10)', [mutexName]);
 
-  if (adminBookingSession.lock_session?.id) {
-    const existingId = Number(adminBookingSession.lock_session.id);
-    const [existingRows] = await pool.query(
-      'SELECT * FROM lock_bookings WHERE id = ? LIMIT 1',
-      [existingId]
-    );
-    if (existingRows?.[0]) {
-      const prev = existingRows[0];
-      for (const edata of linkedEvents) {
+  try {
+    if (!adminBookingSession.lock_session?.id && session) {
+      session.adminBooking = session.adminBooking || {};
+      session.adminBooking.lock_countdown = Math.floor(Date.now() / 1000);
+    }
+
+    if (adminBookingSession.lock_session?.id) {
+      const existingId = Number(adminBookingSession.lock_session.id);
+      const [existingRows] = await pool.query(
+        'SELECT * FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
+        [existingId]
+      );
+      if (existingRows?.[0]) {
+        lockId = existingId;
+        previousSpaces = Number(existingRows[0].space_required) || 0;
+      } else {
+        delete adminBookingSession.lock_session;
+      }
+    }
+
+    // Reuse an in-progress lock for this admin/event if session was not ready yet
+    // (e.g. React Strict Mode / duplicate Take booking requests).
+    if (!lockId && resolvedAdminId > 0) {
+      const [existingByUser] = await pool.query(
+        `SELECT * FROM lock_bookings
+         WHERE delete_process = 0
+           AND user_id = ?
+           AND (event_id = ? OR parent = ?)
+         ORDER BY id DESC
+         LIMIT 1`,
+        [resolvedAdminId, eventId, parentId]
+      );
+      if (existingByUser?.[0]) {
+        lockId = Number(existingByUser[0].id);
+        previousSpaces = Number(existingByUser[0].space_required) || 0;
+      }
+    }
+
+    if (lockId && previousSpaces > 0) {
+      // Release seats from the lock's current event group (may differ when changing date).
+      const [oldLockRows] = await pool.query(
+        'SELECT event_id, parent FROM lock_bookings WHERE id = ? LIMIT 1',
+        [lockId]
+      );
+      const oldLock = oldLockRows?.[0];
+      const oldParentId = Number(oldLock?.parent) || 0;
+      let oldLinked = linkedEvents;
+      if (oldParentId && oldParentId !== parentId) {
+        const [oldParentRows] = await pool.query(
+          'SELECT id, parent FROM course_events WHERE parent = ?',
+          [oldParentId]
+        );
+        oldLinked = oldParentRows || [];
+      } else if (!oldParentId && Number(oldLock?.event_id) > 0) {
+        oldLinked = [{ id: Number(oldLock.event_id), parent: 0 }];
+      }
+
+      for (const edata of oldLinked) {
         await pool.query(
-          'UPDATE course_events SET current_locks = current_locks - ? WHERE id = ? AND current_locks > 0',
-          [prev.space_required, edata.id]
+          `UPDATE course_events
+           SET current_locks = GREATEST(0, current_locks - ?)
+           WHERE id = ?`,
+          [previousSpaces, edata.id]
         );
       }
-      lockId = existingId;
-    } else {
-      delete adminBookingSession.lock_session;
     }
-  }
 
-  if (lockId) {
-    await pool.query(
-      `UPDATE lock_bookings
-       SET event_id = ?, parent = ?, space_required = ?, modified = NOW(), locked_by = ?
-       WHERE id = ?`,
-      [eventId, parentId, spaces, 'terminal', lockId]
+    if (lockId) {
+      await pool.query(
+        `UPDATE lock_bookings
+         SET event_id = ?, parent = ?, space_required = ?, modified = NOW(), locked_by = ?
+         WHERE id = ?`,
+        [eventId, parentId, spaces, 'terminal', lockId]
+      );
+    } else {
+      const [insertResult] = await pool.query(
+        `INSERT INTO lock_bookings
+          (event_id, parent, space_required, created, modified, user_id, payment_page_stauts, locked_by)
+         VALUES (?, ?, ?, NOW(), NOW(), ?, 1, 'terminal')`,
+        [eventId, parentId, spaces, resolvedAdminId]
+      );
+      lockId = insertResult.insertId;
+    }
+
+    if (!lockId) {
+      const err = new Error('Unable to create booking lock');
+      err.status = 500;
+      throw err;
+    }
+
+    for (const edata of linkedEvents) {
+      await pool.query(
+        'UPDATE course_events SET current_locks = current_locks + ? WHERE id = ?',
+        [spaces, edata.id]
+      );
+    }
+
+    const [lockRows] = await pool.query(
+      'SELECT * FROM lock_bookings WHERE id = ? LIMIT 1',
+      [lockId]
     );
-  } else {
-    const [insertResult] = await pool.query(
-      `INSERT INTO lock_bookings
-        (event_id, parent, space_required, created, modified, user_id, payment_page_stauts, locked_by)
-       VALUES (?, ?, ?, NOW(), NOW(), ?, 1, 'terminal')`,
-      [eventId, parentId, spaces, adminId || 0]
-    );
-    lockId = insertResult.insertId;
-  }
+    const lock = lockRows?.[0];
+    if (!lock) {
+      const err = new Error('Unable to create booking lock');
+      err.status = 500;
+      throw err;
+    }
+    if (session) {
+      session.adminBooking = session.adminBooking || {};
+      session.adminBooking.eventId = eventId;
+      session.adminBooking.space_required = spaces;
+      session.adminBooking.courseId =
+        page.event?.course_id || adminBookingSession.courseId;
+      session.adminBooking.lock_session = lock;
+    }
 
-  if (!lockId) {
-    const err = new Error('Unable to create booking lock');
-    err.status = 500;
-    throw err;
+    return {
+      lock_id: lockId,
+      space_required: spaces,
+      next_url: `/admin/bookings/new`,
+    };
+  } finally {
+    await pool.query('SELECT RELEASE_LOCK(?)', [mutexName]);
   }
-
-  for (const edata of linkedEvents) {
-    await pool.query(
-      'UPDATE course_events SET current_locks = current_locks + ? WHERE id = ?',
-      [spaces, edata.id]
-    );
-  }
-
-  const [lockRows] = await pool.query(
-    'SELECT * FROM lock_bookings WHERE id = ? LIMIT 1',
-    [lockId]
-  );
-  const lock = lockRows?.[0];
-  if (!lock) {
-    const err = new Error('Unable to create booking lock');
-    err.status = 500;
-    throw err;
-  }
-  if (session) {
-    session.adminBooking = session.adminBooking || {};
-    session.adminBooking.eventId = eventId;
-    session.adminBooking.space_required = spaces;
-    session.adminBooking.courseId = page.event?.course_id || adminBookingSession.courseId;
-    session.adminBooking.lock_session = lock;
-  }
-
-  return {
-    lock_id: lockId,
-    space_required: spaces,
-    next_url: `/admin/bookings/new`,
-  };
 }
 
 async function removeProcessLock(pool, lockId, session) {
@@ -576,6 +655,18 @@ async function removeProcessLock(pool, lockId, session) {
   return { removed: true };
 }
 
+function normalizeDatesPayload(datesPayload) {
+  const source =
+    datesPayload && typeof datesPayload === 'object' ? datesPayload : {};
+  const normalized = {};
+  for (const [ceDate, ceTime] of Object.entries(source)) {
+    const key = toDateKey(ceDate);
+    if (!key) continue;
+    normalized[key] = ceTime;
+  }
+  return normalized;
+}
+
 async function setEventFreeze(pool, eventId, freeze, datesPayload) {
   const evId = Number(eventId);
   const freezeValue = Number(freeze);
@@ -601,8 +692,19 @@ async function setEventFreeze(pool, eventId, freeze, datesPayload) {
     throw err;
   }
 
+  const [dateRows] = await pool.query(
+    `SELECT event_date, event_start_time, event_end_time
+     FROM course_event_dates
+     WHERE course_event_id = ?`,
+    [evId]
+  );
+  // Prefer DB dates so freeze never depends on client-serialized Date keys
+  // (e.g. "Tue Aug 11" from String(date).slice(0, 10)).
+  const ceDatesFromDb = buildEventDatesMap(dateRows);
   const ceDates =
-    datesPayload && typeof datesPayload === 'object' ? datesPayload : {};
+    Object.keys(ceDatesFromDb).length > 0
+      ? ceDatesFromDb
+      : normalizeDatesPayload(datesPayload);
 
   if (freezeValue === 1) {
     const [existing] = await pool.query(
@@ -640,7 +742,7 @@ async function setEventFreeze(pool, eventId, freeze, datesPayload) {
 
     for (const [ceDate, ceTime] of Object.entries(ceDates)) {
       const times = String(ceTime || '').split(' - ');
-      const eventDate = trim(ceDate) === 'TBC' ? TBC_DATE : trim(ceDate);
+      const eventDate = trim(ceDate) === 'TBC' ? TBC_DATE : toDateKey(ceDate);
       await pool.query(
         `UPDATE course_event_dates
          SET freeze = 1
@@ -685,7 +787,7 @@ async function setEventFreeze(pool, eventId, freeze, datesPayload) {
 
   for (const [ceDate, ceTime] of Object.entries(ceDates)) {
     const times = String(ceTime || '').split(' - ');
-    const eventDate = trim(ceDate) === 'TBC' ? TBC_DATE : trim(ceDate);
+    const eventDate = trim(ceDate) === 'TBC' ? TBC_DATE : toDateKey(ceDate);
     await pool.query(
       `UPDATE course_event_dates
        SET freeze = 2

@@ -208,7 +208,8 @@ class BookingsController {
       const data = await cancelAddBookingWizard(
         this.pool,
         req.session,
-        saveClient
+        saveClient,
+        this.getAdminId(req)
       );
       return res.json({
         success: true,
