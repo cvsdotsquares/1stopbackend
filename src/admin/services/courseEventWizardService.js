@@ -157,7 +157,7 @@ function buildCalendarMonth(monthInput, yearInput) {
   };
 }
 
-async function getWizardFormOptions(pool) {
+async function getWizardFormOptions(pool, { includeLocationId } = {}) {
   const [courseRows] = await pool.query(
     `SELECT id, course_name, default_booking_limit, default_manual_vehicle,
             default_automatic_vehicle, default_start_time, default_end_time,
@@ -167,11 +167,22 @@ async function getWizardFormOptions(pool) {
      ORDER BY course_name ASC`
   );
 
+  const includeId = Number(includeLocationId);
+  const locationParams = [];
+  let locationWhere =
+    "status = '1' AND COALESCE(show_as_location_for_courses, 1) = 1";
+  if (Number.isFinite(includeId) && includeId > 0) {
+    locationWhere =
+      "status = '1' AND (COALESCE(show_as_location_for_courses, 1) = 1 OR id = ?)";
+    locationParams.push(includeId);
+  }
+
   const [locationRows] = await pool.query(
     `SELECT id, location_name
      FROM locations
-     WHERE status = '1'
-     ORDER BY location_name ASC`
+     WHERE ${locationWhere}
+     ORDER BY location_name ASC`,
+    locationParams
   );
 
   const [franchiseRows] = await pool.query(
@@ -390,6 +401,42 @@ async function applyFrozenState(pool, eventId, eventsDates, freezeAllDates) {
   }
 }
 
+async function assertLocationAllowedForCourses(
+  pool,
+  locationId,
+  { allowLocationIds = [] } = {}
+) {
+  const id = Number(locationId);
+  if (!Number.isFinite(id) || id <= 0) {
+    const err = new Error('Required fields marked with * can not be left blank');
+    err.status = 400;
+    throw err;
+  }
+
+  const allowedExisting = (allowLocationIds || [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (allowedExisting.includes(id)) {
+    return;
+  }
+
+  const [rows] = await pool.query(
+    `SELECT id FROM locations
+     WHERE id = ?
+       AND status = '1'
+       AND COALESCE(show_as_location_for_courses, 1) = 1
+     LIMIT 1`,
+    [id]
+  );
+  if (!rows?.length) {
+    const err = new Error(
+      'Selected location is not available for courses'
+    );
+    err.status = 400;
+    throw err;
+  }
+}
+
 function validateWizardForSave(state, payload) {
   if (!state.eventsDates || !Object.keys(state.eventsDates).length) {
     const err = new Error('Please first fill out date(s) of course');
@@ -447,7 +494,7 @@ async function insertEventDates(pool, eventId, eventsDates) {
   }
 }
 
-async function saveBulkEditWizard(pool, session, payload) {
+async function saveBulkEditWizard(pool, session, payload, { previousLocationId } = {}) {
   const state = getWizardState(session);
   const eventIds = state.bulkEventIds?.length
     ? state.bulkEventIds
@@ -459,6 +506,9 @@ async function saveBulkEditWizard(pool, session, payload) {
   }
 
   validateWizardForSave(state, payload);
+  await assertLocationAllowedForCourses(pool, payload.location_id, {
+    allowLocationIds: [previousLocationId],
+  });
   const link = payload.multi[0];
   const freezeAllDates = Boolean(payload.frozenAllDates);
   const isDeposit = payload.is_deposit ? 1 : 0;
@@ -551,6 +601,7 @@ async function saveBulkEditWizard(pool, session, payload) {
 
 async function saveWizard(pool, session, payload) {
   const current = getWizardState(session);
+  const previousLocationId = current.location_id;
   mergeWizardState(session, {
     location_id: payload.location_id ?? current.location_id,
     franchise_id: payload.franchise_id ?? current.franchise_id,
@@ -560,10 +611,13 @@ async function saveWizard(pool, session, payload) {
   });
   const state = getWizardState(session);
   if (state.isBulkEdit) {
-    return saveBulkEditWizard(pool, session, payload);
+    return saveBulkEditWizard(pool, session, payload, { previousLocationId });
   }
 
   validateWizardForSave(state, payload);
+  await assertLocationAllowedForCourses(pool, payload.location_id, {
+    allowLocationIds: [previousLocationId],
+  });
 
   const eventsDates = state.eventsDates;
   const freezeAllDates = Boolean(payload.frozenAllDates);

@@ -8,6 +8,16 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+const DEFAULT_DASHBOARD_COLOR = '#94a3b8';
+
+function normalizeDashboardColor(value) {
+  const raw = trim(value);
+  if (/^#[0-9a-fA-F]{6}$/.test(raw)) {
+    return raw.toLowerCase();
+  }
+  return DEFAULT_DASHBOARD_COLOR;
+}
+
 function getMapsUploadDir() {
   const base =
     process.env.FRONT_IMG_DIR ||
@@ -62,6 +72,11 @@ function mapLocationRow(row, mapsBaseUrl = '/maps') {
       : null,
     show_in_dl_return: Number(row.show_in_dl_return) || 0,
     show_in_vehicle_schedule: Number(row.show_in_vehicle_schedule) || 0,
+    show_as_location_for_courses:
+      row.show_as_location_for_courses == null
+        ? 1
+        : Number(row.show_as_location_for_courses) || 0,
+    dashboard_color: normalizeDashboardColor(row.dashboard_color),
     status: row.status,
     created: row.created,
   };
@@ -202,6 +217,9 @@ function validateRequiredFields(body, isEdit = false) {
         String(body.show_in_dl_return ?? '0') === '1' ? 1 : 0,
       show_in_vehicle_schedule:
         String(body.show_in_vehicle_schedule ?? '0') === '1' ? 1 : 0,
+      show_as_location_for_courses:
+        String(body.show_as_location_for_courses ?? '0') === '1' ? 1 : 0,
+      dashboard_color: normalizeDashboardColor(body.dashboard_color),
       id: id || undefined,
     },
   };
@@ -265,8 +283,9 @@ async function createLocation(pool, body, file) {
     `INSERT INTO locations (
       location_name, address1, address2, address3, address4, postcode,
       latitude, longitude, status, created, map_title, loc_abb,
-      direction_content, direction_map, show_in_dl_return, show_in_vehicle_schedule
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      direction_content, direction_map, show_in_dl_return, show_in_vehicle_schedule,
+      show_as_location_for_courses, dashboard_color
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.location_name,
       data.address1,
@@ -284,6 +303,8 @@ async function createLocation(pool, body, file) {
       directionMap,
       data.show_in_dl_return,
       data.show_in_vehicle_schedule,
+      data.show_as_location_for_courses,
+      data.dashboard_color,
     ]
   );
 
@@ -349,7 +370,8 @@ async function updateLocation(pool, id, body, file, existingDirectionMap) {
       location_name = ?, address1 = ?, address2 = ?, address3 = ?, address4 = ?,
       postcode = ?, latitude = ?, longitude = ?, status = ?, map_title = ?,
       loc_abb = ?, direction_content = ?, direction_map = ?,
-      show_in_dl_return = ?, show_in_vehicle_schedule = ?
+      show_in_dl_return = ?, show_in_vehicle_schedule = ?,
+      show_as_location_for_courses = ?, dashboard_color = ?
     WHERE id = ?`,
     [
       data.location_name,
@@ -367,6 +389,8 @@ async function updateLocation(pool, id, body, file, existingDirectionMap) {
       directionMap,
       data.show_in_dl_return,
       data.show_in_vehicle_schedule,
+      data.show_as_location_for_courses,
+      data.dashboard_color,
       id,
     ]
   );

@@ -61,6 +61,13 @@ class DashboardController {
     this.pool = pool;
   }
 
+  getAdminId(req) {
+    const loggedIn = req.session?.loggedinAdmin;
+    return (
+      loggedIn?.admin_id || loggedIn?.id || req.session?.admin || 0
+    );
+  }
+
   async getDashboard(req, res) {
     try {
       await expirePromos(this.pool);
@@ -73,8 +80,13 @@ class DashboardController {
 
       await removeExpirelocks(this.pool, req.session);
 
-      if (req.session?.adminBooking?.lock_session?.id) {
-        await cancelAddBookingWizard(this.pool, req.session, false);
+      // Leaving booking flow / opening Home: clear this admin's terminal locks.
+      const adminId = this.getAdminId(req);
+      if (
+        req.session?.adminBooking?.lock_session?.id ||
+        Number(adminId) > 0
+      ) {
+        await cancelAddBookingWizard(this.pool, req.session, false, adminId);
       }
 
       const searchterm = parseSearchTerm(req.query);

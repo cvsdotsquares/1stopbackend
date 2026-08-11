@@ -20,6 +20,31 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+/** Normalize mysql DATE / Date / string values to YYYY-MM-DD (or TBC). */
+function toDateKey(value) {
+  if (value == null || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    const key = `${y}-${m}-${d}`;
+    return key === TBC_DATE || y < 1900 ? 'TBC' : key;
+  }
+
+  const raw = trim(value);
+  if (!raw || raw === 'TBC') return raw === 'TBC' ? 'TBC' : '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const key = raw.slice(0, 10);
+    return key === TBC_DATE ? 'TBC' : key;
+  }
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return toDateKey(parsed);
+  }
+  return raw;
+}
+
 function titleCase(value) {
   const s = trim(value);
   if (!s) return '';
@@ -105,9 +130,9 @@ function buildEventDatesMap(dateRows) {
   const dates = {};
   let hasTbc = false;
   for (const row of dateRows || []) {
-    const raw = row.event_date;
-    if (raw && String(raw).slice(0, 10) !== TBC_DATE) {
-      dates[String(raw).slice(0, 10)] =
+    const key = toDateKey(row.event_date);
+    if (key && key !== 'TBC') {
+      dates[key] =
         `${row.event_start_time || ''} - ${row.event_end_time || ''}`;
     } else {
       hasTbc = true;
@@ -756,39 +781,122 @@ async function updateVehicleLocks(pool, session, manCount, autoCount) {
   adminBooking.lock_session = lockRows?.[0] || lockData;
 }
 
-async function removeCurrentLock(pool, session, notBooking = true) {
-  const adminBooking = session?.adminBooking;
-  const lockData = adminBooking?.lock_session;
-  if (!lockData?.id) return;
+async function removeLockRow(pool, lock, { notBooking = true } = {}) {
+  const lockId = Number(lock?.id);
+  if (!Number.isFinite(lockId) || lockId <= 0) return false;
 
   const [deleteResult] = await pool.query(
     'DELETE FROM lock_bookings WHERE id = ?',
-    [lockData.id]
+    [lockId]
   );
-  if (!deleteResult?.affectedRows) return;
+  if (!deleteResult?.affectedRows) {
+    return false;
+  }
 
-  const [eventsData] = await pool.query(
-    'SELECT * FROM course_events WHERE parent = ?',
-    [lockData.parent]
-  );
+  const spaceRequired = Number(lock.space_required) || 0;
+  const eventId = Number(lock.event_id) || 0;
+  const parent = lock.parent;
 
-  for (const edata of eventsData || []) {
+  let eventsData = [];
+  if (parent != null && String(parent).trim() !== '') {
+    const [rows] = await pool.query(
+      'SELECT * FROM course_events WHERE parent = ?',
+      [parent]
+    );
+    eventsData = rows || [];
+  }
+
+  if (!eventsData.length && eventId > 0) {
+    const [rows] = await pool.query(
+      `SELECT * FROM course_events
+       WHERE id = ?
+          OR parent = (SELECT parent FROM course_events WHERE id = ? LIMIT 1)`,
+      [eventId, eventId]
+    );
+    eventsData = rows || [];
+  }
+
+  if (!eventsData.length || spaceRequired <= 0) {
+    return true;
+  }
+
+  for (const edata of eventsData) {
     if (notBooking) {
       const svM =
-        Number(edata.manual_lock_done || 0) - Number(lockData.manual_lock || 0);
+        Number(edata.manual_lock_done || 0) - Number(lock.manual_lock || 0);
       const svA =
         Number(edata.automatic_lock_done || 0) -
-        Number(lockData.automatic_lock || 0);
+        Number(lock.automatic_lock || 0);
       await pool.query(
         'UPDATE course_events SET manual_lock_done = ?, automatic_lock_done = ? WHERE id = ?',
-        [svM, svA, edata.id]
+        [Math.max(0, svM), Math.max(0, svA), edata.id]
       );
     }
     await pool.query(
-      'UPDATE course_events SET current_locks = current_locks - ? WHERE id = ? AND current_locks > 0',
-      [lockData.space_required, edata.id]
+      `UPDATE course_events
+       SET current_locks = GREATEST(0, current_locks - ?)
+       WHERE id = ?`,
+      [spaceRequired, edata.id]
     );
   }
+
+  return true;
+}
+
+async function removeCurrentLock(pool, session, notBooking = true) {
+  const adminBooking = session?.adminBooking;
+  const lockData = adminBooking?.lock_session;
+  const lockId = Number(lockData?.id);
+  if (!Number.isFinite(lockId) || lockId <= 0) return false;
+
+  const [lockRows] = await pool.query(
+    'SELECT * FROM lock_bookings WHERE id = ? LIMIT 1',
+    [lockId]
+  );
+  const lock = lockRows?.[0] || lockData;
+  if (!lock) return false;
+
+  return removeLockRow(pool, lock, { notBooking });
+}
+
+/**
+ * Clear every admin/terminal lock for this admin (and any orphan session lock),
+ * and roll back course_events.current_locks for each.
+ */
+async function removeAllTerminalLocksForAdmin(pool, session, adminId) {
+  const resolvedAdminId = Number(adminId) || 0;
+  const sessionLockId = Number(session?.adminBooking?.lock_session?.id) || 0;
+  const seen = new Set();
+  let removed = 0;
+
+  const [locks] = await pool.query(
+    `SELECT *
+     FROM lock_bookings
+     WHERE delete_process = 0
+       AND locked_by = 'terminal'
+       AND (
+         (? > 0 AND user_id = ?)
+         OR (? > 0 AND id = ?)
+       )`,
+    [resolvedAdminId, resolvedAdminId, sessionLockId, sessionLockId]
+  );
+
+  for (const lock of locks || []) {
+    const id = Number(lock.id);
+    if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    // eslint-disable-next-line no-await-in-loop
+    const ok = await removeLockRow(pool, lock, { notBooking: true });
+    if (ok) removed += 1;
+  }
+
+  // Fallback: still clear the session lock if it was somehow missed above.
+  if (sessionLockId > 0 && !seen.has(sessionLockId)) {
+    const ok = await removeCurrentLock(pool, session, true);
+    if (ok) removed += 1;
+  }
+
+  return { removed };
 }
 
 async function addBookingsDone(pool, session, evId, spaceRequired) {
@@ -896,6 +1004,7 @@ async function getAddBookingWizard(pool, session) {
       course_id: event.course_id,
       course_name: event.course_name || '',
       description: event.description || '',
+      location_id: Number(event.location_id) || 0,
       location_name: event.location_name || '',
       address1: event.address1 || '',
       address2: event.address2 || '',
@@ -1028,7 +1137,25 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
       err.status = 400;
       throw err;
     }
+  }
 
+  const seenLicences = new Map();
+  for (const attendee of attendees) {
+    const licence = trim(attendee.license_number).toUpperCase();
+    if (!licence) continue;
+    if (seenLicences.has(licence)) {
+      const err = new Error(
+        `Driving licence number is already used by Student ${seenLicences.get(
+          licence
+        )}. Each student must have a unique licence number.`
+      );
+      err.status = 400;
+      throw err;
+    }
+    seenLicences.set(licence, attendee.index);
+  }
+
+  for (const attendee of attendees) {
     const blackData = await checkBlacklisted(pool, attendee.license_number);
     if (blackData) {
       if (session) {
@@ -1146,13 +1273,32 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
   };
 }
 
-async function cancelAddBookingWizard(pool, session, saveClientDetails = false) {
+async function cancelAddBookingWizard(
+  pool,
+  session,
+  saveClientDetails = false,
+  adminId = 0
+) {
   if (saveClientDetails && session?.adminBooking?.Booking_data) {
     session.preFillData = session.adminBooking.Booking_data;
   }
-  await removeCurrentLock(pool, session, true);
+
+  const resolvedAdminId =
+    Number(adminId) ||
+    Number(session?.loggedinAdmin?.admin_id) ||
+    Number(session?.loggedinAdmin?.id) ||
+    Number(session?.admin) ||
+    Number(session?.adminBooking?.lock_session?.user_id) ||
+    0;
+
+  const result = await removeAllTerminalLocksForAdmin(
+    pool,
+    session,
+    resolvedAdminId
+  );
+
   if (session) delete session.adminBooking;
-  return { cancelled: true };
+  return { cancelled: true, removed: result.removed };
 }
 
 module.exports = {
@@ -1161,6 +1307,7 @@ module.exports = {
   searchExistingCustomers,
   submitAddBookingAttendees,
   cancelAddBookingWizard,
+  removeAllTerminalLocksForAdmin,
   checkAdminBookingPromoCode,
   cancelAdminBookingPromoCode,
 };

@@ -97,7 +97,10 @@ async function courseAvailsDashboard(pool, searchterm) {
       course_events.current_locks,
       courses.course_name,
       courses.id AS course_id,
+      locations.id AS location_id,
+      locations.location_name,
       locations.loc_abb,
+      locations.dashboard_color,
       STR_TO_DATE(
         CONCAT(
           DATE_FORMAT(event_date, '%Y-%m-%d'),
@@ -111,7 +114,19 @@ async function courseAvailsDashboard(pool, searchterm) {
     LEFT JOIN courses ON courses.id = course_events.course_id
     LEFT JOIN locations ON locations.id = course_events.location_id
     ${where}
-    GROUP BY course_event_id
+    GROUP BY course_event_dates.course_event_id,
+      course_events.event_type,
+      course_events.booking_limit,
+      course_events.bookings_done,
+      course_events.current_locks,
+      courses.course_name,
+      courses.id,
+      locations.id,
+      locations.location_name,
+      locations.loc_abb,
+      locations.dashboard_color,
+      course_event_dates.event_start_time,
+      course_event_dates.event_end_time
   ) sq
   GROUP BY sq.course_event_id
   ORDER BY STR_TO_DATE(
@@ -189,7 +204,10 @@ async function enrichCourseAvails(pool, rows) {
       course_id: row.course_id,
       event_date: primaryDate,
       event_type: row.event_type,
+      location_id: Number(row.location_id) || 0,
+      location_name: row.location_name || '',
       loc_abb: row.loc_abb,
+      dashboard_color: row.dashboard_color || '#94a3b8',
       event_start_time: formatTimeValue(row.event_start_time),
       event_end_time: formatTimeValue(row.event_end_time),
       booking_limit: Number(row.booking_limit) || 0,
