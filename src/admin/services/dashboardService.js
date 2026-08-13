@@ -57,16 +57,113 @@ function getPrimaryEventDate(dates, fallback) {
   return null;
 }
 
-const CONFIRMED_DATE_SQL = `
-  course_event_dates.event_date != '0000-00-00'
-  AND course_event_dates.event_date != '1111-11-11'
-  AND YEAR(course_event_dates.event_date) >= 1900
-`;
+/** Index-friendly stand-in for YEAR(event_date) >= 1900 / != 0000-00-00. */
+const CONFIRMED_DATE_SQL = `course_event_dates.event_date > '1900-01-01'`;
 
-function buildSearchWhere(searchterm) {
-  let where =
-    ` WHERE course_events.status = '1' AND courses.status IN ('1', '2') AND ${CONFIRMED_DATE_SQL} `;
+function padIso(n) {
+  return String(n).padStart(2, '0');
+}
+
+function toIsoLocal(date) {
+  return `${date.getFullYear()}-${padIso(date.getMonth() + 1)}-${padIso(date.getDate())}`;
+}
+
+function parseIsoLocal(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function todayIso() {
+  return toIsoLocal(new Date());
+}
+
+function weekRange(anchorIso) {
+  const date = parseIsoLocal(anchorIso);
+  const day = date.getDay() || 7;
+  date.setDate(date.getDate() - (day - 1));
+  const start = toIsoLocal(date);
+  date.setDate(date.getDate() + 6);
+  return { start, end: toIsoLocal(date) };
+}
+
+function monthGridRange(anchorIso) {
+  const date = parseIsoLocal(anchorIso);
+  const first = new Date(date.getFullYear(), date.getMonth(), 1);
+  const startOffset = (first.getDay() || 7) - 1;
+  const gridStart = new Date(date.getFullYear(), date.getMonth(), 1 - startOffset);
+  const gridEnd = new Date(gridStart);
+  gridEnd.setDate(gridStart.getDate() + 41);
+  return { start: toIsoLocal(gridStart), end: toIsoLocal(gridEnd) };
+}
+
+function calendarMonthRange(anchorIso) {
+  const date = parseIsoLocal(anchorIso);
+  const start = toIsoLocal(new Date(date.getFullYear(), date.getMonth(), 1));
+  const end = toIsoLocal(new Date(date.getFullYear(), date.getMonth() + 1, 0));
+  return { start, end };
+}
+
+function upcomingWindow() {
+  const now = new Date();
+  return {
+    start: toIsoLocal(new Date(now.getFullYear(), now.getMonth(), 1)),
+    end: toIsoLocal(new Date(now.getFullYear() + 2, now.getMonth(), 0)),
+  };
+}
+
+function mergeRanges(ranges) {
+  const starts = ranges.map((r) => r.start).sort();
+  const ends = ranges.map((r) => r.end).sort();
+  return { start: starts[0], end: ends[ends.length - 1] };
+}
+
+/**
+ * Dashboard v2 only paints the visible week/month (+ current month analytics).
+ * Change-date modal sends crs_scr with no view/anchor and needs upcoming events.
+ */
+function resolveAvailWindow(query = {}) {
+  const crsScr = query.crs_scr != null && String(query.crs_scr).trim() !== '';
+  const hasView = query.view != null && String(query.view).trim() !== '';
+  const hasAnchor = query.anchor != null && String(query.anchor).trim() !== '';
+  const hasDate =
+    query.date != null && String(query.date).trim() !== '';
+
+  if (crsScr && !hasView && !hasAnchor && !hasDate) {
+    return upcomingWindow();
+  }
+
+  const today = todayIso();
+  const ranges = [calendarMonthRange(today)];
+
+  if (hasView || hasAnchor) {
+    const view = String(query.view) === 'month' ? 'month' : 'week';
+    const anchor =
+      /^\d{4}-\d{2}-\d{2}$/.test(String(query.anchor || ''))
+        ? String(query.anchor)
+        : today;
+    ranges.push(view === 'month' ? monthGridRange(anchor) : weekRange(anchor));
+  } else if (hasDate) {
+    const month = String(query.date).padStart(2, '0');
+    const year = query.year ? String(query.year) : String(new Date().getFullYear());
+    ranges.push(monthGridRange(`${year}-${month}-01`));
+  } else {
+    ranges.push(weekRange(today));
+  }
+
+  return mergeRanges(ranges);
+}
+
+function buildSearchWhere(searchterm, dateWindow) {
   const params = [];
+  let where = ` WHERE course_events.status = '1'
+    AND courses.status IN ('1', '2')
+    AND EXISTS (
+      SELECT 1 FROM course_event_dates ced
+      WHERE ced.course_event_id = course_events.id
+        AND ced.event_date >= ?
+        AND ced.event_date <= ?
+    ) `;
+  params.push(dateWindow.start, dateWindow.end);
 
   if (searchterm[0] != null && String(searchterm[0]).trim() !== '') {
     where += ' AND courses.id = ?';
@@ -82,15 +179,14 @@ function buildSearchWhere(searchterm) {
 
 /**
  * Port of Dashboard::course_avails_dashboard($searchterm)
+ * Windowed to the visible calendar so we don't hydrate ~20k historical events.
  */
-async function courseAvailsDashboard(pool, searchterm) {
-  const { where, params } = buildSearchWhere(searchterm);
+async function courseAvailsDashboard(pool, searchterm, query = {}) {
+  const dateWindow = resolveAvailWindow(query);
+  const { where, params } = buildSearchWhere(searchterm, dateWindow);
 
-  const sql = `SELECT * FROM (
-    SELECT course_event_dates.course_event_id,
-      MIN(course_event_dates.event_date) AS event_date,
-      course_event_dates.event_start_time,
-      course_event_dates.event_end_time,
+  const sql = `SELECT
+      course_events.id AS course_event_id,
       course_events.event_type,
       course_events.booking_limit,
       course_events.bookings_done,
@@ -100,43 +196,12 @@ async function courseAvailsDashboard(pool, searchterm) {
       locations.id AS location_id,
       locations.location_name,
       locations.loc_abb,
-      locations.dashboard_color,
-      STR_TO_DATE(
-        CONCAT(
-          DATE_FORMAT(event_date, '%Y-%m-%d'),
-          ' ',
-          TIME_FORMAT(event_start_time, '%H:%i:%s')
-        ),
-        '%Y-%m-%d %H:%i:%s'
-      ) AS ttt
-    FROM course_event_dates
-    LEFT JOIN course_events ON course_events.id = course_event_dates.course_event_id
-    LEFT JOIN courses ON courses.id = course_events.course_id
+      locations.dashboard_color
+    FROM course_events
+    INNER JOIN courses ON courses.id = course_events.course_id
     LEFT JOIN locations ON locations.id = course_events.location_id
     ${where}
-    GROUP BY course_event_dates.course_event_id,
-      course_events.event_type,
-      course_events.booking_limit,
-      course_events.bookings_done,
-      course_events.current_locks,
-      courses.course_name,
-      courses.id,
-      locations.id,
-      locations.location_name,
-      locations.loc_abb,
-      locations.dashboard_color,
-      course_event_dates.event_start_time,
-      course_event_dates.event_end_time
-  ) sq
-  GROUP BY sq.course_event_id
-  ORDER BY STR_TO_DATE(
-    CONCAT(
-      DATE_FORMAT(event_date, '%Y-%m-%d'),
-      ' ',
-      TIME_FORMAT(event_start_time, '%H:%i:%s')
-    ),
-    '%Y-%m-%d %H:%i:%s'
-  ), course_name ASC, loc_abb ASC`;
+    ORDER BY courses.course_name ASC, locations.loc_abb ASC`;
 
   const [rows] = await pool.query(sql, params);
   return enrichCourseAvails(pool, rows || []);
@@ -148,36 +213,42 @@ async function enrichCourseAvails(pool, rows) {
   }
 
   const eventIds = rows.map((r) => r.course_event_id);
-  const [allDateRows] = await pool.query(
-    `SELECT course_event_id, event_date
-     FROM course_event_dates
-     WHERE course_event_id IN (?)`,
-    [eventIds]
-  );
+  const [dateRows, frozenIds] = await Promise.all([
+    pool
+      .query(
+        `SELECT course_event_id, event_date, event_start_time, event_end_time
+         FROM course_event_dates
+         WHERE course_event_id IN (?)`,
+        [eventIds]
+      )
+      .then(([result]) => result || []),
+    getFrozenEventIds(pool, eventIds),
+  ]);
 
   const dayCountByEvent = {};
-  for (const row of allDateRows) {
-    const id = row.course_event_id;
-    dayCountByEvent[id] = (dayCountByEvent[id] || 0) + 1;
-  }
-
-  const [dateRows] = await pool.query(
-    `SELECT course_event_id, event_date
-     FROM course_event_dates
-     WHERE course_event_id IN (?)
-       AND ${CONFIRMED_DATE_SQL}`,
-    [eventIds]
-  );
-
   const datesByEvent = {};
+  const timeByEvent = {};
+
   for (const row of dateRows) {
     const id = row.course_event_id;
+    dayCountByEvent[id] = (dayCountByEvent[id] || 0) + 1;
+
+    const formatted = formatDateValue(row.event_date);
+    if (!formatted || isTbcDate(formatted)) {
+      continue;
+    }
     if (!datesByEvent[id]) {
       datesByEvent[id] = [];
     }
-    const formatted = formatDateValue(row.event_date);
-    if (formatted && !isTbcDate(formatted) && !datesByEvent[id].includes(formatted)) {
+    if (!datesByEvent[id].includes(formatted)) {
       datesByEvent[id].push(formatted);
+    }
+    if (!timeByEvent[id] || formatted < timeByEvent[id].date) {
+      timeByEvent[id] = {
+        date: formatted,
+        start: row.event_start_time,
+        end: row.event_end_time,
+      };
     }
   }
 
@@ -185,39 +256,33 @@ async function enrichCourseAvails(pool, rows) {
     datesByEvent[id] = filterConfirmedDates(datesByEvent[id]);
   }
 
-  const frozenIds = await getFrozenEventIds(pool, eventIds);
+  return rows
+    .map((row) => {
+      const eventDates = datesByEvent[row.course_event_id] || [];
+      const primaryDate = getPrimaryEventDate(eventDates, null);
+      const times = timeByEvent[row.course_event_id] || {};
 
-  return rows.map((row) => {
-    const rawDates = datesByEvent[row.course_event_id] || [];
-    const fallbackDate = formatDateValue(row.event_date);
-    const eventDates =
-      rawDates.length > 0
-        ? rawDates
-        : fallbackDate && !isTbcDate(fallbackDate)
-          ? [fallbackDate]
-          : [];
-    const primaryDate = getPrimaryEventDate(eventDates, fallbackDate);
-
-    return {
-      course_event_id: row.course_event_id,
-      course_name: row.course_name,
-      course_id: row.course_id,
-      event_date: primaryDate,
-      event_type: row.event_type,
-      location_id: Number(row.location_id) || 0,
-      location_name: row.location_name || '',
-      loc_abb: row.loc_abb,
-      dashboard_color: row.dashboard_color || '#94a3b8',
-      event_start_time: formatTimeValue(row.event_start_time),
-      event_end_time: formatTimeValue(row.event_end_time),
-      booking_limit: Number(row.booking_limit) || 0,
-      bookings_done: Number(row.bookings_done) || 0,
-      current_locks: Number(row.current_locks) || 0,
-      eventDates,
-      eventDayCount: dayCountByEvent[row.course_event_id] || eventDates.length,
-      isFrozen: frozenIds.has(row.course_event_id),
-    };
-  }).filter((row) => row.event_date != null);
+      return {
+        course_event_id: row.course_event_id,
+        course_name: row.course_name,
+        course_id: row.course_id,
+        event_date: primaryDate,
+        event_type: row.event_type,
+        location_id: Number(row.location_id) || 0,
+        location_name: row.location_name || '',
+        loc_abb: row.loc_abb,
+        dashboard_color: row.dashboard_color || '#94a3b8',
+        event_start_time: formatTimeValue(times.start || row.event_start_time),
+        event_end_time: formatTimeValue(times.end || row.event_end_time),
+        booking_limit: Number(row.booking_limit) || 0,
+        bookings_done: Number(row.bookings_done) || 0,
+        current_locks: Number(row.current_locks) || 0,
+        eventDates,
+        eventDayCount: dayCountByEvent[row.course_event_id] || eventDates.length,
+        isFrozen: frozenIds.has(row.course_event_id),
+      };
+    })
+    .filter((row) => row.event_date != null);
 }
 
 async function getFrozenEventIds(pool, eventIds) {
@@ -233,63 +298,47 @@ async function getFrozenEventIds(pool, eventIds) {
 
 /**
  * Port of Dashboard::selectFutureCourses()
+ * Unique courses with a confirmed date from the start of this month onward.
  */
 async function selectFutureCourses(pool) {
-  const now = new Date().toISOString().slice(0, 10);
-  const where = ` WHERE course_events.status = '1' AND courses.status IN ('1', '2')
-    AND ${CONFIRMED_DATE_SQL}
-    AND (
-      course_event_dates.event_date >= ?
-      OR (
-        YEAR(course_event_dates.event_date) = YEAR(CURRENT_DATE())
-        AND MONTH(course_event_dates.event_date) = MONTH(CURRENT_DATE())
-      )
-    ) `;
+  const monthStart = toIsoLocal(
+    new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+  );
 
-  const sql = `SELECT * FROM (
-    SELECT course_event_dates.course_event_id,
-      course_event_dates.event_date,
-      courses.course_name,
-      courses.id AS course_id,
-      locations.location_name,
-      locations.id AS location_id
-    FROM course_event_dates
-    JOIN course_events ON course_events.id = course_event_dates.course_event_id
-    JOIN courses ON courses.id = course_events.course_id
-    JOIN locations ON locations.id = course_events.location_id
-    ${where}
-    ORDER BY course_event_dates.course_event_id, course_event_dates.event_date
-  ) sq
-  GROUP BY sq.course_event_id
-  ORDER BY sq.course_name ASC`;
+  const [rows] = await pool.query(
+    `SELECT DISTINCT courses.id AS course_id, courses.course_name
+     FROM courses
+     INNER JOIN course_events ON course_events.course_id = courses.id
+       AND course_events.status = '1'
+     INNER JOIN course_event_dates ON course_event_dates.course_event_id = course_events.id
+       AND course_event_dates.event_date >= ?
+     WHERE courses.status IN ('1', '2')
+     ORDER BY courses.course_name ASC`,
+    [monthStart]
+  );
 
-  const [rows] = await pool.query(sql, [now]);
-  return rows || [];
+  return (rows || []).map((row) => ({
+    course_id: row.course_id,
+    course_name: row.course_name,
+    course_event_id: 0,
+  }));
 }
 
 /**
  * Port of Dashboard::selectLocations()
  */
 async function selectLocations(pool) {
-  const where =
-    ` WHERE course_events.status = '1' AND courses.status IN ('1', '2') AND ${CONFIRMED_DATE_SQL} `;
-
-  const sql = `SELECT * FROM (
-    SELECT course_event_dates.event_date,
-      course_event_dates.course_event_id,
-      locations.location_name,
-      locations.id AS location_id
-    FROM course_event_dates
-    JOIN course_events ON course_events.id = course_event_dates.course_event_id
-    JOIN courses ON courses.id = course_events.course_id
-    JOIN locations ON locations.id = course_events.location_id
-    ${where}
-    ORDER BY course_event_dates.course_event_id, course_event_dates.event_date
-  ) sq
-  GROUP BY sq.location_id
-  ORDER BY sq.location_name DESC`;
-
-  const [rows] = await pool.query(sql);
+  const [rows] = await pool.query(
+    `SELECT DISTINCT locations.id AS location_id, locations.location_name
+     FROM locations
+     INNER JOIN course_events ON course_events.location_id = locations.id
+       AND course_events.status = '1'
+     INNER JOIN courses ON courses.id = course_events.course_id
+       AND courses.status IN ('1', '2')
+     INNER JOIN course_event_dates ON course_event_dates.course_event_id = course_events.id
+       AND ${CONFIRMED_DATE_SQL}
+     ORDER BY locations.location_name DESC`
+  );
   return rows || [];
 }
 

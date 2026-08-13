@@ -68,6 +68,17 @@ class MotoPaymentController {
           .send(result.success ? 'OK' : 'FAILED');
         return;
       }
+      if (paymentType === 'gift_voucher') {
+        const {
+          completeGiftVoucherMotoPayment,
+        } = require('../services/giftVouchersService');
+        const result = await completeGiftVoucherMotoPayment(this.pool, body);
+        res
+          .status(200)
+          .type('text/plain')
+          .send(result.success ? 'OK' : 'FAILED');
+        return;
+      }
       const result = await completeMotoFromCallback(this.pool, body);
       // WorldPay Payment Response expects a simple acknowledgement
       res.status(200).type('text/plain').send(result.success ? 'OK' : 'FAILED');
@@ -84,8 +95,41 @@ class MotoPaymentController {
       body.cartId || body.cartid || body.MC_order_id || body.ref || '';
     const transStatus = String(body.transStatus || body.transstatus || '').toUpperCase();
     const statusHint = String(body.status || '').toLowerCase();
+    const paymentType = String(
+      body.M_paymentType || body.m_paymenttype || ''
+    ).toLowerCase();
+    const isGiftVoucher = paymentType === 'gift_voucher';
+    const giftResultPath = `${adminBase}/admin/gift-vouchers`;
 
     try {
+      if (isGiftVoucher) {
+        const {
+          completeGiftVoucherMotoPayment,
+          cancelGiftVoucherMotoPayment,
+        } = require('../services/giftVouchersService');
+
+        const treatAsSuccess =
+          transStatus === 'Y' || statusHint === 'success';
+
+        if (treatAsSuccess) {
+          const result = await completeGiftVoucherMotoPayment(this.pool, body, {
+            forceSuccess: true,
+            allowMissingStatus: statusHint === 'success',
+          });
+          const resultRef = result.order_id || cartId;
+          return res.redirect(
+            `${giftResultPath}?moto=success&ref=${encodeURIComponent(resultRef)}`
+          );
+        }
+
+        await cancelGiftVoucherMotoPayment(this.pool, body);
+        return res.redirect(
+          `${giftResultPath}/new?moto=${encodeURIComponent(
+            statusHint === 'cancel' || statusHint === 'expiry' ? 'cancel' : 'failed'
+          )}&ref=${encodeURIComponent(cartId)}`
+        );
+      }
+
       const treatAsSuccess =
         transStatus === 'Y' ||
         statusHint === 'success' ||
@@ -133,9 +177,23 @@ class MotoPaymentController {
     } catch (error) {
       console.error('[moto] browserResult error', error);
       try {
-        await cancelMotoPayment(this.pool, body);
+        if (isGiftVoucher) {
+          const {
+            cancelGiftVoucherMotoPayment,
+          } = require('../services/giftVouchersService');
+          await cancelGiftVoucherMotoPayment(this.pool, body);
+        } else {
+          await cancelMotoPayment(this.pool, body);
+        }
       } catch (cleanupError) {
         console.error('[moto] cancel cleanup error', cleanupError);
+      }
+      if (isGiftVoucher) {
+        return res.redirect(
+          `${giftResultPath}/new?moto=failed&ref=${encodeURIComponent(
+            cartId
+          )}&error=${encodeURIComponent(error.message || 'error')}`
+        );
       }
       return res.redirect(
         `${adminBase}/admin/payments/moto/result?status=failed&ref=${encodeURIComponent(
@@ -161,6 +219,25 @@ class MotoPaymentController {
   async mockComplete(req, res) {
     try {
       const ref = req.body?.ref || req.params.ref || req.query.ref;
+      const {
+        findPendingGiftVoucherByRef,
+        completeGiftVoucherMotoPayment,
+      } = require('../services/giftVouchersService');
+      const pendingVoucher = await findPendingGiftVoucherByRef(this.pool, ref);
+      if (pendingVoucher) {
+        const data = await completeGiftVoucherMotoPayment(
+          this.pool,
+          {
+            cartId: pendingVoucher.voucher_ref,
+            M_voucherId: pendingVoucher.id,
+            M_paymentType: 'gift_voucher',
+            transStatus: 'Y',
+            transId: `MOCK-${Date.now()}`,
+          },
+          { forceSuccess: true }
+        );
+        return res.json({ success: true, data, message: data.message });
+      }
       const data = await mockCompleteMoto(this.pool, ref);
       return res.json({ success: true, data, message: data.message });
     } catch (error) {
