@@ -70,15 +70,16 @@ class DashboardController {
 
   async getDashboard(req, res) {
     try {
-      await expirePromos(this.pool);
+      await Promise.all([
+        expirePromos(this.pool),
+        removeExpirelocks(this.pool, req.session),
+      ]);
 
       if (req.session.ProcessBookings) {
         delete req.session.ProcessBookings;
       }
 
       syncCalendarSession(req);
-
-      await removeExpirelocks(this.pool, req.session);
 
       // Leaving booking flow / opening Home: clear this admin's terminal locks.
       const adminId = this.getAdminId(req);
@@ -98,7 +99,7 @@ class DashboardController {
 
       const [courseAvails, selectCourses, selectLocationsList, currentLocksTotal] =
         await Promise.all([
-          courseAvailsDashboard(this.pool, searchterm),
+          courseAvailsDashboard(this.pool, searchterm, req.query),
           selectFutureCourses(this.pool),
           selectLocations(this.pool),
           getCurrentLocksTotal(this.pool),

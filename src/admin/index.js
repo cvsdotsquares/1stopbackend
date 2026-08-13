@@ -19,6 +19,11 @@ const createCourseEventsRoutes = require('./routes/courseEvents');
 const createPaymentsRoutes = require('./routes/payments');
 const createBookingsRoutes = require('./routes/bookings');
 const createItineraryRoutes = require('./routes/itinerary');
+const createCustomersRoutes = require('./routes/customers');
+const createTransactionsRoutes = require('./routes/transactions');
+const createEmailLogsRoutes = require('./routes/emailLogs');
+const createPromosRoutes = require('./routes/promos');
+const createGiftVouchersRoutes = require('./routes/giftVouchers');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -47,6 +52,11 @@ function createAdminRoutes(pool) {
   router.use('/payments', createPaymentsRoutes(pool));
   router.use('/bookings', createBookingsRoutes(pool));
   router.use('/itinerary', createItineraryRoutes(pool));
+  router.use('/customers', createCustomersRoutes(pool));
+  router.use('/transactions', createTransactionsRoutes(pool));
+  router.use('/email-logs', createEmailLogsRoutes(pool));
+  router.use('/promos', createPromosRoutes(pool));
+  router.use('/gift-vouchers', createGiftVouchersRoutes(pool));
 
   return router;
 }

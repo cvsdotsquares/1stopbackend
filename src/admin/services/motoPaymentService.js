@@ -920,6 +920,18 @@ function isMotoPaymentCompleted(row) {
  * Removes the placeholder booking and pending payment so no booking reference remains.
  */
 async function cancelMotoPayment(pool, body = {}) {
+  const paymentType = pickCallbackField(
+    body,
+    'M_paymentType',
+    'm_paymenttype'
+  ).toLowerCase();
+  if (paymentType === 'gift_voucher') {
+    const {
+      cancelGiftVoucherMotoPayment,
+    } = require('./giftVouchersService');
+    return cancelGiftVoucherMotoPayment(pool, body);
+  }
+
   const cartId = pickCallbackField(
     body,
     'cartId',
@@ -929,6 +941,21 @@ async function cancelMotoPayment(pool, body = {}) {
     'ref'
   );
   const bookingIdHint = pickCallbackField(body, 'MC_booking_id', 'mc_booking_id');
+
+  if (cartId) {
+    const {
+      findPendingGiftVoucherByRef,
+      cancelGiftVoucherMotoPayment,
+    } = require('./giftVouchersService');
+    const pending = await findPendingGiftVoucherByRef(pool, cartId);
+    if (pending) {
+      return cancelGiftVoucherMotoPayment(pool, {
+        ...body,
+        M_voucherId: pending.id,
+        M_paymentType: 'gift_voucher',
+      });
+    }
+  }
 
   if (!cartId && !bookingIdHint) {
     return {
@@ -1001,6 +1028,41 @@ async function cancelMotoPayment(pool, body = {}) {
 }
 
 async function completeMotoFromCallback(pool, body, options = {}) {
+  const paymentType = pickCallbackField(
+    body,
+    'M_paymentType',
+    'm_paymenttype'
+  ).toLowerCase();
+  if (paymentType === 'gift_voucher') {
+    const {
+      completeGiftVoucherMotoPayment,
+    } = require('./giftVouchersService');
+    return completeGiftVoucherMotoPayment(pool, body, options);
+  }
+
+  // Access HPP may omit M_paymentType — detect unpaid gift vouchers by ref/bid.
+  const cartIdHint = pickCallbackField(
+    body,
+    'cartId',
+    'cartid',
+    'MC_order_id',
+    'transactionReference'
+  );
+  if (cartIdHint) {
+    const {
+      findPendingGiftVoucherByRef,
+      completeGiftVoucherMotoPayment,
+    } = require('./giftVouchersService');
+    const pending = await findPendingGiftVoucherByRef(pool, cartIdHint);
+    if (pending) {
+      return completeGiftVoucherMotoPayment(
+        pool,
+        { ...body, M_voucherId: pending.id, M_paymentType: 'gift_voucher' },
+        options
+      );
+    }
+  }
+
   const cartId = pickCallbackField(body, 'cartId', 'cartid', 'MC_order_id', 'transactionReference');
   const transStatus = pickCallbackField(body, 'transStatus', 'transstatus', 'outcome');
   const transId = pickCallbackField(body, 'transId', 'transid', 'paymentId');
