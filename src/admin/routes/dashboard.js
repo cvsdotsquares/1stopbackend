@@ -15,6 +15,9 @@ function createDashboardRoutes(pool) {
   router.get('/in-progress-bookings', requireAdminSession, (req, res) =>
     controller.getInProgressBookings(req, res)
   );
+  router.get('/next-course-dates', requireAdminSession, (req, res) =>
+    controller.getNextCourseDates(req, res)
+  );
 
   return router;
 }

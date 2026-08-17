@@ -9,6 +9,7 @@ const {
   buildCurrentLockCountHtml,
   computeWeekSummary,
   parseViewParams,
+  getNextCourseDates,
 } = require('../services/dashboardService');
 const {
   showMonthDashboard,
@@ -182,6 +183,28 @@ class DashboardController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load in-progress bookings',
+      });
+    }
+  }
+
+  async getNextCourseDates(req, res) {
+    try {
+      const courseAbb =
+        req.query.course_abb != null ? String(req.query.course_abb).trim() : '';
+      if (!courseAbb) {
+        return res.status(400).json({
+          success: false,
+          message: 'course_abb is required',
+        });
+      }
+
+      const data = await getNextCourseDates(this.pool, courseAbb);
+      return res.json({ success: true, data });
+    } catch (err) {
+      console.error('[ADMIN][DASHBOARD][NEXT-COURSE-DATES]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load next course dates',
       });
     }
   }
