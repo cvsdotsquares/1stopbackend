@@ -464,6 +464,176 @@ function parseViewParams(query) {
   return { view, anchor };
 }
 
+function formatShortDate(iso) {
+  const date = parseIsoDateValue(iso);
+  return date.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  });
+}
+
+function normalizeAbb(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Next bookable dates for a course abbreviation (dashboard widget).
+ */
+async function getNextCourseDates(pool, courseAbb, options = {}) {
+  const datesPerLocation = Number(options.datesPerLocation) || 4;
+  const horizonMonths = Number(options.horizonMonths) || 6;
+  const abb = String(courseAbb ?? '').trim();
+  if (!abb) {
+    return {
+      course_abb: '',
+      course_name: '',
+      course_id: null,
+      locations: [],
+    };
+  }
+
+  const normalizedAbb = normalizeAbb(abb);
+
+  const [courseRows] = await pool.query(
+    `SELECT id, course_name, course_abb
+     FROM courses
+     WHERE status IN ('1', '2')
+       AND (
+         LOWER(TRIM(course_abb)) = ?
+         OR LOWER(TRIM(course_name)) = ?
+       )
+     ORDER BY
+       CASE WHEN LOWER(TRIM(course_abb)) = ? THEN 0 ELSE 1 END,
+       course_name ASC
+     LIMIT 1`,
+    [normalizedAbb, normalizedAbb, normalizedAbb]
+  );
+
+  const course = courseRows?.[0];
+  if (!course) {
+    return {
+      course_abb: abb,
+      course_name: '',
+      course_id: null,
+      locations: [],
+    };
+  }
+
+  const [rows] = await pool.query(
+    `SELECT
+       ced.course_event_id,
+       DATE_FORMAT(ced.event_date, '%Y-%m-%d') AS event_date,
+       ced.event_start_time,
+       ced.event_end_time,
+       ce.booking_limit,
+       ce.bookings_done,
+       ce.current_locks,
+       ce.location_id,
+       ce.event_type,
+       l.location_name,
+       l.loc_abb
+     FROM course_event_dates ced
+     INNER JOIN course_events ce ON ced.course_event_id = ce.id
+     INNER JOIN courses c ON ce.course_id = c.id
+     LEFT JOIN locations l ON ce.location_id = l.id
+     LEFT JOIN freeze f ON f.course_event_id = ce.id
+     WHERE c.id = ?
+       AND ce.status = '1'
+       AND ced.event_date >= ?
+       AND ced.event_date <= DATE_ADD(?, INTERVAL ? MONTH)
+       AND ced.event_date > '1900-01-01'
+       AND f.id IS NULL
+       AND (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) > 0
+     ORDER BY ced.event_date ASC, l.loc_abb ASC, ced.event_start_time ASC`,
+    [
+      course.id,
+      todayIso(),
+      todayIso(),
+      horizonMonths,
+    ]
+  );
+
+  const eventSlots = new Map();
+  for (const row of rows || []) {
+    const eventId = row.course_event_id;
+    const spaces = Math.max(
+      0,
+      Number(row.booking_limit || 0) -
+        Number(row.bookings_done || 0) -
+        Number(row.current_locks || 0)
+    );
+    if (spaces <= 0) continue;
+
+    const eventDate = formatDateValue(row.event_date);
+    if (!eventDate || isTbcDate(eventDate)) continue;
+
+    const start = formatTimeValue(row.event_start_time);
+    const end = formatTimeValue(row.event_end_time);
+    const timeLabel =
+      start && end ? `${start}–${end}` : start || end || '';
+
+    const existing = eventSlots.get(eventId);
+    if (!existing || eventDate < existing.date) {
+      eventSlots.set(eventId, {
+        course_event_id: eventId,
+        date: eventDate,
+        date_label: formatShortDate(eventDate),
+        time_label: timeLabel,
+        spaces,
+        location_id: Number(row.location_id) || 0,
+        location_name: row.location_name || 'Unknown',
+        loc_abb: row.loc_abb || '',
+        event_type: row.event_type,
+      });
+    }
+  }
+
+  const byLocation = new Map();
+  for (const slot of eventSlots.values()) {
+    const key = slot.location_id || slot.location_name;
+    if (!byLocation.has(key)) {
+      byLocation.set(key, {
+        location_id: slot.location_id,
+        location_name: slot.location_name,
+        loc_abb: slot.loc_abb,
+        dates: [],
+      });
+    }
+    byLocation.get(key).dates.push({
+      course_event_id: slot.course_event_id,
+      date: slot.date,
+      date_label: slot.date_label,
+      time_label: slot.time_label,
+      spaces: slot.spaces,
+    });
+  }
+
+  const locations = [...byLocation.values()]
+    .map((location) => ({
+      ...location,
+      dates: location.dates
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .slice(0, datesPerLocation),
+    }))
+    .filter((location) => location.dates.length > 0)
+    .sort((a, b) =>
+      (a.loc_abb || a.location_name).localeCompare(
+        b.loc_abb || b.location_name
+      )
+    );
+
+  return {
+    course_abb: course.course_abb || abb,
+    course_name: course.course_name || '',
+    course_id: course.id,
+    locations,
+  };
+}
+
 module.exports = {
   courseAvailsDashboard,
   selectFutureCourses,
@@ -476,4 +646,5 @@ module.exports = {
   parseViewParams,
   isTbcDate,
   filterConfirmedDates,
+  getNextCourseDates,
 };

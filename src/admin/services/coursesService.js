@@ -37,6 +37,18 @@ function mapCourseRow(row) {
     default_automatic_vehicle: row.default_automatic_vehicle,
     default_start_time: row.default_start_time,
     default_end_time: row.default_end_time,
+    default_price_type:
+      row.default_price_type === 'depoSit'
+        ? 'depoSit'
+        : row.default_price_type === 'oneOff'
+          ? 'oneOff'
+          : null,
+    default_school_one_off_price: row.default_school_one_off_price,
+    default_school_deposit_price: row.default_school_deposit_price,
+    default_school_total_price: row.default_school_total_price,
+    default_own_one_off_price: row.default_own_one_off_price,
+    default_own_deposit_price: row.default_own_deposit_price,
+    default_own_total_price: row.default_own_total_price,
     status: String(row.status ?? '0'),
     status_label: getStatusLabel(row.status),
     is_cbt: Number(row.is_cbt) || 0,
@@ -146,6 +158,69 @@ function validateTimes(defaultStartTime, defaultEndTime) {
   return { ok: true };
 }
 
+function normalizeDefaultPriceFields(body) {
+  const priceType = trim(body.default_price_type);
+  if (priceType !== 'oneOff' && priceType !== 'depoSit') {
+    return {
+      default_price_type: null,
+      default_school_one_off_price: '0',
+      default_school_deposit_price: '0',
+      default_school_total_price: '0',
+      default_own_one_off_price: '0',
+      default_own_deposit_price: '0',
+      default_own_total_price: '0',
+    };
+  }
+
+  if (priceType === 'depoSit') {
+    return {
+      default_price_type: 'depoSit',
+      default_school_one_off_price: '0',
+      default_school_deposit_price: trim(body.default_school_deposit_price),
+      default_school_total_price: trim(body.default_school_total_price),
+      default_own_one_off_price: '0',
+      default_own_deposit_price: trim(body.default_own_deposit_price),
+      default_own_total_price: trim(body.default_own_total_price),
+    };
+  }
+
+  return {
+    default_price_type: 'oneOff',
+    default_school_one_off_price: trim(body.default_school_one_off_price),
+    default_school_deposit_price: '0',
+    default_school_total_price: '0',
+    default_own_one_off_price: trim(body.default_own_one_off_price),
+    default_own_deposit_price: '0',
+    default_own_total_price: '0',
+  };
+}
+
+function validateDefaultPrices(body) {
+  const priceType = trim(body.default_price_type);
+  if (priceType !== 'oneOff' && priceType !== 'depoSit') {
+    return { ok: true };
+  }
+
+  if (priceType === 'oneOff') {
+    if (!trim(body.default_school_one_off_price)) {
+      return {
+        ok: false,
+        message: 'Please enter one off price for school vehicle',
+      };
+    }
+    return { ok: true };
+  }
+
+  if (!trim(body.default_school_deposit_price) || !trim(body.default_school_total_price)) {
+    return {
+      ok: false,
+      message: 'Please enter deposit and total price for school vehicle',
+    };
+  }
+
+  return { ok: true };
+}
+
 function getRequiredFields(isEdit) {
   const fields = [
     'course_name',
@@ -201,6 +276,13 @@ function validateCourseBody(body, isEdit = false) {
     return timeValidation;
   }
 
+  const priceValidation = validateDefaultPrices(body);
+  if (!priceValidation.ok) {
+    return priceValidation;
+  }
+
+  const defaultPrices = normalizeDefaultPriceFields(body);
+
   const status = String(body.status ?? '');
   if (!['0', '1', '2'].includes(status)) {
     return {
@@ -234,6 +316,7 @@ function validateCourseBody(body, isEdit = false) {
       default_automatic_vehicle: trim(body.default_automatic_vehicle),
       default_start_time: trim(body.default_start_time),
       default_end_time: trim(body.default_end_time),
+      ...defaultPrices,
       status,
       is_cbt: isCbt ? 1 : 0,
       dvsa_email: isCbt ? trim(body.dvsa_email) : '',
@@ -264,8 +347,10 @@ async function createCourse(pool, body) {
       reminder_content, cancel_price, cancel_days, dsa_fees, status, created,
       deposit_days, default_booking_limit, default_manual_vehicle,
       default_automatic_vehicle, default_start_time, default_end_time,
-      course_abb, is_cbt, dvsa_email, course_bullet_points
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      default_price_type, default_school_one_off_price, default_school_deposit_price,
+      default_school_total_price, default_own_one_off_price, default_own_deposit_price,
+      default_own_total_price, course_abb, is_cbt, dvsa_email, course_bullet_points
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.course_name,
       data.description,
@@ -284,6 +369,13 @@ async function createCourse(pool, body) {
       data.default_automatic_vehicle,
       data.default_start_time,
       data.default_end_time,
+      data.default_price_type,
+      data.default_school_one_off_price,
+      data.default_school_deposit_price,
+      data.default_school_total_price,
+      data.default_own_one_off_price,
+      data.default_own_deposit_price,
+      data.default_own_total_price,
       data.course_abb,
       data.is_cbt,
       data.dvsa_email,
@@ -331,7 +423,11 @@ async function updateCourse(pool, id, body) {
       reminder_content = ?, cancel_price = ?, cancel_days = ?, dsa_fees = ?,
       status = ?, modified = ?, deposit_days = ?, default_booking_limit = ?,
       default_manual_vehicle = ?, default_automatic_vehicle = ?,
-      default_start_time = ?, default_end_time = ?, course_abb = ?, is_cbt = ?,
+      default_start_time = ?, default_end_time = ?, default_price_type = ?,
+      default_school_one_off_price = ?, default_school_deposit_price = ?,
+      default_school_total_price = ?, default_own_one_off_price = ?,
+      default_own_deposit_price = ?, default_own_total_price = ?,
+      course_abb = ?, is_cbt = ?,
       dvsa_email = ?, send_feedback_mail = ?, course_bullet_points = ?
     WHERE id = ?`,
     [
@@ -351,6 +447,13 @@ async function updateCourse(pool, id, body) {
       data.default_automatic_vehicle,
       data.default_start_time,
       data.default_end_time,
+      data.default_price_type,
+      data.default_school_one_off_price,
+      data.default_school_deposit_price,
+      data.default_school_total_price,
+      data.default_own_one_off_price,
+      data.default_own_deposit_price,
+      data.default_own_total_price,
       data.course_abb,
       data.is_cbt,
       data.dvsa_email,
