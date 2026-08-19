@@ -3,8 +3,9 @@
  *
  * Data conventions:
  * - event_type = 'single' — standalone; locks/bookings_done apply to this row only
- * - event_type = 'multi' — package; cohort = rows with same root (id = root OR parent = root)
- * - parent: single → parent = event id or 0; multi children → parent = root event id
+ * - event_type = 'multi' — shared pool; all siblings share the same parent column value
+ *   (legacy PHP: UPDATE … WHERE parent = (SELECT parent FROM course_events WHERE id = ?))
+ * - parent: single → parent = event id or 0; multi → parent = first event id in the group
  */
 
 const EVENT_TYPE_MULTI = 'multi';
@@ -17,6 +18,7 @@ const VALID_DATE_FILTER = `
 
 const GROUP_MATCH_SQL = '(id = ?)';
 const GROUP_MATCH_CE_SQL = '(ce.id = ? OR ce.parent = ?)';
+const COHORT_BY_PARENT_SQL = 'parent = ?';
 const MULTI_GROUP_MATCH_SQL = `event_type = '${EVENT_TYPE_MULTI}' AND ${GROUP_MATCH_SQL}`;
 const MULTI_GROUP_MATCH_CE_SQL = `ce.event_type = '${EVENT_TYPE_MULTI}' AND ${GROUP_MATCH_CE_SQL}`;
 
@@ -308,7 +310,20 @@ async function getParentKey(db, courseEventId) {
 }
 
 /**
- * Every course_event row in the cohort (root + children). No status filter — used for locks/bookings_done.
+ * Shared parent key for a linked group (legacy booking.class.php addBookingsdone / lockBooking).
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
+ * @param {number} courseEventId
+ * @returns {Promise<number|null>}
+ */
+async function getLinkedParentKey(db, courseEventId) {
+  const row = await getEventParentRow(db, courseEventId);
+  if (!row || !isMultiEventType(row.event_type)) return null;
+  const parentKey = Number(row.parent);
+  return parentKey > 0 ? parentKey : null;
+}
+
+/**
+ * Every course_event row in the shared pool (legacy: WHERE parent = parentKey).
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
  * @param {number} courseEventId
  * @returns {Promise<number[]>}
@@ -316,12 +331,18 @@ async function getParentKey(db, courseEventId) {
 async function getCohortMemberIds(db, courseEventId) {
   const row = await getEventParentRow(db, courseEventId);
   if (!row) return [Number(courseEventId)];
-  if (!isMultiEventType(row.event_type)) return [row.id];
+  if (!isMultiEventType(row.event_type)) {
+    return [row.id];
+  }
 
-  const rootId = resolveGroupRootId(row.id, row.parent, row.event_type);
+  const parentKey = await getLinkedParentKey(db, courseEventId);
+  if (!parentKey) {
+    return [row.id];
+  }
+
   const [rows] = await db.query(
-    `SELECT id FROM course_events WHERE ${MULTI_GROUP_MATCH_SQL} ORDER BY id ASC`,
-    [rootId, rootId]
+    `SELECT id FROM course_events WHERE ${COHORT_BY_PARENT_SQL} ORDER BY id ASC`,
+    [parentKey]
   );
   if (!rows.length) return [row.id];
   return rows.map((r) => Number(r.id));
@@ -338,10 +359,12 @@ async function getSiblingEventIds(db, courseEventId) {
   if (!row) return [Number(courseEventId)];
   if (!isMultiEventType(row.event_type)) return [row.id];
 
-  const rootId = resolveGroupRootId(row.id, row.parent, row.event_type);
+  const parentKey = await getLinkedParentKey(db, courseEventId);
+  if (!parentKey) return [row.id];
+
   const [rows] = await db.query(
-    `SELECT id FROM course_events WHERE ${MULTI_GROUP_MATCH_SQL} AND (status = '1' OR status = 1) ORDER BY id ASC`,
-    [rootId, rootId]
+    `SELECT id FROM course_events WHERE ${COHORT_BY_PARENT_SQL} AND (status = '1' OR status = 1) ORDER BY id ASC`,
+    [parentKey]
   );
   if (!rows.length) return [row.id];
   return rows.map((r) => Number(r.id));
@@ -557,10 +580,12 @@ async function lockSiblingEventsForUpdate(connection, courseEventId) {
 async function applyGroupSpaceDelta(connection, courseEventId, { lockDelta = 0, bookingsDoneDelta = 0 }) {
   if (!lockDelta && !bookingsDoneDelta) return;
 
-  const rootId = await getGroupRootId(connection, courseEventId);
-  if (!rootId) return;
+  const row = await getEventParentRow(connection, courseEventId);
+  if (!row) return;
 
-  const cohortIds = await getCohortMemberIds(connection, courseEventId);
+  const parentKey = await getLinkedParentKey(connection, courseEventId);
+  const useParentGroup = Boolean(parentKey && isMultiEventType(row.event_type));
+
   const sets = [];
   const params = [];
 
@@ -575,35 +600,33 @@ async function applyGroupSpaceDelta(connection, courseEventId, { lockDelta = 0, 
   sets.push('modified = NOW()');
 
   let result;
-  let targetIds = cohortIds;
 
-  if (cohortIds.length <= 1) {
-    targetIds = [Number(courseEventId)];
-    params.push(targetIds[0]);
+  if (useParentGroup) {
+    params.push(parentKey);
+    [result] = await connection.query(
+      `UPDATE course_events SET ${sets.join(', ')} WHERE ${COHORT_BY_PARENT_SQL}`,
+      params
+    );
+
+    // Shared pool: after increment, normalize drift so every sibling matches MAX (legacy behaviour).
+    // Do not run on decrement — cancellation/refund must only subtract, never bump a lagging sibling.
+    if (bookingsDoneDelta > 0) {
+      await connection.query(
+        `UPDATE course_events ce
+         INNER JOIN (
+           SELECT MAX(bookings_done) AS mx FROM course_events WHERE parent = ?
+         ) agg
+         SET ce.bookings_done = agg.mx, ce.modified = NOW()
+         WHERE ce.parent = ?`,
+        [parentKey, parentKey]
+      );
+    }
+  } else {
+    params.push(Number(courseEventId));
     [result] = await connection.query(
       `UPDATE course_events SET ${sets.join(', ')} WHERE id = ?`,
       params
     );
-  } else {
-    const placeholders = cohortIds.map(() => '?').join(',');
-    params.push(...cohortIds);
-    [result] = await connection.query(
-      `UPDATE course_events SET ${sets.join(', ')} WHERE id IN (${placeholders})`,
-      params
-    );
-
-    // Safety net: if IN-list missed rows, match by root/parent pattern
-    if (result.affectedRows < cohortIds.length) {
-      const fallbackParams = [];
-      if (lockDelta) fallbackParams.push(lockDelta);
-      if (bookingsDoneDelta) fallbackParams.push(bookingsDoneDelta);
-      fallbackParams.push(rootId, rootId);
-      const [fallbackResult] = await connection.query(
-        `UPDATE course_events SET ${sets.join(', ')} WHERE ${MULTI_GROUP_MATCH_SQL}`,
-        fallbackParams
-      );
-      result = fallbackResult;
-    }
   }
 }
 
@@ -643,7 +666,9 @@ module.exports = {
   loadAvailabilityCohortCache,
   getGroupRootId,
   getParentKey,
+  getLinkedParentKey,
   getCohortMemberIds,
+  getLinkedCourseEventIds: getCohortMemberIds,
   getSiblingEventIds,
   isLinkedGroup,
   getGroupFirstEventDate,

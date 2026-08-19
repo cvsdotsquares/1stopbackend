@@ -174,7 +174,7 @@ class BookingFlowController {
             own_one_off_price: event.own_one_off_price,
             own_deposit_price: event.own_deposit_price,
             own_total_price: event.own_total_price,
-            deposit_days: event.deposit_days,
+            deposit_days: event.cancel_days, // Assuming deposit_days is stored in courses table as cancel_days
             dates: []
           };
         }
