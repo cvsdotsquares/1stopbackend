@@ -174,7 +174,8 @@ class BookingFlowController {
             own_one_off_price: event.own_one_off_price,
             own_deposit_price: event.own_deposit_price,
             own_total_price: event.own_total_price,
-            deposit_days: event.cancel_days, // Assuming deposit_days is stored in courses table as cancel_days
+            deposit_days: event.deposit_days,
+            _raw_cancel_days: event.cancel_days,
             dates: []
           };
         }
@@ -220,7 +221,17 @@ class BookingFlowController {
         }
 
         const pricingRow = cohortCache.getNearestPricing(eventGroup.course_event_id);
-        if (pricingRow && Number(pricingRow.id) !== Number(eventGroup.course_event_id)) {
+        const hasOwnPricing =
+          (Number(eventGroup.school_one_off_price) > 0) ||
+          (Number(eventGroup.own_one_off_price) > 0) ||
+          (Number(eventGroup.school_deposit_price) > 0) ||
+          (Number(eventGroup.own_deposit_price) > 0) ||
+          (Number(eventGroup.school_total_price) > 0) ||
+          (Number(eventGroup.own_total_price) > 0);
+
+        // Inherit cohort pricing only when this event row has none configured locally.
+        // Prevents a nearest-day sibling with one-off pricing from overriding deposit pricing here.
+        if (pricingRow && Number(pricingRow.id) !== Number(eventGroup.course_event_id) && !hasOwnPricing) {
           eventGroup.is_deposit = pricingRow.is_deposit;
           eventGroup.vehicle_type_manual = pricingRow.vehicle_type_manual;
           eventGroup.vehicle_type_automatic = pricingRow.vehicle_type_automatic;
@@ -279,13 +290,14 @@ class BookingFlowController {
         // Priority 2: Check if deposit pricing is configured
         const hasDepositPricing = (eventGroup.school_deposit_price > 0) || (eventGroup.own_deposit_price > 0);
 
-        // === Deposit eligibility calculation based on deposit_days ===
-        const depositDays = Number.parseInt(eventGroup.deposit_days) || 0;
+        // cancel_days = min days before course start to allow deposit; deposit_days = balance-due messaging
+        const balanceDueDays = Number.parseInt(eventGroup.deposit_days) || 0;
+        const depositCutoffDays = Number.parseInt(eventGroup._raw_cancel_days) || 0;
         const isDepositEnabled = eventGroup.is_deposit === 1;
         let depositAvailable = false;
         let depositNote = null;
 
-        if (isDepositEnabled && depositDays > 0) {
+        if (isDepositEnabled && depositCutoffDays > 0) {
           const groupFirstDate = cohortCache.isLinked(eventGroup.course_event_id)
             ? cohortCache.getGroupFirstDate(eventGroup.course_event_id)
             : null;
@@ -300,10 +312,10 @@ class BookingFlowController {
             const diffTime = courseStartDate.getTime() - today.getTime();
             const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-            if (diffDays > depositDays) {
+            if (diffDays > depositCutoffDays) {
               depositAvailable = true;
             } else {
-              depositNote = `Deposit option is only available when booking at least ${depositDays} days before the course start date. Full payment is required for this date.`;
+              depositNote = `Deposit option is only available when booking at least ${depositCutoffDays} days before the course start date. Full payment is required for this date.`;
             }
           } else {
             depositNote = 'Deposit option is unavailable as the course dates are yet to be confirmed.';
@@ -318,7 +330,8 @@ class BookingFlowController {
           pricing.pricing_mode = 'one_off';
           pricing.deposit_period_check_enabled = isDepositEnabled;
           pricing.deposit_available = false; // One-off means full payment only
-          pricing.deposit_days = depositDays;
+          pricing.deposit_days = balanceDueDays;
+          pricing.deposit_cutoff_days = depositCutoffDays;
           pricing.deposit_note = 'This course requires full payment.';
           pricing.school_vehicle = {
             price: parseFloat(eventGroup.school_one_off_price) || 0,
@@ -333,7 +346,8 @@ class BookingFlowController {
           pricing.pricing_mode = 'deposit';
           pricing.deposit_period_check_enabled = isDepositEnabled;
           pricing.deposit_available = depositAvailable;
-          pricing.deposit_days = depositDays;
+          pricing.deposit_days = balanceDueDays;
+          pricing.deposit_cutoff_days = depositCutoffDays;
           pricing.deposit_note = depositNote;
           pricing.school_vehicle = {
             deposit: parseFloat(eventGroup.school_deposit_price) || 0,
@@ -351,6 +365,7 @@ class BookingFlowController {
           pricing.deposit_period_check_enabled = false;
           pricing.deposit_available = false;
           pricing.deposit_days = 0;
+          pricing.deposit_cutoff_days = 0;
           pricing.deposit_note = null;
           pricing.school_vehicle = {
             price: 0,
@@ -1102,14 +1117,14 @@ class BookingFlowController {
     }
 
     const isDepositEnabled = Number(courseEvent.is_deposit) === 1;
-    const depositDays = Number.parseInt(courseEvent.deposit_days, 10) || 0;
+    const depositCutoffDays = Number.parseInt(courseEvent.cancel_days, 10) || 0;
 
     // Period check disabled — deposit always allowed when pricing exists
     if (!isDepositEnabled) {
       return { eligible: true };
     }
 
-    if (depositDays <= 0) {
+    if (depositCutoffDays <= 0) {
       return { eligible: false, reason: 'Deposit period not configured' };
     }
 
@@ -1125,10 +1140,10 @@ class BookingFlowController {
     firstDate.setHours(0, 0, 0, 0);
     const diffDays = Math.ceil((firstDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 
-    if (diffDays <= depositDays) {
+    if (diffDays <= depositCutoffDays) {
       return {
         eligible: false,
-        reason: `This course requires full payment as the course start date is too soon (${diffDays} day(s) away, minimum ${depositDays} required for deposit).`,
+        reason: `This course requires full payment as the course start date is too soon (${diffDays} day(s) away, minimum ${depositCutoffDays} required for deposit).`,
       };
     }
 
@@ -1145,15 +1160,15 @@ class BookingFlowController {
     }
 
     const isDepositEnabled = Number(courseEvent.is_deposit) === 1;
-    const depositDays = Number.parseInt(courseEvent.deposit_days, 10) || 0;
+    const depositCutoffDays = Number.parseInt(courseEvent.cancel_days, 10) || 0;
 
     // If period check is disabled, allow deposit whenever deposit pricing exists
     if (!isDepositEnabled) {
       return true;
     }
 
-    // If period check is enabled but deposit_days is missing/invalid, default to full payment
-    if (depositDays <= 0) {
+    // If period check is enabled but cutoff days missing/invalid, default to full payment
+    if (depositCutoffDays <= 0) {
       return false;
     }
 
@@ -1172,7 +1187,7 @@ class BookingFlowController {
     const diffTime = firstDate.getTime() - today.getTime();
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-    return diffDays > depositDays;
+    return diffDays > depositCutoffDays;
   }
 
   async createBookingWithAttendees(req, res) {
@@ -1346,7 +1361,7 @@ class BookingFlowController {
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,
                  ce.school_deposit_price, ce.own_deposit_price, ce.school_total_price, ce.own_total_price, ce.location_id,
                  lc.loc_abb,
-                 ce.is_deposit, c.deposit_days, f.vat as franchise_vat
+                 ce.is_deposit, c.deposit_days, c.cancel_days, f.vat as franchise_vat
           FROM courses c
           JOIN course_events ce ON c.id = ce.course_id
           JOIN franchise f ON ce.franchise_id = f.id
