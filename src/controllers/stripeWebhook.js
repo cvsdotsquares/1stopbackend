@@ -457,7 +457,7 @@ class StripeWebhookController {
     }
   }
 
-  // Verify payment status (for frontend callbacks)
+  // Verify payment status (read-only — confirmation is webhook-only)
   async verifyPayment(req, res) {
     // Add CORS headers
     res.header('Access-Control-Allow-Origin', '*');
@@ -473,7 +473,7 @@ class StripeWebhookController {
       if (!payment_intent) {
         return res.status(400).json({
           success: false,
-          error: 'Missing payment_intent'
+          error: 'Missing payment_intent',
         });
       }
 
@@ -503,8 +503,8 @@ class StripeWebhookController {
               payment_status: paymentIntent.status,
               booking_status: booking.status,
               amount_paid: paymentIntent.amount_received / 100,
-              payment_due: booking.payment_due
-            }
+              payment_due: booking.payment_due,
+            },
           });
         }
       }
@@ -515,8 +515,8 @@ class StripeWebhookController {
         data: {
           payment_status: paymentIntent.status,
           temp_ref: temp_ref || null,
-          message: paymentIntent.status === 'succeeded' ? 'Payment processing...' : 'Payment pending'
-        }
+          message: paymentIntent.status === 'succeeded' ? 'Payment processing...' : 'Payment pending',
+        },
       });
 
     } catch (error) {

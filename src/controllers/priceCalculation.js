@@ -94,13 +94,17 @@ class PriceCalculationController {
     const query = `
       SELECT
         ce.*,
-        c.course_name, c.deposit_days, c.dsa_fees,
+        c.course_name, c.deposit_days, c.cancel_days, c.dsa_fees,
         f.vat, f.franchise_name, f.payment_directly,
-        ced.event_date, ced.event_start_time, ced.event_end_time
+        DATE_FORMAT(ced.event_date, '%Y-%m-%d') as event_date,
+        TIME_FORMAT(ced.event_start_time, '%H:%i') as event_start_time,
+        TIME_FORMAT(ced.event_end_time, '%H:%i') as event_end_time
       FROM course_events ce
       JOIN courses c ON ce.course_id = c.id
       JOIN franchise f ON ce.franchise_id = f.id
       LEFT JOIN course_event_dates ced ON ce.id = ced.course_event_id
+        AND ced.event_date > '1900-01-01'
+        AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
       WHERE ce.id = ? AND ce.status = '1' AND c.status = '1'
       ORDER BY ced.event_date ASC
     `;
@@ -114,6 +118,7 @@ class PriceCalculationController {
       course: {
         course_name: rows[0].course_name,
         deposit_days: rows[0].deposit_days,
+        cancel_days: rows[0].cancel_days,
         dsa_fees: rows[0].dsa_fees
       },
       franchise: {
@@ -121,7 +126,7 @@ class PriceCalculationController {
         franchise_name: rows[0].franchise_name,
         payment_directly: rows[0].payment_directly
       },
-      course_event_dates: rows.filter(row => row.event_date && row.event_date !== '0000-00-00')
+      course_event_dates: rows.filter(row => row.event_date)
         .map(row => ({
           event_date: row.event_date,
           event_start_time: row.event_start_time,
@@ -172,7 +177,7 @@ class PriceCalculationController {
 
   shouldChargeDeposit(courseEvent, courseEventDates) {
 
-    const depositDays = Number.parseInt(courseEvent.course?.deposit_days) || 0;
+    const depositCutoffDays = Number.parseInt(courseEvent.course?.cancel_days) || 0;
 
     // Check if deposit pricing is configured
     if (courseEvent.school_deposit_price <= 0) {
@@ -223,7 +228,7 @@ class PriceCalculationController {
     }
 
     const firstDate = validDates[0];
-    const depositPeriod = depositDays;
+    const depositPeriod = depositCutoffDays;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const courseStartDate = new Date(firstDate);
