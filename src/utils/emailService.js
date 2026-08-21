@@ -1388,3 +1388,54 @@ exports.sendAdminForgotPasswordEmail = async ({ email, firstName, newPassword })
     return false;
   }
 };
+
+exports.sendBookingInvoiceEmail = async (pool, options = {}) => {
+  const to = String(options.to || '').trim();
+  const pupil = String(options.pupil || '').trim();
+  const subject = String(options.subject || '').trim();
+  const html = String(options.html || '');
+  const bookingRef = String(options.bookingRef || '').trim();
+
+  if (!to || !subject || !html) return false;
+
+  const mailOptions = {
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+    to: pupil ? { name: pupil, address: to } : to,
+    subject,
+    html,
+    text: html,
+  };
+
+  let emailStatus = 0;
+  try {
+    await transporter.sendMail(mailOptions);
+    emailStatus = 1;
+  } catch (error) {
+    console.error('[ADMIN][INVOICE][EMAIL]', error.message);
+    emailStatus = 0;
+  } finally {
+    if (pool) {
+      try {
+        await pool.query(
+          `INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, book_ref, created)
+           VALUES (?, '', '', ?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [
+            to,
+            getMailFromAddress(),
+            subject,
+            html,
+            options.emailBy || 'a',
+            emailStatus,
+            subject,
+            bookingRef,
+          ]
+        );
+      } catch (logError) {
+        console.error('Error logging invoice email:', logError);
+      }
+    }
+  }
+
+  return emailStatus === 1;
+};
