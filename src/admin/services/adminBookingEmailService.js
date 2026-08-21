@@ -32,7 +32,10 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     }
 
     const booking = bookings[0];
-    if (!String(booking.email || '').trim()) {
+    const resendMode = Number(options.resendMode) || 0;
+    const overrideEmail = String(options.overrideEmail || '').trim();
+    const attendeeEmail = String(booking.email || '').trim();
+    if (!attendeeEmail && !overrideEmail && resendMode !== 2) {
       return { sent: false, reason: 'no_attendee_email' };
     }
 
@@ -80,14 +83,40 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     );
 
     const bookingType = String(booking.type_of_book || 't').toUpperCase();
+    const isResend = resendMode > 0 || Boolean(overrideEmail);
+    const bookingRefSuffix =
+      resendMode > 0 && resendMode !== 13
+        ? String(booking.type_of_book || '').toLowerCase() === 'r'
+          ? '2R'
+          : 'R'
+        : '';
+    const adminBcc =
+      settingsData[0]?.booking_bcc ||
+      process.env.BOOKING_BCC ||
+      'bookings@1stopinstruction.com';
+
+    let targetEmails = [];
+    let disableBcc = false;
+    if (overrideEmail) {
+      targetEmails = [overrideEmail];
+      disableBcc = true;
+    } else if (resendMode === 1) {
+      disableBcc = true;
+    } else if (resendMode === 2) {
+      targetEmails = [adminBcc];
+      disableBcc = true;
+    }
 
     await sendBookingConfirmation(
       {
         course_name: courseData[0]?.course_name || 'Course',
         booking_ref: booking.booking_ref,
         booking_type: bookingType,
+        bookingRefSuffix,
         refundable: Number(booking.refundable) || 0,
         attendees,
+        ...(targetEmails.length ? { targetEmails } : {}),
+        disableBcc,
         location: locationData[0] || {},
         event_dates: eventDates,
         booking: {
@@ -98,12 +127,11 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
         },
         course_email_content: courseData[0]?.email_content || '',
         franchise: franchiseData[0] || {},
-        bcc:
-          settingsData[0]?.booking_bcc ||
-          process.env.BOOKING_BCC ||
-          'bookings@1stopinstruction.com',
+        bcc: adminBcc,
         ip: options.clientIp || '',
-        logType: options.logType || 'Booking Confirmation',
+        logType:
+          options.logType ||
+          (isResend ? 'Re-Sent Booking Confirmation' : 'Booking Confirmation'),
         emailBy: options.emailBy || 't',
       },
       pool

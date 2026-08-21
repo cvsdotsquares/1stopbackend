@@ -32,6 +32,11 @@ const {
 } = require('../services/adminBookingRefundDeleteService');
 const { getAdminFrontendBase } = require('../services/motoPaymentService');
 const { getInProgressBookings } = require('../services/inProgressBookingsService');
+const {
+  getInvoice,
+  saveInvoice,
+  emailInvoice,
+} = require('../services/bookingInvoiceService');
 
 class BookingsController {
   constructor(pool) {
@@ -495,6 +500,50 @@ class BookingsController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load in-progress bookings',
+      });
+    }
+  }
+
+  async getInvoice(req, res) {
+    try {
+      const data = await getInvoice(this.pool, req.params.id);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][INVOICE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load invoice',
+      });
+    }
+  }
+
+  async saveInvoice(req, res) {
+    try {
+      const data = await saveInvoice(this.pool, req.params.id, req.body || {});
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][INVOICE-SAVE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Error in saving invoice',
+      });
+    }
+  }
+
+  async emailInvoice(req, res) {
+    try {
+      const email =
+        req.body?.email_invoice ?? req.body?.email ?? '';
+      const data = await emailInvoice(this.pool, req.params.id, email);
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][INVOICE-EMAIL]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Error on sending email',
       });
     }
   }

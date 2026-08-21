@@ -73,6 +73,15 @@ function createBookingsRoutes(pool) {
     controller.cancelWizardPromo(req, res)
   );
 
+  router.get('/:id/invoice', requireAdminSession, (req, res) =>
+    controller.getInvoice(req, res)
+  );
+  router.post('/:id/invoice', requireAdminSession, (req, res) =>
+    controller.saveInvoice(req, res)
+  );
+  router.post('/:id/invoice/email', requireAdminSession, (req, res) =>
+    controller.emailInvoice(req, res)
+  );
   router.get('/:id/edit', requireAdminSession, (req, res) =>
     controller.getBookingEditForm(req, res)
   );
