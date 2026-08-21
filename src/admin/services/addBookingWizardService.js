@@ -1085,17 +1085,14 @@ function normalizeAttendeesPayload(body, spaceRequired) {
 
 function validateAttendee(row) {
   const errors = [];
-  if (!trim(row.first_name)) errors.push('First name is required');
-  if (!trim(row.sur_name)) errors.push('Surname is required');
-  if (!trim(row.email)) errors.push('Email is required');
   if (row.vehicle_type === '' || row.vehicle_type == null) {
     errors.push('Vehicle type is required');
   }
   if (row.license_type === '' || row.license_type == null) {
     errors.push('Licence type is required');
   }
-  if (!trim(row.license_number)) errors.push('Licence number is required');
-  if (trim(row.license_number).length !== 16) {
+  const licence = trim(row.license_number);
+  if (licence && licence.length !== 16) {
     errors.push('Licence number must be 16 characters');
   }
   return errors;
