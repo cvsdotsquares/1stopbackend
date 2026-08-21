@@ -5,6 +5,7 @@ const { replaceTokens } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const { sendDeveloperAlert } = require('../utils/emailService');
+const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
 
 const isDeadlockError = (err) =>
   !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
@@ -136,10 +137,7 @@ const removeCurLock = async (pool, space_hold_id) => {
       await pool.query('DELETE FROM lock_bookings WHERE id = ?', [space_hold_id]);
       console.log('[REMOVE CUR LOCK] Lock deleted:', space_hold_id);
 
-      const [eventData] = await pool.query('SELECT parent FROM course_events WHERE id = ?', [eventId]);
-      if (eventData.length > 0) {
-        await pool.query('UPDATE course_events SET current_locks = GREATEST(0, current_locks - 1) WHERE parent = ? AND current_locks > 0', [eventData[0].parent]);
-      }
+      await applyGroupSpaceDelta(pool, eventId, { lockDelta: -1 });
     }
   } catch (error) {
     console.error('Error removing lock:', error);
@@ -591,11 +589,8 @@ const confirmBooking = (pool) => async (req, res) => {
       console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) | source=controllers/confirmBooking.js (RideTo step 9) | booking_id=${bookingId}`);
       await connection.query(`INSERT INTO booking_payments (booking_id, payment_type, transation_id, response, amount, created) VALUES (?, 'CASH', '', '', ?, NOW())`, [bookingId, course_cost]);
 
-      // Step 10: Update Course Events
-      const [eventParent] = await connection.query('SELECT parent FROM course_events WHERE id = ?', [course_event_id]);
-      if (eventParent.length > 0) {
-        await connection.query('UPDATE course_events SET bookings_done = bookings_done + 1 WHERE parent = ?', [eventParent[0].parent]);
-      }
+      // Step 10: Update Course Events (all linked cohort siblings)
+      await applyGroupSpaceDelta(connection, course_event_id, { bookingsDoneDelta: 1 });
 
       // Step 10.5: Build booking confirmation email payload (still inside txn, read-only joins)
       const bookingEmailData = await buildBookingEmailData(connection, {
