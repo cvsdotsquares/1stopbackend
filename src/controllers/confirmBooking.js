@@ -5,7 +5,7 @@ const { replaceTokens } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const { sendDeveloperAlert } = require('../utils/emailService');
-const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+const { applyGroupSpaceDelta, getLinkedParentKey } = require('../utils/courseEventGroup');
 
 const isDeadlockError = (err) =>
   !!err && (err.errno === 1213 || err.code === 'ER_LOCK_DEADLOCK' || err.sqlState === '40001');
@@ -613,13 +613,14 @@ const confirmBooking = (pool) => async (req, res) => {
 
 
       await connection.commit();
+      const cohortParentId = await getLinkedParentKey(connection, course_event_id);
       return {
         kind: 'committed',
         bookingId,
         booking_ref,
         vehicleType,
         bookingEmailData,
-        eventParent: eventParent && eventParent[0] ? eventParent[0].parent : null
+        eventParent: cohortParentId
       };
     } catch (error) {
       try { await connection.rollback(); } catch (_) {}
