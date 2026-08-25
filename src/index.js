@@ -40,6 +40,7 @@ const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
 const app = express();
 app.set('trust proxy', getTrustProxySetting());
+console.log('[SECURITY] trust proxy', process.env.TRUST_PROXY || 'loopback/private/Cloudflare only');
 
 // MySQL pool (uses env vars)
 const pool = mysql.createPool({
