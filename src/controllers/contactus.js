@@ -7,6 +7,7 @@ const nodemailer = require('nodemailer');
 const dotenv = require('dotenv');
 const { replaceTokensInObject } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress } = require('../utils/mailFrom');
+const { escapeHtml, cleanText } = require('../utils/injectionGuard');
 dotenv.config();
 
 class ContactUsController {
@@ -119,29 +120,34 @@ class ContactUsController {
 
   async createContactUsEntry(req, res) {
     try {
-      const { name, email, subject, message } = req.body;
-      require('assert')(name, 'Name is required');
-      require('assert')(email, 'Email is required');
-      require('assert')(subject, 'Subject is required');
-      require('assert')(message, 'Message is required');
+      // Honeypot: bots often fill hidden fields. Silently accept and drop.
+      if (String(req.body.website || req.body.company || '').trim()) {
+        return res.json({ success: true, message: 'Contact entry received' });
+      }
 
-      // Check if the email is valid
+      const name = cleanText(req.body.name, 100);
+      const email = cleanText(req.body.email, 254);
+      const subject = cleanText(req.body.subject, 200);
+      const message = cleanText(req.body.message, 5000);
+
+      if (!name || !email || !subject || !message) {
+        return res.status(400).json({ success: false, message: 'Name, email, subject and message are required' });
+      }
+
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
       if (!emailRegex.test(email)) {
         return res.status(400).json({ success: false, message: 'Invalid email format' });
       }
 
-
-
-      // Prepare email
       const toAddress = process.env.CONTACT_TO || getMailFromAddress();
-      // Header `from` includes the display name (e.g. `"1 Stop Instruction" <info@…>`),
-      // while the email_logs `from` column stores the bare address for searchability.
       const fromHeader = getMailFrom();
       const fromAddress = getMailFromAddress();
       const bccAddress = process.env.CONTACT_BCC || '';
-      const officerDesignation = process.env.CONTACT_TO_OFFICER || 'Enquiry manager';
+
+      const safeName = escapeHtml(name);
+      const safeEmail = escapeHtml(email);
+      const safeSubject = escapeHtml(subject);
+      const safeMessageHtml = escapeHtml(message).replace(/\n/g, '<br/>');
 
       const mailOptions = {
         from: fromHeader,
@@ -150,10 +156,10 @@ class ContactUsController {
         subject: `Contact form submission: ${subject}`,
         text: `You have a new contact form submission:\n\nName: ${name}\nEmail: ${email}\nSubject: ${subject}\nMessage:\n${message}`,
         html: `<p>You have a new contact form submission:</p>
-               <p><strong>Name:</strong> ${name}</p>
-               <p><strong>Email:</strong> ${email}</p>
-               <p><strong>Subject:</strong> ${subject}</p>
-               <p><strong>Message:</strong><br/>${message.replace(/\n/g, '<br/>')}</p>`
+               <p><strong>Name:</strong> ${safeName}</p>
+               <p><strong>Email:</strong> ${safeEmail}</p>
+               <p><strong>Subject:</strong> ${safeSubject}</p>
+               <p><strong>Message:</strong><br/>${safeMessageHtml}</p>`
       };
 
       // Send email if transporter is configured
