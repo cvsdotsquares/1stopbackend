@@ -24,6 +24,36 @@ function createSecurityGuard(pool) {
     return next();
   }
 
+  function rejectIfBlocked(actionType) {
+    return async (req, res, next) => {
+      try {
+        const ip = getClientIp(req);
+        const existingBlock = await rateLimitUtil.isIpBlocked(pool, ip, actionType);
+        if (existingBlock) {
+          const retryAfter = existingBlock.retry_after || 60;
+          console.warn('[SECURITY] rate limited', {
+            ip,
+            actionType,
+            retryAfter,
+            xff: req.headers['x-forwarded-for'] || null,
+            realIp: req.headers['x-real-ip'] || null,
+            cf: req.headers['cf-connecting-ip'] || null,
+            socket: req.socket?.remoteAddress || null,
+          });
+          res.set('Retry-After', String(retryAfter));
+          return res.status(429).json({
+            success: false,
+            message: 'Too many requests. Please try again later.',
+            retryAfter,
+          });
+        }
+      } catch (error) {
+        console.error('[SECURITY] rate limit check error:', error.message);
+      }
+      return next();
+    };
+  }
+
   function rateLimit(actionType) {
     return async (req, res, next) => {
       try {
@@ -96,6 +126,7 @@ function createSecurityGuard(pool) {
 
   return {
     rejectMaliciousBody,
+    rejectIfBlocked,
     rateLimit,
     verifyRecaptcha,
   };

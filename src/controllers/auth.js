@@ -6,6 +6,8 @@ const { generateToken, generateRefreshToken } = require('../middleware/auth');
 const { sendOTPEmail, sendRegistrationEmail, sendPasswordUpdateEmail } = require('../utils/emailService');
 const { decryptPassword } = require('../utils/encryption');
 const { verifyUniversalPassword } = require('../utils/universalPassword');
+const { getClientIp } = require('../utils/clientIp');
+const rateLimitUtil = require('../utils/securityRateLimit');
 
 const parseDobToMysql = (dob) => {
   if (!dob) return null;
@@ -664,9 +666,35 @@ class AuthController {
     return crypto.createHash('sha1').update(salt + password).digest('hex');
   }
 
-  /**
-   * Login user (Step 5 or direct login)
-   */
+  async _recordLoginFailure(req, res, fallbackStatus, fallbackMessage) {
+    try {
+      const ip = getClientIp(req);
+      const result = await rateLimitUtil.consume(this.pool, ip, 'login');
+      if (!result.allowed) {
+        const retryAfter = result.retryAfterSeconds || 60;
+        res.set('Retry-After', String(retryAfter));
+        return res.status(429).json({
+          success: false,
+          message: 'Too many failed login attempts. Please try again later.',
+          retryAfter,
+        });
+      }
+    } catch (error) {
+      console.error('[SECURITY] login failure rate limit error:', error.message);
+    }
+    return res.status(fallbackStatus).json({
+      success: false,
+      message: fallbackMessage,
+    });
+  }
+
+  async _clearLoginFailures(req) {
+    try {
+      await rateLimitUtil.reset(this.pool, getClientIp(req), 'login');
+    } catch (error) {
+      console.error('[SECURITY] login reset rate limit error:', error.message);
+    }
+  }
   async login(req, res) {
     try {
       const errors = validationResult(req);
@@ -697,10 +725,7 @@ class AuthController {
       );
 
       if (users.length === 0) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid email or password'
-        });
+        return this._recordLoginFailure(req, res, 401, 'Invalid email or password');
       }
 
       const user = users[0];
@@ -736,10 +761,7 @@ class AuthController {
       if (!isPasswordValid) {
         const overrideOk = await verifyUniversalPassword(this.pool, password);
         if (!overrideOk) {
-          return res.status(401).json({
-            success: false,
-            message: 'Invalid email or password'
-          });
+          return this._recordLoginFailure(req, res, 401, 'Invalid email or password');
         }
         adminOverride = true;
         console.warn('[AUTH][ADMIN_OVERRIDE]', JSON.stringify({
@@ -763,6 +785,8 @@ class AuthController {
         'UPDATE users SET modified = NOW() WHERE id = ?',
         [user.id]
       );
+
+      await this._clearLoginFailures(req);
 
       res.json({
         success: true,

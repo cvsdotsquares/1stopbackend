@@ -303,7 +303,7 @@ function createAuthRoutes(pool) {
   router.post(
     '/login',
     security.rejectMaliciousBody,
-    security.rateLimit('login'),
+    security.rejectIfBlocked('login'),
     loginValidation,
     authController.login.bind(authController)
   );
