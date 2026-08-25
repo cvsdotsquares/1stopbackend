@@ -31,7 +31,15 @@ function createSecurityGuard(pool) {
         const result = await rateLimitUtil.consume(pool, ip, actionType);
         if (!result.allowed) {
           const retryAfter = result.retryAfterSeconds || 60;
-          console.warn('[SECURITY] rate limited', { ip, actionType, retryAfter });
+          console.warn('[SECURITY] rate limited', {
+            ip,
+            actionType,
+            retryAfter,
+            xff: req.headers['x-forwarded-for'] || null,
+            realIp: req.headers['x-real-ip'] || null,
+            cf: req.headers['cf-connecting-ip'] || null,
+            socket: req.socket?.remoteAddress || null,
+          });
           res.set('Retry-After', String(retryAfter));
           return res.status(429).json({
             success: false,
