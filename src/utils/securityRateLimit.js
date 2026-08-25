@@ -2,7 +2,7 @@ const ACTION_LIMITS = {
   contact_form: { maxAttempts: 3, windowSeconds: 600, blockSeconds: 3600 },
   password_reset: { maxAttempts: 3, windowSeconds: 900, blockSeconds: 3600 },
   register: { maxAttempts: 5, windowSeconds: 900, blockSeconds: 3600 },
-  login: { maxAttempts: 8, windowSeconds: 900, blockSeconds: 900 },
+  login: { maxAttempts: 5, windowSeconds: 900, blockSeconds: 900 },
   verify_otp: { maxAttempts: 8, windowSeconds: 900, blockSeconds: 900 },
   auth_lookup: { maxAttempts: 20, windowSeconds: 900, blockSeconds: 900 },
   abuse: { maxAttempts: 1, windowSeconds: 86400, blockSeconds: 86400 },
@@ -195,10 +195,20 @@ async function block(pool, ip, actionType, blockSeconds) {
   );
 }
 
+async function reset(pool, ip, actionType) {
+  await pool.query(
+    `UPDATE security_rate_limits
+     SET attempts = 0, first_attempt_at = NOW(), last_attempt_at = NOW(), blocked_until = NULL
+     WHERE ip_address = ? AND action_type = ?`,
+    [ip, actionType]
+  );
+}
+
 module.exports = {
   ACTION_LIMITS,
   getLimits,
   consume,
+  reset,
   block,
   isIpBlocked,
 };
