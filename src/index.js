@@ -2,7 +2,7 @@
 require('./loadEnv');
 const express = require('express');
 const mysql = require('mysql2/promise');
-const { getClientIp } = require('./utils/clientIp');
+const { getClientIp, getTrustProxySetting } = require('./utils/clientIp');
 const createAuthRoutes = require('./routes/auth');
 const createCourseRoutes = require('./routes/courses');
 const createBookingRoutes = require('./routes/bookings');
@@ -39,6 +39,7 @@ const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
 const app = express();
+app.set('trust proxy', getTrustProxySetting());
 
 // MySQL pool (uses env vars)
 const pool = mysql.createPool({
