@@ -5,6 +5,7 @@
  *   - threeDS.type=disabled for admin-entered card (no 3DS challenge)
  *   - Optional WORLDPAY_HPP_MOTO_CUSTOMISATION_ID for a card-only HPP channel
  *     (disable Apple Pay / Google Pay in Payment Page Designer)
+ *   - billingAddress prefills cardholder name + billing country GB (UK)
  *
  * Legacy fallback (not recommended): Business Gateway Payment Pages
  *   WORLDPAY_MOTO_INTEGRATION=payment_pages → wcc/purchase + MD5 signature
@@ -360,7 +361,51 @@ function toMinorUnits(amount) {
   return Math.round(Number(amount) * 100);
 }
 
-function buildAccessHppRiskData(payeeName, payeeEmail) {
+const HPP_NAME_MAX = 22;
+
+function splitPersonName(fullName) {
+  const parts = String(fullName || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return { firstName: '', lastName: '' };
+  return {
+    firstName: parts[0].slice(0, HPP_NAME_MAX),
+    lastName:
+      parts.length > 1 ? parts.slice(1).join(' ').slice(0, HPP_NAME_MAX) : '',
+  };
+}
+
+function resolveHppPersonName({ payeeName, firstName, lastName } = {}) {
+  let given = trim(firstName).slice(0, HPP_NAME_MAX);
+  let family = trim(lastName).slice(0, HPP_NAME_MAX);
+  if (!given && !family) {
+    return splitPersonName(payeeName);
+  }
+  return { firstName: given, lastName: family };
+}
+
+/**
+ * Prefill HPP cardholder name + billing country (legacy posted name + country=GB).
+ * Address lines are empty strings (schema minLength 0) so only country is defaulted.
+ */
+function buildAccessHppBillingAddress(nameParts) {
+  const { firstName, lastName } = resolveHppPersonName(nameParts);
+  const billingAddress = {
+    address1: '',
+    address2: '',
+    address3: '',
+    city: '',
+    state: '',
+    postalCode: '',
+    countryCode: 'GB',
+  };
+  if (firstName) billingAddress.firstName = firstName;
+  if (lastName) billingAddress.lastName = lastName;
+  return billingAddress;
+}
+
+function buildAccessHppRiskData(payeeName, payeeEmail, nameParts = {}) {
   const email = trim(payeeEmail);
   if (!email) return null;
 
@@ -368,17 +413,14 @@ function buildAccessHppRiskData(payeeName, payeeEmail) {
     account: { email },
   };
 
-  const parts = String(payeeName || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts[0]) {
-    riskData.transaction = {
-      firstName: parts[0].slice(0, 22),
-    };
-    if (parts.length > 1) {
-      riskData.transaction.lastName = parts.slice(1).join(' ').slice(0, 22);
-    }
+  const { firstName, lastName } = resolveHppPersonName({
+    payeeName,
+    ...nameParts,
+  });
+  if (firstName || lastName) {
+    riskData.transaction = {};
+    if (firstName) riskData.transaction.firstName = firstName;
+    if (lastName) riskData.transaction.lastName = lastName;
   }
 
   return riskData;
@@ -410,6 +452,8 @@ async function createAccessHostedPayment({
   currency,
   description,
   payeeName,
+  payeeFirstName,
+  payeeLastName,
   payeeEmail,
   resultUrls,
   options = {},
@@ -467,8 +511,11 @@ async function createAccessHostedPayment({
   }
 
   // MOTO is admin card-entry; hide change-method UX that surfaces wallets.
+  // Keep cardholder name + billing address editable so prefilled values can be corrected.
   if (options.moto) {
     payload.hostedProperties = {
+      showCardholderName: 'true',
+      showBillingAddress: 'EDIT',
       ...(options.hostedProperties || {}),
       showChangePaymentMethodButton: 'false',
     };
@@ -481,7 +528,14 @@ async function createAccessHostedPayment({
     payload.description = descriptionText.slice(0, 128);
   }
 
-  const riskData = buildAccessHppRiskData(payeeName, payeeEmail);
+  const nameParts = {
+    payeeName,
+    firstName: payeeFirstName,
+    lastName: payeeLastName,
+  };
+  payload.billingAddress = buildAccessHppBillingAddress(nameParts);
+
+  const riskData = buildAccessHppRiskData(payeeName, payeeEmail, nameParts);
   if (riskData) {
     payload.riskData = riskData;
   }

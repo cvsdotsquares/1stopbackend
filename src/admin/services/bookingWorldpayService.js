@@ -197,6 +197,8 @@ async function getBookingWorldpayPayload(pool, session) {
   let totAmount = 0;
   let emailAddress = '';
   let customerName = '';
+  let customerFirstName = '';
+  let customerLastName = '';
   let phoneNumber = '';
 
   for (let i = 0; i < bookingIds.length; i += 1) {
@@ -206,7 +208,9 @@ async function getBookingWorldpayPayload(pool, session) {
       totAmount += calculateAttendeeWorldpayAmount(row, showCancellation);
       if (!emailAddress && row.email) emailAddress = trim(row.email);
       if (!customerName && (row.first_name || row.sur_name)) {
-        customerName = `${trim(row.first_name)} ${trim(row.sur_name)}`.trim();
+        customerFirstName = trim(row.first_name);
+        customerLastName = trim(row.sur_name);
+        customerName = `${customerFirstName} ${customerLastName}`.trim();
       }
       if (!phoneNumber && row.contact1) phoneNumber = trim(row.contact1);
     }
@@ -263,6 +267,8 @@ async function getBookingWorldpayPayload(pool, session) {
       currency,
       description,
       payeeName: customerName,
+      payeeFirstName: customerFirstName,
+      payeeLastName: customerLastName,
       payeeEmail: emailAddress,
       resultUrls: {
         successURL: `${completeUrl}?status=success&cartId=${encodeURIComponent(cartId)}&M_evId=${evId}`,
