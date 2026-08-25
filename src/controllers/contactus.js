@@ -170,9 +170,8 @@ class ContactUsController {
 
           // If message was successfully sent, log it into the database
           if (mailInfo && mailInfo.messageId) {
-            const getIP = require('ipware')().get_ip;
-            const ipInfo = getIP(req);
-            const ipAddress = ipInfo.clientIp || 'unknown';
+            const { getClientIp } = require('../utils/clientIp');
+            const ipAddress = getClientIp(req);
 
             await this.pool.query(`
               INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, ip)
