@@ -1439,3 +1439,58 @@ exports.sendBookingInvoiceEmail = async (pool, options = {}) => {
 
   return emailStatus === 1;
 };
+
+function escapePaymentLinkHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+exports.sendAdminStripePaymentLinkEmail = async ({
+  to,
+  customerName,
+  courseName,
+  amountLabel,
+  paymentUrl,
+  expireMinutes,
+  bookingRefs,
+} = {}) => {
+  const recipient = String(to || '').trim();
+  if (!recipient) {
+    return { sent: false, reason: 'no_recipient' };
+  }
+
+  const greetingName = String(customerName || '').trim() || 'there';
+  const refs = String(bookingRefs || '').trim();
+  const minutes = Math.max(1, Number(expireMinutes) || 1);
+  const subject = `Payment link for your ${courseName || 'course'} booking`;
+  const html = `
+    <p>Hi ${escapePaymentLinkHtml(greetingName)},</p>
+    <p>Please complete payment for your 1 Stop Instruction booking using the link below.</p>
+    ${refs ? `<p>Booking reference: <strong>${escapePaymentLinkHtml(refs)}</strong></p>` : ''}
+    ${amountLabel ? `<p>Amount due: <strong>${escapePaymentLinkHtml(amountLabel)}</strong></p>` : ''}
+    <p>
+      <a href="${escapePaymentLinkHtml(paymentUrl)}" target="_blank" rel="noopener noreferrer">
+        Pay now
+      </a>
+    </p>
+    <p>This link can be used <strong>once</strong> and expires in <strong>${minutes} minute${minutes === 1 ? '' : 's'}</strong>.</p>
+    <p>If the link has expired, please contact us for a new one.</p>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: getMailFrom(),
+      ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+      to: recipient,
+      subject,
+      html,
+    });
+    return { sent: true };
+  } catch (error) {
+    console.error('[ADMIN][STRIPE_LINK][EMAIL]', error.message);
+    return { sent: false, reason: error.message };
+  }
+};

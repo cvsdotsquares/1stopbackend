@@ -60,6 +60,12 @@ function createBookingsRoutes(pool) {
   router.get('/wizard/worldpay/finalize', requireAdminSession, (req, res) =>
     controller.finalizeWizardWorldpay(req, res)
   );
+  router.get('/wizard/stripe-link', requireAdminSession, (req, res) =>
+    controller.getWizardStripeLink(req, res)
+  );
+  router.post('/wizard/stripe-link/cancel', requireAdminSession, (req, res) =>
+    controller.cancelWizardStripeLink(req, res)
+  );
   router.get('/wizard/confirmation', requireAdminSession, (req, res) =>
     controller.getWizardConfirmation(req, res)
   );
