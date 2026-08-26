@@ -687,4 +687,5 @@ module.exports = {
   cancelBookingWorldpay,
   handleBookingWorldpayBrowserComplete,
   getBookingConfirmationDetails,
+  removeLockById,
 };

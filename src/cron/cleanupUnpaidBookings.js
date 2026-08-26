@@ -101,7 +101,8 @@ class BookingCleanupCron {
         FROM bookings b
         WHERE b.status = 0
           AND b.admin_payment_received = 0
-          AND NOT (b.booking_made_by = 'admin' AND b.type_of_book = 'm')
+          AND b.booking_made_by != 'admin'
+          AND NOT (b.booking_made_by = 'moto' AND b.type_of_book = 'm')
           AND b.created < DATE_SUB(?, INTERVAL ? MINUTE)
         ORDER BY b.id ASC
       `, [cleanupAt, timeoutMinutes]);

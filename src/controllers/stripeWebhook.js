@@ -44,18 +44,47 @@ class StripeWebhookController {
           const paymentIntent = event.data.object;
           if (paymentIntent.metadata?.type === 'gift_voucher') {
             await this.handleGiftVoucherPaymentIntent(paymentIntent);
+          } else if (paymentIntent.metadata?.type === 'admin_payment_link') {
+            const {
+              confirmAdminStripePaymentLink,
+            } = require('../admin/services/bookingStripeLinkService');
+            await confirmAdminStripePaymentLink(this.pool, paymentIntent);
           } else {
             await this.handlePaymentSuccess(paymentIntent);
           }
           console.log('✅ Payment intent succeeded');
           break;
+        case 'checkout.session.completed': {
+          const checkoutSession = event.data.object;
+          if (checkoutSession.metadata?.type === 'admin_payment_link') {
+            const {
+              confirmAdminStripePaymentLink,
+            } = require('../admin/services/bookingStripeLinkService');
+            await confirmAdminStripePaymentLink(this.pool, checkoutSession);
+          }
+          break;
+        }
+        case 'checkout.session.expired': {
+          const expiredSession = event.data.object;
+          if (expiredSession.metadata?.type === 'admin_payment_link') {
+            const {
+              expireAdminStripePaymentLink,
+            } = require('../admin/services/bookingStripeLinkService');
+            await expireAdminStripePaymentLink(this.pool, expiredSession);
+          }
+          break;
+        }
         case 'payment_intent.payment_failed':
           console.log('❌ Handling payment failed...');
-          await this.handlePaymentFailed(event.data.object);
+          if (event.data.object?.metadata?.type !== 'admin_payment_link') {
+            await this.handlePaymentFailed(event.data.object);
+          }
           break;
         case 'payment_intent.canceled':
           console.log('❌ Handling payment canceled...');
-          await this.handlePaymentCanceled(event.data.object);
+          if (event.data.object?.metadata?.type !== 'admin_payment_link') {
+            await this.handlePaymentCanceled(event.data.object);
+          }
           break;
         default:
           console.log(`⚠️ Unhandled event type: ${event.type}`);
@@ -75,6 +104,12 @@ class StripeWebhookController {
     // Check if gift voucher
     if (session.metadata?.type === 'gift_voucher') {
       return this.handleGiftVoucherPayment(session);
+    }
+    if (session.metadata?.type === 'admin_payment_link') {
+      const {
+        confirmAdminStripePaymentLink,
+      } = require('../admin/services/bookingStripeLinkService');
+      return confirmAdminStripePaymentLink(this.pool, session);
     }
 
     const { booking_id, booking_ids, course_event_id, spaces, attendees_count } = session.metadata || {};
@@ -168,6 +203,21 @@ class StripeWebhookController {
         }
       }
 
+      const paymentPlaceholders = allBookingIds.map(() => '?').join(',');
+      const [pendingAdminLinks] = await connection.query(
+        `SELECT id FROM booking_payments
+         WHERE booking_id IN (${paymentPlaceholders}) AND payment_type = 'STRIPE_LINK'
+         LIMIT 1`,
+        allBookingIds
+      );
+      if (pendingAdminLinks.length) {
+        await connection.rollback();
+        const {
+          confirmAdminStripePaymentLink,
+        } = require('../admin/services/bookingStripeLinkService');
+        return confirmAdminStripePaymentLink(this.pool, session);
+      }
+
       // Move held spaces to bookings_done on all linked course_events (root + children)
       await lockSiblingEventsForUpdate(connection, courseEventId);
       await applyGroupSpaceDelta(connection, courseEventId, {
@@ -196,11 +246,41 @@ class StripeWebhookController {
         `, [amountForBooking, processedAt, bid]);
         console.log(`[BOOKING STATUS] UPDATE bookings status=1 (CONFIRMED) admin_payment_received=${amountForBooking} | source=controllers/stripeWebhook.js | booking_id=${bid} | stripe_session=${session.id} | payment_intent=${session.payment_intent || 'n/a'}`);
 
-        await connection.query(`
-          INSERT INTO booking_payments
-          (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
-          VALUES (?, 'SALE', ?, ?, 'booking', ?, ?, 0, '', '')
-        `, [bid, session.payment_intent || session.id, amountForBooking, JSON.stringify({ session_id: session.id, payment_status: session.payment_status }), processedAt]);
+        const saleTxnId = session.payment_intent || session.id;
+        const saleResponse = JSON.stringify({
+          session_id: session.id,
+          payment_status: session.payment_status,
+        });
+        const [existingPaymentRows] = await connection.query(
+          `SELECT id FROM booking_payments
+           WHERE booking_id = ?
+           ORDER BY id ASC
+           LIMIT 1`,
+          [bid]
+        );
+        if (existingPaymentRows?.[0]?.id) {
+          await connection.query(
+            `UPDATE booking_payments
+             SET payment_type = 'SALE',
+                 transation_id = ?,
+                 transation_type = 'booking',
+                 amount = ?,
+                 response = ?,
+                 isDelete = 0
+             WHERE id = ?`,
+            [saleTxnId, amountForBooking, saleResponse, existingPaymentRows[0].id]
+          );
+          await connection.query(
+            'DELETE FROM booking_payments WHERE booking_id = ? AND id != ?',
+            [bid, existingPaymentRows[0].id]
+          );
+        } else {
+          await connection.query(`
+            INSERT INTO booking_payments
+            (booking_id, payment_type, transation_id, amount, transation_type, response, created, isDelete, custom_payment_booking_ref, voucher_serilized_response)
+            VALUES (?, 'SALE', ?, ?, 'booking', ?, ?, 0, '', '')
+          `, [bid, saleTxnId, amountForBooking, saleResponse, processedAt]);
+        }
       }
 
       await connection.commit();

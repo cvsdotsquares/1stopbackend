@@ -21,6 +21,10 @@ const {
   getBookingConfirmationDetails,
 } = require('../services/bookingWorldpayService');
 const {
+  getAdminStripePaymentLink,
+  expireAdminStripePaymentLink,
+} = require('../services/bookingStripeLinkService');
+const {
   getBookingView,
   getEditBookingForm,
   updateBooking,
@@ -194,7 +198,9 @@ class BookingsController {
         message:
           data.payment_mode === 'cash'
             ? 'Booking saved successfully'
-            : 'Continue to payment',
+            : data.payment_mode === 'stripe'
+              ? 'Stripe payment link created'
+              : 'Continue to payment',
       });
     } catch (err) {
       const status = err.status || 500;
@@ -357,6 +363,49 @@ class BookingsController {
       return res.status(status).json({
         success: false,
         message: err.message || 'Unable to finalise WorldPay booking',
+      });
+    }
+  }
+
+  async getWizardStripeLink(req, res) {
+    try {
+      const data = await getAdminStripePaymentLink(this.pool, req.session);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][STRIPE_LINK]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load Stripe payment link',
+      });
+    }
+  }
+
+  async cancelWizardStripeLink(req, res) {
+    try {
+      const stored = req.session?.stripePaymentLink || {};
+      const result = await expireAdminStripePaymentLink(
+        this.pool,
+        {
+          checkout_session_id: stored.checkout_session_id,
+          metadata: {
+            type: 'admin_payment_link',
+            booking_ids: (stored.booking_ids || []).join(','),
+          },
+        },
+        req.session
+      );
+      return res.json({
+        success: true,
+        data: result,
+        message: 'Stripe payment link cancelled',
+      });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][STRIPE_LINK][CANCEL]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to cancel Stripe payment link',
       });
     }
   }

@@ -696,7 +696,7 @@ async function saveBookingCompleteCash(pool, bookingId) {
   await sendAdminBookingConfirmationEmail(pool, bookingId);
 }
 
-async function saveBookingRecord(pool, attendee, event, adminId, moto, lockId, session) {
+async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lockId, session) {
   const amount = Number(attendee.course_cost) || 0;
   const paymentReceived = Number(attendee.payment_received) || 0;
   const vatRate = getVatRate(session);
@@ -723,7 +723,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, moto, lockId, s
       event.course_id,
       event.id,
       adminId,
-      moto ? 'm' : 't',
+      paymentMode === 'worldpay' ? 'm' : paymentMode === 'stripe' ? 'o' : 't',
       amount,
       amount,
       vatRate,
@@ -742,7 +742,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, moto, lockId, s
   const bookingId = insertResult.insertId;
   const bookingRef = await saveAttendee(pool, bookingId, attendee);
 
-  if (!moto) {
+  if (paymentMode !== 'worldpay' && paymentMode !== 'stripe') {
     await saveBookingCompleteCash(pool, bookingId);
   }
 
@@ -1199,9 +1199,25 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
     body?.world_payment === 'yes' ||
     body?.BA?.world_payment === 'yes' ||
     body?.BA?.world_payment === true;
+  const stripePayment =
+    body?.stripe_payment === true ||
+    body?.stripe_payment === 'yes' ||
+    body?.BA?.stripe_payment === 'yes' ||
+    body?.BA?.stripe_payment === true;
+
+  if (moto && stripePayment) {
+    const err = new Error(
+      'Choose either WorldPay MOTO or a Stripe payment link, not both'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const paymentMode = stripePayment ? 'stripe' : moto ? 'worldpay' : 'cash';
   const lockId = Number(adminBooking.lock_session?.id) || 0;
   const bookingRefs = [];
   const bookingIds = [];
+  const chargedAttendees = [];
 
   for (const attendee of attendees) {
     const pricing = getPricingForVehicle(
@@ -1217,13 +1233,14 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
       amount_outstanding:
         Number(attendee.amount_outstanding ?? pricing.amount_outstanding) || 0,
     };
+    chargedAttendees.push(payload);
 
     const saved = await saveBookingRecord(
       pool,
       payload,
       event,
       adminId,
-      moto,
+      paymentMode,
       lockId,
       session
     );
@@ -1254,6 +1271,39 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
       booking_refs: bookingRefs,
       next_url: `/admin/bookings/worldpay`,
     };
+  }
+
+  if (stripePayment) {
+    const {
+      createAdminStripePaymentLink,
+      cancelUnpaidAdminStripeBookings,
+    } = require('./bookingStripeLinkService');
+    try {
+      const link = await createAdminStripePaymentLink(pool, session, {
+        bookingIds,
+        bookingRefs,
+        event,
+        attendees: chargedAttendees,
+        showCancellation,
+        lockExpiresAt: getLockExpiryIso(
+          adminBooking.lock_session,
+          adminBooking.lock_countdown
+        ),
+      });
+      return {
+        payment_mode: 'stripe',
+        booking_ids: bookingIds,
+        booking_refs: bookingRefs,
+        payment_url: link.url,
+        expires_at: link.expires_at,
+        next_url: `/admin/bookings/stripe-link`,
+      };
+    } catch (err) {
+      await cancelUnpaidAdminStripeBookings(pool, bookingIds, session, {
+        releaseLock: false,
+      });
+      throw err;
+    }
   }
 
   await addBookingsDone(pool, session, eventId, spaceRequired);

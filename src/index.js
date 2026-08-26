@@ -36,6 +36,7 @@ const createFAQRoutes = require('./routes/faq');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
+const StripeLinkExpiryCron = require('./cron/cleanupExpiredStripeLinks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
 const app = express();
@@ -337,6 +338,10 @@ app.listen(PORT, () => {
   // Start expired lock cleanup cron
   const expiredLockCleanupCron = new ExpiredLockCleanupCron(pool);
   expiredLockCleanupCron.start();
+
+  // Expire unpaid admin Stripe payment links after 20 minutes
+  const stripeLinkExpiryCron = new StripeLinkExpiryCron(pool);
+  stripeLinkExpiryCron.start();
 
   // Start Google contacts sync cron
   const googleContactsSyncCron = new GoogleContactsSyncCron(pool);
