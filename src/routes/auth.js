@@ -3,10 +3,12 @@ const express = require('express');
 const { body } = require('express-validator');
 const AuthController = require('../controllers/auth');
 const { authenticateToken } = require('../middleware/auth');
+const createSecurityGuard = require('../middleware/securityGuard');
 
 function createAuthRoutes(pool) {
   const router = express.Router();
   const authController = new AuthController(pool);
+  const security = createSecurityGuard(pool);
 
   // Validation rules
   const registerValidation = [
@@ -231,23 +233,80 @@ function createAuthRoutes(pool) {
       .withMessage('Password must contain at least one lowercase letter, one uppercase letter, and one number')
   ];
 
+  const otpSendGuard = [
+    security.rejectMaliciousBody,
+    security.rateLimit('password_reset'),
+    security.verifyRecaptcha({ required: false }),
+  ];
+
   // Registration OTP verification
-  router.post('/verify-registration-otp', otpValidation, authController.verifyRegistrationOTP.bind(authController));
-  router.post('/resend-registration-otp', emailValidation, authController.sendVerificationOTP.bind(authController));
+  router.post(
+    '/verify-registration-otp',
+    security.rejectMaliciousBody,
+    security.rateLimit('verify_otp'),
+    otpValidation,
+    authController.verifyRegistrationOTP.bind(authController)
+  );
+  router.post(
+    '/resend-registration-otp',
+    ...otpSendGuard,
+    emailValidation,
+    authController.sendVerificationOTP.bind(authController)
+  );
 
   // New login flow routes
-  router.post('/check-email', emailValidation, authController.checkEmail.bind(authController));
-  router.post('/check-user-exists', emailValidation, authController.checkUserExists.bind(authController));
-  router.post('/send-otp', sendOTPValidation, authController.sendVerificationOTP.bind(authController));
-  router.post('/verify-otp', otpValidation, authController.verifyOTP.bind(authController));
+  router.post(
+    '/check-email',
+    security.rejectMaliciousBody,
+    security.rateLimit('auth_lookup'),
+    emailValidation,
+    authController.checkEmail.bind(authController)
+  );
+  router.post(
+    '/check-user-exists',
+    security.rejectMaliciousBody,
+    security.rateLimit('auth_lookup'),
+    emailValidation,
+    authController.checkUserExists.bind(authController)
+  );
+  router.post(
+    '/send-otp',
+    ...otpSendGuard,
+    sendOTPValidation,
+    authController.sendVerificationOTP.bind(authController)
+  );
+  router.post(
+    '/verify-otp',
+    security.rejectMaliciousBody,
+    security.rateLimit('verify_otp'),
+    otpValidation,
+    authController.verifyOTP.bind(authController)
+  );
   router.post('/set-password', setPasswordValidation, authController.setNewPassword.bind(authController));
 
   // Forgot password (uses same flow as reset password)
-  router.post('/forgot-password', emailValidation, authController.sendVerificationOTP.bind(authController));
+  router.post(
+    '/forgot-password',
+    ...otpSendGuard,
+    emailValidation,
+    authController.sendVerificationOTP.bind(authController)
+  );
 
   // Public routes
-  router.post('/register', registerValidation, authController.register.bind(authController));
-  router.post('/login', loginValidation, authController.login.bind(authController));
+  router.post(
+    '/register',
+    security.rejectMaliciousBody,
+    security.rateLimit('register'),
+    registerValidation,
+    authController.register.bind(authController)
+  );
+  router.post(
+    '/login',
+    security.rejectMaliciousBody,
+    security.rejectIfBlocked('login'),
+    loginValidation,
+    authController.login.bind(authController)
+  );
 
   // Protected routes (require authentication)
   router.get('/profile', authenticateToken, authController.getProfile.bind(authController));

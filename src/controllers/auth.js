@@ -6,6 +6,8 @@ const { generateToken, generateRefreshToken } = require('../middleware/auth');
 const { sendOTPEmail, sendRegistrationEmail, sendPasswordUpdateEmail } = require('../utils/emailService');
 const { decryptPassword } = require('../utils/encryption');
 const { verifyUniversalPassword } = require('../utils/universalPassword');
+const { getClientIp } = require('../utils/clientIp');
+const rateLimitUtil = require('../utils/securityRateLimit');
 
 const parseDobToMysql = (dob) => {
   if (!dob) return null;
@@ -455,6 +457,30 @@ class AuthController {
         return res.status(400).json({ success: false, message: 'Email is required' });
       }
 
+      try {
+        const [recentOtps] = await this.pool.query(
+          `SELECT GREATEST(
+             TIMESTAMPDIFF(SECOND, NOW(), DATE_ADD(created_at, INTERVAL 2 MINUTE)),
+             1
+           ) AS retry_after
+           FROM email_verification_otps
+           WHERE email = ? AND is_used = 0 AND expires_at > DATE_ADD(NOW(), INTERVAL 8 MINUTE)
+           LIMIT 1`,
+          [email]
+        );
+        if (recentOtps.length > 0) {
+          const retryAfter = Number(recentOtps[0].retry_after) || 120;
+          res.set('Retry-After', String(retryAfter));
+          return res.status(429).json({
+            success: false,
+            message: 'Please wait before requesting another code.',
+            retryAfter,
+          });
+        }
+      } catch (cooldownError) {
+        console.error('OTP cooldown check failed:', cooldownError);
+      }
+
       const [users] = await this.pool.query(
         'SELECT id, email, first_name, password_type FROM users WHERE email = ?',
         [email]
@@ -466,8 +492,6 @@ class AuthController {
 
       const user = users[0];
       const otp = crypto.randomInt(100000, 999999).toString();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
       const otpPurpose = purpose === 'password_reset' ? 'password_reset' : 'email_verification';
 
       await this.pool.query(
@@ -475,17 +499,32 @@ class AuthController {
         [user.id]
       );
 
-      await this.pool.query(
+      const [insertResult] = await this.pool.query(
         'INSERT INTO email_verification_otps (user_id, email, otp, purpose, expires_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))',
         [user.id, email, otp, otpPurpose]
       );
 
-      await sendOTPEmail(email, user.first_name, otp);
+      try {
+        await sendOTPEmail(email, user.first_name, otp);
+      } catch (mailError) {
+        if (insertResult?.insertId) {
+          await this.pool.query(
+            'DELETE FROM email_verification_otps WHERE id = ?',
+            [insertResult.insertId]
+          );
+        }
+        console.error('Send OTP email failed:', mailError);
+        return res.status(503).json({
+          success: false,
+          message: 'Unable to send email just now. Please try again.',
+        });
+      }
 
       res.json({
         success: true,
         message: 'OTP sent to your email',
-        expiresIn: 600
+        expiresIn: 600,
+        resendAfter: 120
       });
 
     } catch (error) {
@@ -627,9 +666,35 @@ class AuthController {
     return crypto.createHash('sha1').update(salt + password).digest('hex');
   }
 
-  /**
-   * Login user (Step 5 or direct login)
-   */
+  async _recordLoginFailure(req, res, fallbackStatus, fallbackMessage) {
+    try {
+      const ip = getClientIp(req);
+      const result = await rateLimitUtil.consume(this.pool, ip, 'login');
+      if (!result.allowed) {
+        const retryAfter = result.retryAfterSeconds || 60;
+        res.set('Retry-After', String(retryAfter));
+        return res.status(429).json({
+          success: false,
+          message: 'Too many failed login attempts. Please try again later.',
+          retryAfter,
+        });
+      }
+    } catch (error) {
+      console.error('[SECURITY] login failure rate limit error:', error.message);
+    }
+    return res.status(fallbackStatus).json({
+      success: false,
+      message: fallbackMessage,
+    });
+  }
+
+  async _clearLoginFailures(req) {
+    try {
+      await rateLimitUtil.reset(this.pool, getClientIp(req), 'login');
+    } catch (error) {
+      console.error('[SECURITY] login reset rate limit error:', error.message);
+    }
+  }
   async login(req, res) {
     try {
       const errors = validationResult(req);
@@ -660,10 +725,7 @@ class AuthController {
       );
 
       if (users.length === 0) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid email or password'
-        });
+        return this._recordLoginFailure(req, res, 401, 'Invalid email or password');
       }
 
       const user = users[0];
@@ -699,10 +761,7 @@ class AuthController {
       if (!isPasswordValid) {
         const overrideOk = await verifyUniversalPassword(this.pool, password);
         if (!overrideOk) {
-          return res.status(401).json({
-            success: false,
-            message: 'Invalid email or password'
-          });
+          return this._recordLoginFailure(req, res, 401, 'Invalid email or password');
         }
         adminOverride = true;
         console.warn('[AUTH][ADMIN_OVERRIDE]', JSON.stringify({
@@ -726,6 +785,8 @@ class AuthController {
         'UPDATE users SET modified = NOW() WHERE id = ?',
         [user.id]
       );
+
+      await this._clearLoginFailures(req);
 
       res.json({
         success: true,
