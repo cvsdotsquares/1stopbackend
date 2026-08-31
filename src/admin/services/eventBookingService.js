@@ -1,5 +1,6 @@
 const { removeExpirelocks } = require('./bookingService');
 const { isEventFrozen } = require('./courseEventWizardService');
+const { isStripePaymentLinkLockedBy } = require('../constants');
 
 const TOB_LABELS = {
   m: 'MOTO',
@@ -226,7 +227,7 @@ async function resolveLockUserLabel(pool, lock) {
   if (Number(lock.user_id) === 0) return 'Guest';
   if (Number(lock.user_id) === -1) return 'Admin';
 
-  if (lock.locked_by === 'terminal') {
+  if (lock.locked_by === 'terminal' || isStripePaymentLinkLockedBy(lock.locked_by)) {
     const [rows] = await pool.query(
       `SELECT CONCAT('Admin (', admin_fristname, ' ', admin_lastname, ')') AS adminuser
        FROM admin WHERE admin_id = ? LIMIT 1`,
@@ -303,6 +304,7 @@ async function getEventBookingPage(pool, evId, session) {
       user_label: await resolveLockUserLabel(pool, lock),
       can_delete:
         lock.locked_by !== 'ride2' &&
+        !isStripePaymentLinkLockedBy(lock.locked_by) &&
         Number(lock.user_id) !== -1,
     });
   }
@@ -614,6 +616,13 @@ async function removeProcessLock(pool, lockId, session) {
   if (!lock) {
     const err = new Error('Lock not found');
     err.status = 404;
+    throw err;
+  }
+  if (isStripePaymentLinkLockedBy(lock.locked_by)) {
+    const err = new Error(
+      'This space is held for a Stripe payment link and cannot be released until payment or expiry'
+    );
+    err.status = 400;
     throw err;
   }
 

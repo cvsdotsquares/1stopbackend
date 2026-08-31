@@ -1,4 +1,7 @@
-const { LOCK_EXPIRE_TIME_MINUTES } = require('../constants');
+const {
+  LOCK_EXPIRE_TIME_MINUTES,
+  STRIPE_PAYMENT_LINK_LOCKED_BY,
+} = require('../constants');
 
 /**
  * Port of Booking::removeExpirelocks() from booking.class.php
@@ -16,10 +19,12 @@ async function removeExpirelocks(pool, session) {
     activeClause = ' AND id != ?';
     params.push(activeLockId);
   }
+  params.push(STRIPE_PAYMENT_LINK_LOCKED_BY);
 
   const [locks] = await pool.query(
     `SELECT * FROM lock_bookings
      WHERE NOW() >= (created + INTERVAL ? MINUTE)${activeClause}
+       AND locked_by != ?
        AND id NOT IN (
          SELECT DISTINCT lockid FROM bookings
          WHERE status = 0 AND lockid > 0
