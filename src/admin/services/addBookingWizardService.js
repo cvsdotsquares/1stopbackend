@@ -1,5 +1,5 @@
 const { removeExpirelocks } = require('./bookingService');
-const { LOCK_EXPIRE_TIME_MINUTES } = require('../constants');
+const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../constants');
 const { phpSerialize } = require('../../utils/phpSerialize');
 const {
   checkAdminBookingPromoCode,
@@ -890,10 +890,18 @@ async function removeAllTerminalLocksForAdmin(pool, session, adminId) {
     if (ok) removed += 1;
   }
 
-  // Fallback: still clear the session lock if it was somehow missed above.
+  // Fallback: still clear the session lock if it was somehow missed above,
+  // but never release a Stripe payment-link hold from Home / cancel-wizard.
   if (sessionLockId > 0 && !seen.has(sessionLockId)) {
-    const ok = await removeCurrentLock(pool, session, true);
-    if (ok) removed += 1;
+    const [sessionLockRows] = await pool.query(
+      'SELECT * FROM lock_bookings WHERE id = ? LIMIT 1',
+      [sessionLockId]
+    );
+    const sessionLock = sessionLockRows?.[0];
+    if (!isStripePaymentLinkLockedBy(sessionLock?.locked_by)) {
+      const ok = await removeCurrentLock(pool, session, true);
+      if (ok) removed += 1;
+    }
   }
 
   return { removed };
@@ -1285,10 +1293,6 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
         event,
         attendees: chargedAttendees,
         showCancellation,
-        lockExpiresAt: getLockExpiryIso(
-          adminBooking.lock_session,
-          adminBooking.lock_countdown
-        ),
       });
       return {
         payment_mode: 'stripe',

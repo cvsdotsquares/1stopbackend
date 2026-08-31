@@ -26,7 +26,7 @@ class StripeLinkExpiryCron {
       this.run();
     });
     console.log(
-      `[STRIPE LINK CRON] Scheduled every minute (expires with remaining reservation time)`
+      `[STRIPE LINK CRON] Scheduled every minute (expires 20 minutes after the link is created)`
     );
   }
 }

@@ -45,9 +45,9 @@ async function getInProgressBookings(pool, session) {
       lb.ip_address,
       lb.payment_page_stauts AS paymentStatus,
       CASE
-        WHEN lb.user_id > 0 AND lb.locked_by = 'terminal' THEN CONCAT('Admin (', a.admin_fristname, ' ', a.admin_lastname, ')')
+        WHEN lb.user_id > 0 AND lb.locked_by IN ('terminal', 'Stripe_Payment_link') THEN CONCAT('Admin (', a.admin_fristname, ' ', a.admin_lastname, ')')
         WHEN lb.user_id > 0 AND lb.locked_by = 'online' THEN CONCAT(u.first_name, ' ', u.sur_name)
-        WHEN lb.user_id = -1 AND lb.locked_by = 'terminal' THEN 'Admin'
+        WHEN lb.user_id = -1 AND lb.locked_by IN ('terminal', 'Stripe_Payment_link') THEN 'Admin'
         WHEN lb.user_id = -1 AND lb.locked_by = 'ride2' THEN 'RideTo'
         WHEN (lb.user_id IS NULL OR lb.user_id = 0 OR lb.user_id = '') AND lb.locked_by = 'online' THEN 'Guest'
         ELSE NULL
@@ -55,7 +55,7 @@ async function getInProgressBookings(pool, session) {
     FROM course_events ce
     JOIN lock_bookings lb ON lb.event_id = ce.id AND lb.delete_process = 0
     LEFT JOIN users u ON lb.user_id = u.id AND lb.locked_by = 'online'
-    LEFT JOIN admin a ON lb.user_id = a.admin_id AND lb.locked_by = 'terminal'
+    LEFT JOIN admin a ON lb.user_id = a.admin_id AND lb.locked_by IN ('terminal', 'Stripe_Payment_link')
     LEFT JOIN courses c ON c.id = ce.course_id
     LEFT JOIN locations l ON l.id = ce.location_id
     WHERE ce.current_locks > 0

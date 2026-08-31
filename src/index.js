@@ -37,6 +37,7 @@ const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
 const StripeLinkExpiryCron = require('./cron/cleanupExpiredStripeLinks');
+const StripePaymentLinkLockExpiryCron = require('./cron/cleanupExpiredStripePaymentLinkLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
 const app = express();
@@ -342,6 +343,19 @@ app.listen(PORT, () => {
   // Expire unpaid admin Stripe payment links after 20 minutes
   const stripeLinkExpiryCron = new StripeLinkExpiryCron(pool);
   stripeLinkExpiryCron.start();
+
+  // Delete Stripe payment-link lock_bookings rows 20 minutes after link creation
+  const stripePaymentLinkLockExpiryCron = new StripePaymentLinkLockExpiryCron(pool);
+  stripePaymentLinkLockExpiryCron.start();
+  const {
+    ensureStripePaymentLinkLockedByColumn,
+  } = require('./admin/services/bookingStripeLinkService');
+  ensureStripePaymentLinkLockedByColumn(pool).catch((err) => {
+    console.error(
+      '[STRIPE LINK] Failed to add Stripe_Payment_link to lock_bookings.locked_by:',
+      err.message
+    );
+  });
 
   // Start Google contacts sync cron
   const googleContactsSyncCron = new GoogleContactsSyncCron(pool);

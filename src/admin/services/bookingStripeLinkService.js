@@ -1,20 +1,20 @@
 /**
  * Admin add-booking Stripe payment link.
  *
- * One-time Checkout Session. Expiry follows remaining space-reservation time:
- * remaining minutes are rounded down, then 30 seconds are subtracted for email
- * delivery so the link always dies before the lock banner reaches 00:00.
+ * One-time Checkout Session. The link and the space hold both last 20 minutes
+ * from when the link is created. The lock is retagged as Stripe_Payment_link
+ * so Home navigation and generic lock expiry leave it in place until then.
  */
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { findOrCreateStripeCustomerByEmail } = require('../../utils/stripeCustomer');
 const { sendAdminStripePaymentLinkEmail } = require('../../utils/emailService');
 const { getAdminFrontendBase } = require('./motoPaymentService');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
-const { LOCK_EXPIRE_TIME_MINUTES } = require('../constants');
+const { LOCK_EXPIRE_TIME_MINUTES, STRIPE_PAYMENT_LINK_LOCKED_BY } = require('../constants');
 
 const METADATA_TYPE = 'admin_payment_link';
 const PENDING_PAYMENT_TYPE = 'STRIPE_LINK';
-const EMAIL_DELIVERY_BUFFER_MS = 30 * 1000;
+let stripeLockTypeReady = false;
 
 /**
  * One booking_payments row per booking: reuse the pending STRIPE_LINK row
@@ -93,8 +93,18 @@ function nowMysql() {
 }
 
 function getExpireMinutes() {
-  const parsed = Number(process.env.STRIPE_PAYMENT_LINK_EXPIRE_MINUTES || 20);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+  const parsed = Number(
+    process.env.STRIPE_PAYMENT_LINK_EXPIRE_MINUTES || LOCK_EXPIRE_TIME_MINUTES
+  );
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : LOCK_EXPIRE_TIME_MINUTES;
+}
+
+function computePaymentLinkExpiry() {
+  const quotedMinutes = getExpireMinutes();
+  return {
+    expiresAt: new Date(Date.now() + quotedMinutes * 60 * 1000),
+    quotedMinutes,
+  };
 }
 
 function parseMysqlDateTime(value) {
@@ -112,56 +122,65 @@ function parseMysqlDateTime(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function getLockExpiryDate(session, lockExpiresAt) {
-  if (lockExpiresAt) {
-    const fromArg = new Date(lockExpiresAt);
-    if (!Number.isNaN(fromArg.getTime())) return fromArg;
-  }
-  const adminBooking = session?.adminBooking;
-  const lockCountdown = adminBooking?.lock_countdown;
-  if (lockCountdown) {
-    return new Date(
-      (Number(lockCountdown) + LOCK_EXPIRE_TIME_MINUTES * 60) * 1000
-    );
-  }
-  const created = parseMysqlDateTime(adminBooking?.lock_session?.created);
-  if (created) {
-    return new Date(created.getTime() + LOCK_EXPIRE_TIME_MINUTES * 60 * 1000);
-  }
-  return null;
+function parseEnumValues(typeStr) {
+  const match = String(typeStr || '').match(/^enum\((.*)\)$/i);
+  if (!match) return null;
+  return match[1]
+    .split(',')
+    .map((part) => part.trim().replace(/^'(.*)'$/, '$1').replace(/^"(.*)"$/, '$1'));
 }
 
-/**
- * Remaining lock time, minutes rounded down, then minus 30s for email delivery.
- * quotedMinutes is what we tell the customer; expiresAt is when we actually close.
- */
-function computePaymentLinkExpiry(lockExpiresAt) {
-  const lockMs = lockExpiresAt instanceof Date
-    ? lockExpiresAt.getTime()
-    : new Date(lockExpiresAt).getTime();
-  if (!Number.isFinite(lockMs)) {
-    const err = new Error('Booking reservation time could not be determined');
-    err.status = 400;
-    throw err;
+async function ensureStripePaymentLinkLockedByColumn(pool) {
+  if (stripeLockTypeReady) return;
+  const [cols] = await pool.query("SHOW COLUMNS FROM lock_bookings LIKE 'locked_by'");
+  const col = cols?.[0];
+  if (!col) {
+    stripeLockTypeReady = true;
+    return;
   }
-  const remainingMs = lockMs - Date.now();
-  const quotedMinutes = Math.floor(remainingMs / 60000);
-  if (quotedMinutes < 1) {
-    const err = new Error(
-      'Not enough reservation time left to send a payment link. Start the booking again.'
-    );
-    err.status = 400;
-    throw err;
+  const values = parseEnumValues(col.Type);
+  if (!values) {
+    stripeLockTypeReady = true;
+    return;
   }
-  const expiresAt = new Date(Date.now() + quotedMinutes * 60000 - EMAIL_DELIVERY_BUFFER_MS);
-  if (expiresAt.getTime() <= Date.now()) {
-    const err = new Error(
-      'Not enough reservation time left to send a payment link. Start the booking again.'
-    );
-    err.status = 400;
-    throw err;
+  if (values.includes(STRIPE_PAYMENT_LINK_LOCKED_BY)) {
+    stripeLockTypeReady = true;
+    return;
   }
-  return { expiresAt, quotedMinutes };
+  const next = [...values, STRIPE_PAYMENT_LINK_LOCKED_BY]
+    .map((value) => `'${String(value).replace(/'/g, "''")}'`)
+    .join(',');
+  const nullable = String(col.Null).toUpperCase() === 'YES' ? 'NULL' : 'NOT NULL';
+  const defaultSql =
+    col.Default == null || col.Default === ''
+      ? ''
+      : ` DEFAULT '${String(col.Default).replace(/'/g, "''")}'`;
+  await pool.query(
+    `ALTER TABLE lock_bookings MODIFY COLUMN locked_by ENUM(${next}) ${nullable}${defaultSql}`
+  );
+  stripeLockTypeReady = true;
+}
+
+async function convertLockToStripePaymentLink(pool, session, lockId) {
+  const id = Number(lockId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  await ensureStripePaymentLinkLockedByColumn(pool);
+  await pool.query(
+    `UPDATE lock_bookings
+     SET locked_by = ?, created = NOW(), modified = NOW()
+     WHERE id = ?`,
+    [STRIPE_PAYMENT_LINK_LOCKED_BY, id]
+  );
+  const [rows] = await pool.query(
+    'SELECT * FROM lock_bookings WHERE id = ? LIMIT 1',
+    [id]
+  );
+  const lock = rows?.[0] || null;
+  if (session?.adminBooking && lock) {
+    session.adminBooking.lock_session = lock;
+    session.adminBooking.lock_countdown = Math.floor(Date.now() / 1000);
+  }
+  return lock;
 }
 
 function formatAmountLabel(amount, currency = 'gbp') {
@@ -264,6 +283,7 @@ async function createAdminStripePaymentLink(pool, session, {
     err.status = 400;
     throw err;
   }
+  await ensureStripePaymentLinkLockedByColumn(pool);
 
   const amount = (attendees || []).reduce(
     (sum, attendee) => sum + chargeAmountForAttendee(attendee, showCancellation),
@@ -279,16 +299,17 @@ async function createAdminStripePaymentLink(pool, session, {
   const primary = attendees?.[0] || {};
   const primaryName = `${trim(primary.first_name)} ${trim(primary.sur_name)}`.trim();
   const cartId = (bookingRefs || []).join('-');
-  const lockExpiryDate = getLockExpiryDate(session, lockExpiresAt);
-  if (!lockExpiryDate) {
-    const err = new Error('Booking reservation time could not be determined');
-    err.status = 400;
-    throw err;
-  }
-  const { expiresAt, quotedMinutes } = computePaymentLinkExpiry(lockExpiryDate);
+  const { expiresAt, quotedMinutes } = computePaymentLinkExpiry();
   const adminBase = getAdminFrontendBase();
   const eventId = Number(event?.id) || Number(session?.adminBooking?.eventId) || 0;
-  const lockId = Number(session?.adminBooking?.lock_session?.id) || 0;
+  let lockId = Number(session?.adminBooking?.lock_session?.id) || 0;
+  if (!lockId && bookingIds?.[0]) {
+    const [lockRows] = await pool.query(
+      'SELECT lockid FROM bookings WHERE id = ? LIMIT 1',
+      [bookingIds[0]]
+    );
+    lockId = Number(lockRows?.[0]?.lockid) || 0;
+  }
   const spaces = bookingIds.length;
 
   const attendeeSummary = (attendees || [])
@@ -367,13 +388,14 @@ async function createAdminStripePaymentLink(pool, session, {
     throw err;
   }
 
+  await convertLockToStripePaymentLink(pool, session, lockId);
+
   const createdAt = nowMysql();
   const responseDump = JSON.stringify({
     checkout_session_id: checkoutSession.id,
     url: checkoutSession.url,
     expires_at: expiresAt.toISOString(),
     expire_minutes: quotedMinutes,
-    email_delivery_buffer_seconds: 30,
   });
 
   for (let i = 0; i < bookingIds.length; i += 1) {
@@ -717,6 +739,72 @@ async function expireDueAdminStripePaymentLinks(pool) {
   return { expired };
 }
 
+async function expireDueStripePaymentLinkLocks(pool) {
+  const minutes = getExpireMinutes();
+  const [locks] = await pool.query(
+    `SELECT id
+     FROM lock_bookings
+     WHERE locked_by = ?
+       AND created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+    [STRIPE_PAYMENT_LINK_LOCKED_BY, minutes]
+  );
+
+  if (!locks?.length) return { deleted: 0 };
+
+  let deleted = 0;
+  for (const lock of locks) {
+    const lockId = Number(lock.id);
+    if (!Number.isFinite(lockId) || lockId <= 0) continue;
+
+    const [unpaidRows] = await pool.query(
+      `SELECT id FROM bookings
+       WHERE lockid = ? AND status = 0 AND (admin_payment_received IS NULL OR admin_payment_received = 0)`,
+      [lockId]
+    );
+    const bookingIds = (unpaidRows || [])
+      .map((row) => Number(row.id))
+      .filter(Boolean);
+
+    if (bookingIds.length) {
+      const placeholders = bookingIds.map(() => '?').join(',');
+      const [paymentRows] = await pool.query(
+        `SELECT transation_id
+         FROM booking_payments
+         WHERE booking_id IN (${placeholders})
+           AND payment_type = ?
+           AND isDelete = 0
+         LIMIT 1`,
+        [...bookingIds, PENDING_PAYMENT_TYPE]
+      );
+      const checkoutSessionId = trim(paymentRows?.[0]?.transation_id);
+      const result = await expireAdminStripePaymentLink(pool, {
+        id: checkoutSessionId,
+        checkout_session_id: checkoutSessionId,
+        metadata: {
+          type: METADATA_TYPE,
+          booking_ids: bookingIds.join(','),
+        },
+      });
+      if (result?.cancelled || result?.expired) {
+        deleted += 1;
+        continue;
+      }
+    }
+
+    const [paidRows] = await pool.query(
+      `SELECT id FROM bookings
+       WHERE lockid = ? AND (status = 1 OR admin_payment_received > 0)
+       LIMIT 1`,
+      [lockId]
+    );
+    const revertVehicleCounts = !paidRows?.length;
+    const removed = await removeLockById(pool, lockId, revertVehicleCounts);
+    if (removed) deleted += 1;
+  }
+
+  return { deleted };
+}
+
 module.exports = {
   METADATA_TYPE,
   PENDING_PAYMENT_TYPE,
@@ -727,5 +815,7 @@ module.exports = {
   confirmAdminStripePaymentLink,
   expireAdminStripePaymentLink,
   expireDueAdminStripePaymentLinks,
+  expireDueStripePaymentLinkLocks,
   cancelUnpaidAdminStripeBookings,
+  ensureStripePaymentLinkLockedByColumn,
 };
