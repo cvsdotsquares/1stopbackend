@@ -29,6 +29,9 @@ function createGiftVouchersRoutes(pool) {
   router.get('/:id/print', requireAdminSession, (req, res) =>
     controller.print(req, res)
   );
+  router.post('/:id/resend', requireAdminSession, (req, res) =>
+    controller.resend(req, res)
+  );
   router.patch('/:id/redeem', requireAdminSession, (req, res) =>
     controller.redeem(req, res)
   );

@@ -5,6 +5,7 @@ const {
   updateGiftVoucher,
   deleteGiftVoucher,
   getGiftVoucherPrintData,
+  resendGiftVoucherEmail,
   getVoucherTemplate,
   updateVoucherTemplate,
   getVoucherFormOptions,
@@ -156,6 +157,30 @@ class GiftVouchersController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load gift voucher print data',
+      });
+    }
+  }
+
+  async resend(req, res) {
+    try {
+      const result = await resendGiftVoucherEmail(
+        this.pool,
+        req.params.id,
+        req.body || {}
+      );
+      if (!result.ok) {
+        const status = result.message.includes('not found') ? 404 : 400;
+        return res.status(status).json({
+          success: false,
+          message: result.message,
+        });
+      }
+      return res.json({ success: true, message: result.message });
+    } catch (err) {
+      console.error('[ADMIN][GIFT_VOUCHERS][RESEND]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Message could not be sent',
       });
     }
   }

@@ -227,6 +227,17 @@ function hasAccessCredentials() {
 }
 
 /**
+ * Access WorldPay transactionReference charset:
+ * a-zA-Z0-9-_/!@#$%()*=.:;?[]{}~+  (no spaces; 1–64 chars)
+ */
+const WORLDPAY_TX_REF_DISALLOWED = /[^a-zA-Z0-9\-_\/!@#$%()*=.:;?\[\]{}~+]/g;
+
+function toWorldpayTransactionReference(value) {
+  const compact = trim(value).replace(/\s+/g, '');
+  return compact.replace(WORLDPAY_TX_REF_DISALLOWED, '').slice(0, 64);
+}
+
+/**
  * payment_pages = classic wcc/purchase (current stage / legacy)
  * access_hpp    = Access Hosted Payment Pages (try/access.worldpay.com/payment_pages)
  * auto          = access_hpp if credentials present, else payment_pages
@@ -470,8 +481,15 @@ async function createAccessHostedPayment({
     throw err;
   }
 
+  const transactionReference = toWorldpayTransactionReference(orderId);
+  if (!transactionReference) {
+    const err = new Error('WorldPay transaction reference is missing or invalid');
+    err.status = 400;
+    throw err;
+  }
+
   const payload = {
-    transactionReference: String(orderId),
+    transactionReference,
     merchant: { entity },
     narrative: {
       line1: trim(process.env.WORLDPAY_NARRATIVE || '1 Stop Instruction').slice(
@@ -1325,6 +1343,7 @@ module.exports = {
   getMotoHppCustomisationId,
   hasAccessCredentials,
   createAccessHostedPayment,
+  toWorldpayTransactionReference,
   getAdminFrontendBase,
   getApiPublicBase,
   getWorldpayCurrency,

@@ -12,6 +12,7 @@
  */
 const { phpSerialize } = require('../../utils/phpSerialize');
 const { sendGiftVoucherEmail } = require('../../utils/emailService');
+const { loadAdminSettings } = require('./settingsService');
 const {
   createAccessHostedPayment,
   getAdminFrontendBase,
@@ -73,6 +74,51 @@ function paymentTypeLabel(voucherPaymentType) {
   return 'Terminal';
 }
 
+function publicSiteUrl() {
+  // Voucher chrome images live on the public website (`/images/header-img.jpg`),
+  // not on the Node API. PHP_SITE_URL is often the API in local/staging.
+  for (const key of ['SITE_URL', 'FRONT_SITE_URL']) {
+    const value = process.env[key];
+    if (value && String(value).trim()) {
+      return String(value).trim().replace(/\/+$/, '');
+    }
+  }
+  const php = String(process.env.PHP_SITE_URL || '')
+    .trim()
+    .replace(/\/+$/, '');
+  if (
+    php &&
+    !/localhost|127\.0\.0\.1|:3000|backend/i.test(php)
+  ) {
+    return php;
+  }
+  return 'https://www.1stopinstruction.com';
+}
+
+function voucherTemplateHtml(voucher, template) {
+  const raw = trim(voucher?.template_id);
+  if (raw && !/^\d+$/.test(raw)) return raw;
+  return trim(template?.details) || raw;
+}
+
+async function getPrimaryFranchiseContact(pool) {
+  const [rows] = await pool.query(
+    `SELECT id, franchise_name, telephone, freephone, franchise_email, website
+     FROM franchise
+     WHERE prim_franch = '1' AND isDeleted = '0'
+     LIMIT 1`
+  );
+  const row = rows?.[0];
+  if (row) return row;
+  const [fallback] = await pool.query(
+    `SELECT telephone, freephone, franchise_email, website
+     FROM franchise
+     WHERE payment_directly = '1' AND status = '1' AND isDeleted = '0'
+     LIMIT 1`
+  );
+  return fallback?.[0] || null;
+}
+
 function mapVoucherRow(row) {
   if (!row) return null;
   return {
@@ -88,7 +134,8 @@ function mapVoucherRow(row) {
     voucher_contact: row.voucher_contact || '',
     voucher_email: row.voucher_email || '',
     voucher_payement_type: row.voucher_payement_type || '',
-    template_id: row.template_id,
+    // Legacy stores the voucher-template HTML snapshot in this column.
+    template_id: row.template_id == null ? '' : String(row.template_id),
     franchise_to_paid: Number(row.franchise_to_paid) || 0,
     user_id: Number(row.user_id) || 0,
     status: Number(row.status) || 0,
@@ -232,6 +279,9 @@ async function getVoucherFormOptions(pool) {
       { value: 't', label: 'Terminal (payment received)' },
       { value: 'm', label: 'MOTO' },
     ],
+    template_details: (await getVoucherTemplate(pool)).details || '',
+    default_franchise: await getPrimaryFranchiseContact(pool),
+    site_url: publicSiteUrl(),
   };
 }
 
@@ -325,6 +375,7 @@ async function updateVoucherTemplate(pool, body = {}) {
 function validateCreateBody(body = {}) {
   const required = [
     'subject',
+    'voucher_free_text',
     'voucher_person',
     'voucher_value',
     'purchased_by',
@@ -332,7 +383,10 @@ function validateCreateBody(body = {}) {
     'voucher_email',
   ];
   for (const key of required) {
-    if (!trim(body[key])) {
+    const raw = key === 'voucher_free_text'
+      ? trim(body[key]).replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ')
+      : trim(body[key]);
+    if (!raw) {
       return {
         ok: false,
         message: 'Required fields mark with * can not be left blank',
@@ -366,7 +420,7 @@ async function insertGiftVoucherRow(connection, fields) {
      (bid, voucher_ref, voucher_date, subject, voucher_free_text, voucher_value,
       purchased_by, voucher_contact, voucher_email, voucher_payement_type,
       template_id, created, voucher_person, franchise_to_paid, status, redeem_note, redeemed)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, '', 'No')`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'No')`,
     [
       fields.bid,
       fields.voucher_ref,
@@ -378,6 +432,7 @@ async function insertGiftVoucherRow(connection, fields) {
       fields.voucher_contact,
       fields.voucher_email,
       fields.voucher_payement_type,
+      fields.template_id || '1',
       fields.created,
       fields.voucher_person,
       fields.franchise_to_paid,
@@ -425,7 +480,7 @@ async function insertGiftVoucherPayment(connection, {
   );
 }
 
-async function sendVoucherEmailSafe(pool, voucherId) {
+async function sendVoucherEmailSafe(pool, voucherId, targetEmail) {
   const voucher = await getGiftVoucherById(pool, voucherId);
   if (!voucher) return { success: false };
   try {
@@ -438,6 +493,7 @@ async function sendVoucherEmailSafe(pool, voucherId) {
         voucher_value: voucher.voucher_value,
         voucher_free_text: voucher.voucher_free_text,
         created: voucher.created,
+        targetEmail: trim(targetEmail) || voucher.voucher_email,
       },
       pool
     );
@@ -666,11 +722,13 @@ async function cancelGiftVoucherMotoPayment(pool, body = {}) {
 async function findPendingGiftVoucherByRef(pool, ref) {
   const orderRef = trim(ref);
   if (!orderRef) return null;
+  const compactRef = orderRef.replace(/\s+/g, '');
   const [byRef] = await pool.query(
     `SELECT * FROM gift_voucher
-     WHERE voucher_ref = ? AND status = 0
+     WHERE status = 0
+       AND (voucher_ref = ? OR REPLACE(voucher_ref, ' ', '') = ?)
      LIMIT 1`,
-    [orderRef]
+    [orderRef, compactRef]
   );
   if (byRef?.[0]) return byRef[0];
   if (/^\d+$/.test(orderRef)) {
@@ -878,6 +936,8 @@ async function createGiftVoucher(pool, body = {}) {
     );
 
     const status = voucher_payement_type === 'm' ? 0 : 1;
+    const template = await getVoucherTemplate(pool);
+    const template_id = trim(body.template_id) || template.details || '1';
 
     voucherId = await insertGiftVoucherRow(connection, {
       bid,
@@ -890,6 +950,7 @@ async function createGiftVoucher(pool, body = {}) {
       voucher_contact,
       voucher_email,
       voucher_payement_type,
+      template_id,
       created,
       voucher_person,
       franchise_to_paid: franchiseId,
@@ -1062,8 +1123,21 @@ async function getGiftVoucherPrintData(pool, id) {
     franchise = await getFranchiseForVoucher(pool, voucher.franchise_to_paid);
   }
 
+  let settings = {};
+  try {
+    settings = await loadAdminSettings(pool);
+  } catch (_err) {
+    settings = {};
+  }
+  const primary = await getPrimaryFranchiseContact(pool);
+  const siteUrl = publicSiteUrl();
+  const templateHtml = voucherTemplateHtml(voucher, template);
+
   return {
-    voucher,
+    voucher: {
+      ...voucher,
+      template_html: templateHtml,
+    },
     template: {
       details: template.details,
       gift_option: template.gift_option,
@@ -1078,7 +1152,46 @@ async function getGiftVoucherPrintData(pool, id) {
           website: franchise.website,
         }
       : null,
+    franchise_name: franchise?.franchise_name || '',
+    layout: {
+      site_url: siteUrl,
+      site_email: settings.site_email || '',
+      telephone: primary?.telephone || settings.site_contact || '',
+      freephone: primary?.freephone || '0800 848 2411',
+      header_image: `${siteUrl}/images/header-img.jpg`,
+      logo_image: `${siteUrl}/images/logo.png`,
+      footer_image: `${siteUrl}/images/footer-img.jpg`,
+      contactus_url: `${siteUrl}/contactus.php`,
+      terms_url: `${siteUrl}/termsandconditions.php`,
+    },
   };
+}
+
+async function resendGiftVoucherEmail(pool, id, body = {}) {
+  const voucherId = Number(id);
+  if (!Number.isFinite(voucherId) || voucherId <= 0) {
+    return { ok: false, message: 'Booking/Gift Voucher not found to view' };
+  }
+
+  const existing = await getGiftVoucherById(pool, voucherId);
+  if (!existing) {
+    return { ok: false, message: 'Booking/Gift Voucher not found to view' };
+  }
+
+  const targetEmail = trim(body.resend_email) || existing.voucher_email;
+  if (!targetEmail) {
+    return { ok: false, message: 'No recipient email found for gift voucher email' };
+  }
+
+  const result = await sendVoucherEmailSafe(pool, voucherId, targetEmail);
+  if (!result?.success) {
+    return {
+      ok: false,
+      message: result?.error || 'Message could not be sent',
+    };
+  }
+
+  return { ok: true, message: 'Gift Voucher mail sent successfully' };
 }
 
 async function redeemGiftVoucher(pool, id, body = {}) {
@@ -1125,6 +1238,7 @@ module.exports = {
   updateGiftVoucher,
   deleteGiftVoucher,
   getGiftVoucherPrintData,
+  resendGiftVoucherEmail,
   getVoucherTemplate,
   updateVoucherTemplate,
   getVoucherFormOptions,
