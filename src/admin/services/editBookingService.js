@@ -476,6 +476,216 @@ async function loadUpdateHistory(pool, bookingId) {
   }));
 }
 
+function holdActionLabel(action) {
+  const key = trim(action).toLowerCase();
+  if (key === 'reinstated' || key === 'reinstate') return 'Reinstated';
+  if (key === 'held' || key === 'hold') return 'Placed on hold';
+  return titleCase(key.replace(/_/g, ' ')) || 'Updated';
+}
+
+function historyTypeLabel(type) {
+  const key = trim(type).toLowerCase();
+  if (!key) return 'Updated';
+  if (key === 'held') return 'Placed on hold';
+  if (key === 'reinstated' || key === 'reinstate') return 'Reinstated';
+  return titleCase(key.replace(/_/g, ' '));
+}
+
+function historyTimestamp(value) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function findMatchingHoldEntry(updateRow, holdHistory, usedHoldIds) {
+  const updateMs = historyTimestamp(updateRow.created);
+  const updateType = trim(updateRow.type).toLowerCase();
+
+  return holdHistory.find((hold) => {
+    if (usedHoldIds.has(hold.id)) return false;
+    const holdMs = historyTimestamp(hold.created);
+    if (Math.abs(updateMs - holdMs) > 2000) return false;
+
+    const holdAction = trim(hold.action).toLowerCase();
+    if (updateType === 'held') {
+      return holdAction === 'held' || holdAction === 'hold';
+    }
+    if (updateType === 'reinstated' || updateType === 'reinstate') {
+      return holdAction === 'reinstated' || holdAction === 'reinstate';
+    }
+    return true;
+  });
+}
+
+function mergeBookingHistory(updateHistory, holdHistory) {
+  const usedHoldIds = new Set();
+  const merged = [];
+
+  for (const update of updateHistory || []) {
+    const updateType = trim(update.type).toLowerCase();
+    const isHoldEvent =
+      updateType === 'held' ||
+      updateType === 'reinstated' ||
+      updateType === 'reinstate';
+    const hold = isHoldEvent
+      ? findMatchingHoldEntry(update, holdHistory || [], usedHoldIds)
+      : null;
+
+    if (hold) {
+      usedHoldIds.add(hold.id);
+    }
+
+    merged.push({
+      id: hold ? `hold-${hold.id}` : `update-${update.id}`,
+      created: update.created,
+      created_label: update.created_label,
+      action: hold ? holdActionLabel(hold.action) : historyTypeLabel(update.type),
+      status: update.status,
+      type: update.type || '',
+      from_event_label: hold?.from_event_label || '',
+      to_event_label: hold?.to_event_label || '',
+      notes: hold?.notes || '',
+      admin_name: update.admin_name || hold?.admin_name || 'Admin',
+    });
+  }
+
+  for (const hold of holdHistory || []) {
+    if (usedHoldIds.has(hold.id)) continue;
+    merged.push({
+      id: `hold-${hold.id}`,
+      created: hold.created,
+      created_label: hold.created_label,
+      action: holdActionLabel(hold.action),
+      status: hold.notes
+        ? `${holdActionLabel(hold.action)}${hold.notes ? ` — ${hold.notes}` : ''}`
+        : holdActionLabel(hold.action),
+      type: trim(hold.action).toLowerCase(),
+      from_event_label: hold.from_event_label,
+      to_event_label: hold.to_event_label,
+      notes: hold.notes,
+      admin_name: hold.admin_name,
+    });
+  }
+
+  merged.sort(
+    (a, b) => historyTimestamp(b.created) - historyTimestamp(a.created)
+  );
+  return merged;
+}
+
+function formatUkDate(value) {
+  if (value == null || value === '' || value === '0000-00-00') return 'TBC';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const d = String(value.getDate()).padStart(2, '0');
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const y = value.getFullYear();
+    if (y < 1900) return 'TBC';
+    return `${d}/${m}/${y}`;
+  }
+  const s = String(value);
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!iso) return s;
+  if (iso[1] === '0000') return 'TBC';
+  return `${iso[3]}/${iso[2]}/${iso[1]}`;
+}
+
+function buildHoldEventLabel(courseName, eventDate, locationName) {
+  const parts = [trim(courseName), formatUkDate(eventDate), trim(locationName)].filter(
+    Boolean
+  );
+  return parts.join(' — ') || '—';
+}
+
+async function loadHoldHistory(pool, bookingId) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT h.*,
+              CONCAT(a.admin_fristname, ' ', a.admin_lastname) AS admin_name,
+              fc.course_name AS from_course_name,
+              fl.location_name AS from_location_name,
+              fced.event_date AS from_event_date,
+              tc.course_name AS to_course_name,
+              tl.location_name AS to_location_name,
+              tced.event_date AS to_event_date
+       FROM booking_hold_history h
+       LEFT JOIN admin a ON a.admin_id = h.updated_by_admin_id
+       LEFT JOIN course_events fe ON fe.id = h.from_course_event_id
+       LEFT JOIN courses fc ON fc.id = fe.course_id
+       LEFT JOIN locations fl ON fl.id = fe.location_id
+       LEFT JOIN (
+         SELECT course_event_id, MIN(event_date) AS event_date
+         FROM course_event_dates
+         GROUP BY course_event_id
+       ) fced ON fced.course_event_id = h.from_course_event_id
+       LEFT JOIN course_events te ON te.id = h.to_course_event_id
+       LEFT JOIN courses tc ON tc.id = te.course_id
+       LEFT JOIN locations tl ON tl.id = te.location_id
+       LEFT JOIN (
+         SELECT course_event_id, MIN(event_date) AS event_date
+         FROM course_event_dates
+         GROUP BY course_event_id
+       ) tced ON tced.course_event_id = h.to_course_event_id
+       WHERE h.booking_id = ?
+       ORDER BY h.created DESC`,
+      [bookingId]
+    );
+
+    return (rows || []).map((row) => ({
+      id: row.id,
+      action: row.action,
+      action_label: holdActionLabel(row.action),
+      notes: trim(row.notes),
+      admin_name: trim(row.admin_name) || 'Admin',
+      from_event_label: buildHoldEventLabel(
+        row.from_course_name,
+        row.from_event_date,
+        row.from_location_name
+      ),
+      to_event_label: buildHoldEventLabel(
+        row.to_course_name,
+        row.to_event_date,
+        row.to_location_name
+      ),
+      created: row.created,
+      created_label: formatHistoryTimestamp(row.created),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function getBookingHistory(pool, idParam) {
+  const attendee = await resolveBookingAttendee(pool, idParam);
+  if (!attendee) {
+    const err = new Error('Booking not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const booking = await loadBookingCore(pool, attendee.booking_id);
+  if (!booking) {
+    const err = new Error('Booking not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const [updateHistory, holdHistory] = await Promise.all([
+    loadUpdateHistory(pool, booking.id),
+    loadHoldHistory(pool, booking.id),
+  ]);
+
+  return {
+    booking_id: Number(booking.id),
+    booking_ref: booking.booking_ref || '',
+    attendee_name: `${trim(booking.first_name)} ${trim(booking.sur_name)}`.trim(),
+    course_name: booking.course_name || '',
+    course_abb: booking.course_abb || '',
+    location_name: booking.location_name || '',
+    on_hold: Number(booking.on_hold) === 1,
+    history: mergeBookingHistory(updateHistory, holdHistory),
+  };
+}
+
 async function loadStudentResult(pool, bookingId) {
   const [rows] = await pool.query(
     `SELECT student_daily_report.*,
@@ -545,7 +755,11 @@ async function resolveBookingMadeBy(pool, booking) {
 }
 
 function canEditBooking(booking) {
-  return Number(booking.status) === 1 && Number(booking.refundable) === 0;
+  return (
+    Number(booking.status) === 1 &&
+    Number(booking.refundable) === 0 &&
+    Number(booking.on_hold || 0) !== 1
+  );
 }
 
 function resolveCustomerName(booking) {
@@ -577,6 +791,12 @@ function buildBookingPayload(booking, dates, extras = {}) {
     status: Number(booking.status),
     refundable: Number(booking.refundable),
     can_edit: canEditBooking(booking),
+    on_hold: Number(booking.on_hold) === 1,
+    can_hold:
+      Number(booking.status) === 1 &&
+      Number(booking.refundable) === 0 &&
+      Number(booking.on_hold || 0) !== 1,
+    can_reinstate: Number(booking.on_hold) === 1,
     type_of_book: booking.type_of_book,
     type_of_book_label: TOB_LABELS[booking.type_of_book] || booking.type_of_book,
     customer_name: resolveCustomerName(booking),
@@ -1181,6 +1401,7 @@ async function updateBooking(pool, idParam, body, adminId, session) {
 
 module.exports = {
   getBookingView,
+  getBookingHistory,
   getEditBookingForm,
   updateBooking,
   resolveBookingAttendee,

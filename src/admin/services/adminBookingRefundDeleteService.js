@@ -90,6 +90,7 @@ async function buildCourseInfo(connection, booking) {
 
 async function restoreSeatCounts(connection, booking, vehicleType) {
   if (Number(booking.status) !== 1) return;
+  if (Number(booking.on_hold) === 1) return;
 
   const eventId = Number(booking.course_event_id);
   const frozen = await isEventFrozen(connection, eventId);

@@ -267,6 +267,7 @@ async function getDailyItinerary(pool, dayParam) {
          AND course_event_dates.event_date = ?
        LEFT JOIN courses ON courses.id = bookings.course_id
        WHERE bookings.status = 1
+         AND IFNULL(bookings.on_hold, 0) = 0
        ORDER BY course_event_dates.event_start_time ASC, booking_attendees.first_name ASC`,
       [day]
     ).then(([rows]) => rows || []),

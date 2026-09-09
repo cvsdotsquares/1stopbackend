@@ -226,7 +226,7 @@ class BookingStatusManager {
          COUNT(CASE WHEN b.status = 1 THEN 1 END) AS confirmed_bookings,
          COUNT(CASE WHEN b.status = 2 THEN 1 END) AS refunded_bookings,
          COUNT(CASE WHEN b.status = 5 THEN 1 END) AS moved_bookings,
-         SUM(CASE WHEN b.status IN (0, 1) THEN b.spaces ELSE 0 END) AS active_spaces
+         SUM(CASE WHEN b.status IN (0, 1) AND IFNULL(b.on_hold, 0) = 0 THEN b.spaces ELSE 0 END) AS active_spaces
        FROM course_events ce
        LEFT JOIN bookings b ON ce.id = b.course_event_id
        WHERE ce.id = ?
@@ -249,7 +249,7 @@ class BookingStatusManager {
          ce.bookings_done,
          ce.current_locks,
          (ce.booking_limit - ce.bookings_done - ce.current_locks) AS spaces_available,
-         COALESCE(SUM(CASE WHEN b.status IN (0, 1) AND b.id != ? THEN b.spaces ELSE 0 END), 0) AS used_spaces
+         COALESCE(SUM(CASE WHEN b.status IN (0, 1) AND IFNULL(b.on_hold, 0) = 0 AND b.id != ? THEN b.spaces ELSE 0 END), 0) AS used_spaces
        FROM course_events ce
        LEFT JOIN bookings b ON ce.id = b.course_event_id
        WHERE ce.id = ?
