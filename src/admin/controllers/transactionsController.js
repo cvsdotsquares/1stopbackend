@@ -17,6 +17,10 @@ class TransactionsController {
           status_scr: req.query.status_scr,
           from_scr: req.query.from_scr,
           to_scr: req.query.to_scr,
+          tob_scr: req.query.tob_scr,
+          amount_scr: req.query.amount_scr,
+          amount_from_scr: req.query.amount_from_scr,
+          amount_to_scr: req.query.amount_to_scr,
         },
       });
       return res.json({ success: true, data });
