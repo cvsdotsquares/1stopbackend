@@ -59,10 +59,13 @@ function mapPromoRow(row) {
     p_c_discount_type: row.p_c_discount_type || 'pounds_off',
     p_c_course: Number(row.p_c_course) || 0,
     p_c_course_id: Number(row.p_c_course_id) || 0,
+    course_name: row.course_name || '',
     p_c_franchise: Number(row.p_c_franchise) || 0,
     p_c_franchise_id: Number(row.p_c_franchise_id) || 0,
+    franchise_name: row.franchise_name || '',
     p_c_location: Number(row.p_c_location) || 0,
     p_c_location_id: Number(row.p_c_location_id) || 0,
+    location_name: row.location_name || '',
     p_c_min_booking: Number(row.p_c_min_booking) || 0,
     p_c_for: row.p_c_for || 'anyone',
     p_c_days: Number(row.p_c_days) || 0,
@@ -272,10 +275,10 @@ async function listPromos(pool, { page = 1, searchterm = {} } = {}) {
   const offset = (pageNum - 1) * RECORDS_PER_PAGE;
   const nameScr = trim(searchterm.name_scr);
 
-  let where = 'WHERE isDeleted = 0';
+  let where = 'WHERE promos.isDeleted = 0';
   const params = [];
   if (nameScr) {
-    where += ' AND (promo_code LIKE ? OR promo_description LIKE ?)';
+    where += ' AND (promos.promo_code LIKE ? OR promos.promo_description LIKE ?)';
     params.push(`%${nameScr}%`, `%${nameScr}%`);
   }
 
@@ -286,7 +289,17 @@ async function listPromos(pool, { page = 1, searchterm = {} } = {}) {
   const total = Number(countRows?.[0]?.total) || 0;
 
   const [rows] = await pool.query(
-    `SELECT * FROM promos ${where} ORDER BY promo_code ASC LIMIT ?, ?`,
+    `SELECT promos.*,
+            courses.course_name AS course_name,
+            franchise.franchise_name AS franchise_name,
+            locations.location_name AS location_name
+     FROM promos
+     LEFT JOIN courses ON courses.id = promos.p_c_course_id
+     LEFT JOIN franchise ON franchise.id = promos.p_c_franchise_id
+     LEFT JOIN locations ON locations.id = promos.p_c_location_id
+     ${where}
+     ORDER BY promos.promo_code ASC
+     LIMIT ?, ?`,
     [...params, offset, RECORDS_PER_PAGE]
   );
 

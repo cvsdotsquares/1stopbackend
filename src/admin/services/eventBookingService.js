@@ -157,6 +157,9 @@ function showDepositCancellationWarning(event, dates) {
 }
 
 function deriveBookingDisplayStatus(booking) {
+  if (Number(booking.on_hold) === 1) {
+    return 'On Hold';
+  }
   if (Number(booking.status) === 1 && Number(booking.refundable) === 0) {
     return 'Confirmed';
   }
@@ -312,7 +315,8 @@ async function getEventBookingPage(pool, evId, session) {
   const [bookingRows] = await pool.query(
     `SELECT total_amount, payment_due, refundable, booking_ref,
             first_name, sur_name, type_of_book, spaces, status,
-            bookings.created, bookings.id, booking_id, vehicle_type
+            bookings.created, bookings.id, booking_id, vehicle_type,
+            IFNULL(bookings.on_hold, 0) AS on_hold
      FROM bookings
      LEFT JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
      WHERE course_event_id = ? AND bookings.status = 1
@@ -350,11 +354,22 @@ async function getEventBookingPage(pool, evId, session) {
       created_label: formatBookingCreated(row.created),
       total_amount: row.total_amount,
       payment_due: row.payment_due,
+      on_hold: Number(row.on_hold) === 1,
       can_edit:
-        Number(row.status) === 1 && Number(row.refundable) === 0,
-      can_refund: Number(row.refundable) === 1,
+        Number(row.status) === 1 &&
+        Number(row.refundable) === 0 &&
+        Number(row.on_hold) !== 1,
+      can_refund:
+        Number(row.refundable) === 1 && Number(row.on_hold) !== 1,
       can_delete:
-        Number(row.status) === 1 && Number(row.refundable) === 0,
+        Number(row.status) === 1 &&
+        Number(row.refundable) === 0 &&
+        Number(row.on_hold) !== 1,
+      can_hold:
+        Number(row.status) === 1 &&
+        Number(row.refundable) === 0 &&
+        Number(row.on_hold) !== 1,
+      can_reinstate: Number(row.on_hold) === 1,
     });
   }
 

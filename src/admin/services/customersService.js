@@ -718,7 +718,8 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
         booking_attendees.contact3,
         booking_attendees.license_number,
         courses.course_abb,
-        course_event_dates.event_date AS course_date
+        course_event_dates.event_date AS course_date,
+        IFNULL(bookings.on_hold, 0) AS on_hold
      ${fromJoin}
      ${where}
      ORDER BY booking_attendees.id DESC
@@ -754,6 +755,7 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
       attendee_name: `${trim(row.first_name)} ${trim(row.sur_name)}`.trim(),
       course_abb: row.course_abb || '',
       course_date: formatUkDate(row.course_date),
+      on_hold: Number(row.on_hold) === 1,
       result: resultLabel,
       license_number: row.license_number || '',
       email: row.email || '',
@@ -928,6 +930,7 @@ async function listMemberBookings(pool, id) {
     `SELECT bookings.id,
             COALESCE(booking_attendees.booking_ref, CONCAT('1SRC', bookings.id)) AS booking_ref,
             bookings.status,
+            IFNULL(bookings.on_hold, 0) AS on_hold,
             bookings.created,
             courses.course_abb,
             courses.course_name
@@ -948,6 +951,7 @@ async function listMemberBookings(pool, id) {
         id: Number(row.id),
         booking_ref: row.booking_ref || '',
         status: Number(row.status),
+        on_hold: Number(row.on_hold) === 1,
         course_abb: row.course_abb || '',
         course_name: row.course_name || '',
         created: row.created,

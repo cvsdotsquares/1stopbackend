@@ -18,6 +18,7 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
       `SELECT
          b.id, b.course_id, b.course_event_id, b.total_amount,
          b.payment_due, b.vat, b.total_fees, b.type_of_book, b.refundable,
+         IFNULL(b.on_hold, 0) AS on_hold,
          ba.booking_ref, ba.email
        FROM bookings b
        JOIN booking_attendees ba ON b.id = ba.booking_id
@@ -32,6 +33,9 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     }
 
     const booking = bookings[0];
+    if (Number(booking.on_hold) === 1) {
+      return { sent: false, reason: 'booking_on_hold' };
+    }
     const resendMode = Number(options.resendMode) || 0;
     const overrideEmail = String(options.overrideEmail || '').trim();
     const attendeeEmail = String(booking.email || '').trim();
@@ -195,6 +199,13 @@ async function sendAdminBookingFeedbackEmail(pool, bookingId, options = {}) {
   if (!Number.isFinite(id) || id <= 0) return { sent: false, reason: 'invalid_id' };
 
   try {
+    const [holdRows] = await pool.query(
+      'SELECT IFNULL(on_hold, 0) AS on_hold FROM bookings WHERE id = ? LIMIT 1',
+      [id]
+    );
+    if (Number(holdRows?.[0]?.on_hold) === 1) {
+      return { sent: false, reason: 'booking_on_hold' };
+    }
     const result = await sendBookingFeedbackEmail(pool, id, options);
     if (result?.sent) {
       console.log(`[ADMIN][BOOKING][EMAIL] Feedback sent for booking ${id}`);
