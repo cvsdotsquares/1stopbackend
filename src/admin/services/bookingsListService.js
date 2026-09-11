@@ -1,3 +1,5 @@
+const { isEventDatePassed } = require('./adminBookingHoldService');
+
 const RECORDS_PER_PAGE = 10;
 
 const TOB_LABELS = {
@@ -132,7 +134,16 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
     LEFT JOIN course_events ON course_events.id = bookings.course_event_id
     LEFT JOIN locations ON locations.id = course_events.location_id
     LEFT JOIN (
-      SELECT course_event_id, MIN(event_date) AS event_date
+      SELECT
+        course_event_id,
+        MIN(event_date) AS event_date,
+        MAX(
+          CASE
+            WHEN event_date > '1900-01-01'
+             AND event_date NOT IN ('1111-11-11', '0000-00-00')
+            THEN event_date
+          END
+        ) AS latest_event_date
       FROM course_event_dates
       GROUP BY course_event_id
     ) AS course_event_dates
@@ -163,7 +174,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
         courses.course_name,
         courses.course_abb,
         locations.location_name,
-        course_event_dates.event_date AS course_date
+        course_event_dates.event_date AS course_date,
+        course_event_dates.latest_event_date
      ${fromJoin}
      ${where}
      ORDER BY bookings.created DESC, bookings.id DESC
@@ -171,7 +183,9 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
     [...params, offset, RECORDS_PER_PAGE]
   );
 
-  const items = (rows || []).map((row) => ({
+  const items = (rows || []).map((row) => {
+    const eventDatePassed = isEventDatePassed(row.latest_event_date);
+    return {
     id: Number(row.id),
     course_event_id: Number(row.course_event_id) || 0,
     booking_ref: row.booking_ref || '',
@@ -204,9 +218,11 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
     can_hold:
       Number(row.status) === 1 &&
       Number(row.refundable) === 0 &&
-      Number(row.on_hold) !== 1,
+      Number(row.on_hold) !== 1 &&
+      !eventDatePassed,
     can_reinstate: Number(row.on_hold) === 1,
-  }));
+  };
+  });
 
   return {
     items,
