@@ -4,8 +4,10 @@
  */
 const { isEventFrozen } = require('./courseEventWizardService');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
+const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
 
 const TBC_DATE = '0000-00-00';
+const INVALID_EVENT_DATES = new Set([TBC_DATE, '1111-11-11']);
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -21,11 +23,48 @@ function isOnHold(booking) {
   return Number(booking?.on_hold) === 1;
 }
 
-function canHoldBooking(booking) {
+function isValidComparableEventDate(value) {
+  const key = toMysqlDateKey(value);
+  return Boolean(key && key > '1900-01-01' && !INVALID_EVENT_DATES.has(key));
+}
+
+function getTodayDateKey() {
+  return toMysqlDateKey(new Date());
+}
+
+function isEventDatePassed(latestEventDate, todayKey = getTodayDateKey()) {
+  if (!isValidComparableEventDate(latestEventDate)) return false;
+  return toMysqlDateKey(latestEventDate) < todayKey;
+}
+
+function getLatestEventDateFromRows(dateRows) {
+  let latest = '';
+  for (const row of dateRows || []) {
+    const key = toMysqlDateKey(row?.event_date);
+    if (!isValidComparableEventDate(key)) continue;
+    if (!latest || key > latest) latest = key;
+  }
+  return latest;
+}
+
+async function loadLatestEventDate(connection, courseEventId) {
+  const [rows] = await connection.query(
+    `SELECT MAX(ced.event_date) AS latest_event_date
+     FROM course_event_dates ced
+     WHERE ced.course_event_id = ?
+       AND ced.event_date > '1900-01-01'
+       AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')`,
+    [courseEventId]
+  );
+  return toMysqlDateKey(rows?.[0]?.latest_event_date);
+}
+
+function canHoldBooking(booking, { eventDatePassed = false } = {}) {
   return (
     Number(booking?.status) === 1 &&
     Number(booking?.refundable) === 0 &&
-    !isOnHold(booking)
+    !isOnHold(booking) &&
+    !eventDatePassed
   );
 }
 
@@ -228,7 +267,18 @@ async function holdBooking(pool, bookingIdParam, adminId = 0, options = {}) {
     await connection.beginTransaction();
     const booking = await loadBooking(connection, bookingId);
     if (!booking) throw httpError('Booking not found', 404);
-    if (!canHoldBooking(booking)) {
+
+    const latestEventDate = await loadLatestEventDate(
+      connection,
+      Number(booking.course_event_id)
+    );
+    const eventDatePassed = isEventDatePassed(latestEventDate);
+    if (eventDatePassed) {
+      throw httpError(
+        'Cannot place a booking on hold after the course date has passed'
+      );
+    }
+    if (!canHoldBooking(booking, { eventDatePassed })) {
       throw httpError('This booking cannot be placed on hold');
     }
 
@@ -482,15 +532,40 @@ async function reinstateBooking(pool, bookingIdParam, adminId = 0, options = {})
     });
 
     await connection.commit();
+
+    let confirmationEmailSent = false;
+    try {
+      const emailResult = await sendAdminBookingConfirmationEmail(pool, bookingId, {
+        logType: 'Updated Booking Confirmation',
+      });
+      confirmationEmailSent = Boolean(emailResult?.sent);
+      if (!confirmationEmailSent) {
+        console.warn(
+          `[ADMIN][BOOKING][REINSTATE] confirmation email not sent for booking ${bookingId}: ${emailResult?.reason || 'unknown'}`
+        );
+      }
+    } catch (emailError) {
+      console.error(
+        `[ADMIN][BOOKING][REINSTATE] confirmation email failed for booking ${bookingId}:`,
+        emailError
+      );
+    }
+
+    const baseMessage = moved
+      ? 'Booking reinstated onto the selected course date.'
+      : 'Booking reinstated. Course capacity has been reserved again.';
+    const emailSuffix = confirmationEmailSent
+      ? ' An updated booking confirmation has been emailed to the attendee.'
+      : '';
+
     return {
       booking_id: bookingId,
       course_event_id: targetEventId,
       previous_event_id: fromEventId,
       on_hold: 0,
       moved,
-      message: moved
-        ? 'Booking reinstated onto the selected course date.'
-        : 'Booking reinstated. Course capacity has been reserved again.',
+      confirmation_email_sent: confirmationEmailSent,
+      message: `${baseMessage}${emailSuffix}`,
     };
   } catch (err) {
     await connection.rollback();
@@ -502,6 +577,8 @@ async function reinstateBooking(pool, bookingIdParam, adminId = 0, options = {})
 
 module.exports = {
   isOnHold,
+  isEventDatePassed,
+  getLatestEventDateFromRows,
   canHoldBooking,
   canReinstateBooking,
   holdBooking,

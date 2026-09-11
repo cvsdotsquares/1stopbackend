@@ -1,5 +1,9 @@
 const { removeExpirelocks } = require('./bookingService');
 const { isEventFrozen } = require('./courseEventWizardService');
+const {
+  getLatestEventDateFromRows,
+  isEventDatePassed,
+} = require('./adminBookingHoldService');
 const { isStripePaymentLinkLockedBy } = require('../constants');
 
 const TOB_LABELS = {
@@ -287,6 +291,7 @@ async function getEventBookingPage(pool, evId, session) {
     [eventId]
   );
   const dates = buildEventDatesMap(dateRows);
+  const eventDatePassed = isEventDatePassed(getLatestEventDateFromRows(dateRows));
 
   const frozen = await getFrozenData(pool, eventId);
   const isFrozen = Boolean(frozen);
@@ -368,7 +373,8 @@ async function getEventBookingPage(pool, evId, session) {
       can_hold:
         Number(row.status) === 1 &&
         Number(row.refundable) === 0 &&
-        Number(row.on_hold) !== 1,
+        Number(row.on_hold) !== 1 &&
+        !eventDatePassed,
       can_reinstate: Number(row.on_hold) === 1,
     });
   }

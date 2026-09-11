@@ -3,6 +3,10 @@
  */
 const { isEventFrozen } = require('./courseEventWizardService');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
+const {
+  getLatestEventDateFromRows,
+  isEventDatePassed,
+} = require('./adminBookingHoldService');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
 
 const TBC_DATE = '0000-00-00';
@@ -795,7 +799,8 @@ function buildBookingPayload(booking, dates, extras = {}) {
     can_hold:
       Number(booking.status) === 1 &&
       Number(booking.refundable) === 0 &&
-      Number(booking.on_hold || 0) !== 1,
+      Number(booking.on_hold || 0) !== 1 &&
+      !extras.eventDatePassed,
     can_reinstate: Number(booking.on_hold) === 1,
     type_of_book: booking.type_of_book,
     type_of_book_label: TOB_LABELS[booking.type_of_book] || booking.type_of_book,
@@ -885,6 +890,7 @@ async function getBookingView(pool, idParam) {
     [booking.course_event_id]
   );
   const dates = buildEventDatesMap(dateRows);
+  const eventDatePassed = isEventDatePassed(getLatestEventDateFromRows(dateRows));
 
   const [updateHistory, studentResult, promo, bookingMadeBy] = await Promise.all([
     loadUpdateHistory(pool, booking.id),
@@ -898,6 +904,7 @@ async function getBookingView(pool, idParam) {
     student_result: studentResult,
     promo,
     booking_made_by_label: bookingMadeBy,
+    eventDatePassed,
   });
 }
 
