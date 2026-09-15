@@ -350,12 +350,9 @@ async function expirePromos(pool) {
   );
 }
 
-async function getCurrentLocksTotal(pool) {
-  const [rows] = await pool.query(
-    'SELECT SUM(current_locks) AS total FROM course_events WHERE current_locks > 0'
-  );
-  const total = rows?.[0]?.total;
-  return total != null ? Number(total) : 0;
+async function getCurrentLocksTotal(pool, session = null) {
+  const { getActiveInProgressLockCount } = require('./inProgressBookingsService');
+  return getActiveInProgressLockCount(pool, session);
 }
 
 function buildCurrentLockCountHtml(total) {
