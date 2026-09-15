@@ -24,6 +24,21 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+function parseMoneyFilter(value) {
+  const raw = trim(value).replace(/^£/, '');
+  if (!raw) return null;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : null;
+}
+
+const TOB_FILTER_OPTIONS = [
+  { value: '', label: 'All types' },
+  { value: 'o', label: 'Online' },
+  { value: 't', label: 'Terminal' },
+  { value: 'm', label: 'MOTO' },
+  { value: 'r', label: 'RideTo' },
+];
+
 function parseExtraInfo(raw) {
   if (raw == null || raw === '') return null;
   if (typeof raw === 'object') return raw;
@@ -144,6 +159,35 @@ function buildListWhere(searchterm = {}) {
   if (toScr) {
     whereParts.push('booking_payments.created < DATE_ADD(?, INTERVAL 1 DAY)');
     params.push(toScr);
+  }
+
+  const tobScr = trim(searchterm.tob_scr).toLowerCase();
+  if (tobScr) {
+    const label = TOB_LABELS[tobScr] || '';
+    whereParts.push(`(
+      bookings.type_of_book = ?
+      OR booking_payments.payment_type = ?
+      OR LOWER(booking_payments.payment_type) = LOWER(?)
+    )`);
+    params.push(tobScr, tobScr, label);
+  }
+
+  const exactAmount = parseMoneyFilter(searchterm.amount_scr);
+  const amountFrom = parseMoneyFilter(searchterm.amount_from_scr);
+  const amountTo = parseMoneyFilter(searchterm.amount_to_scr);
+
+  if (exactAmount != null) {
+    whereParts.push('booking_payments.amount = ?');
+    params.push(exactAmount);
+  } else {
+    if (amountFrom != null) {
+      whereParts.push('booking_payments.amount >= ?');
+      params.push(amountFrom);
+    }
+    if (amountTo != null) {
+      whereParts.push('booking_payments.amount <= ?');
+      params.push(amountTo);
+    }
   }
 
   return {
@@ -370,6 +414,10 @@ async function listTransactions(pool, { page = 1, searchterm = {} } = {}) {
       status_scr: trim(searchterm.status_scr),
       from_scr: trim(searchterm.from_scr),
       to_scr: trim(searchterm.to_scr),
+      tob_scr: trim(searchterm.tob_scr),
+      amount_scr: trim(searchterm.amount_scr),
+      amount_from_scr: trim(searchterm.amount_from_scr),
+      amount_to_scr: trim(searchterm.amount_to_scr),
     },
     statusOptions: [
       { value: '', label: 'All' },
@@ -377,6 +425,7 @@ async function listTransactions(pool, { page = 1, searchterm = {} } = {}) {
       { value: '0', label: 'Refunded' },
       { value: '2', label: 'Sale' },
     ],
+    typeOptions: TOB_FILTER_OPTIONS,
   };
 }
 
