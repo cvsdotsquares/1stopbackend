@@ -6,7 +6,6 @@ const { getClientIp, getTrustProxySetting } = require('./utils/clientIp');
 const createAuthRoutes = require('./routes/auth');
 const createCourseRoutes = require('./routes/courses');
 const createBookingRoutes = require('./routes/bookings');
-const createDatabaseRoutes = require('./routes/database');
 const createCMSRoutes = require('./routes/cms');
 const createCMSPagesRoutes = require('./routes/cmspages');
 const createHomepageRoutes = require('./routes/homepage');
@@ -137,7 +136,6 @@ app.get('/db-test', async (req, res) => {
 app.use('/api/auth', createAuthRoutes(pool));
 app.use('/api/courses', createCourseRoutes(pool));
 app.use('/api/bookings', createBookingRoutes(pool));
-app.use('/api/database', createDatabaseRoutes(pool));
 app.use('/api/cms', createCMSRoutes(pool));
 app.use('/api/cmspages', createCMSPagesRoutes(pool));
 app.use('/api/homepage', createHomepageRoutes(pool));
