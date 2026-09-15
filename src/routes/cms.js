@@ -90,6 +90,13 @@ module.exports = (pool) => {
   // Public CMS Routes (No authentication required)
   
   /**
+   * @route GET /api/cms/homepage
+   * @desc Get homepage data with featured content
+   * @access Public
+   */
+  router.get('/homepage', cmsController.getHomepage.bind(cmsController));
+
+  /**
    * @route GET /api/cms/pages
    * @desc Get all pages with pagination and filtering
    * @access Public
@@ -102,6 +109,13 @@ module.exports = (pool) => {
    * @access Public
    */
   router.get('/pages/:identifier', cmsController.getPage.bind(cmsController));
+
+  /**
+   * @route GET /api/cms/page/slug/:slug
+   * @desc Get complete page content by slug with SEO data and related pages
+   * @access Public
+   */
+  router.get('/page/slug/:slug', cmsController.getPageBySlug.bind(cmsController));
 
   /**
    * @route GET /api/cms/testimonials

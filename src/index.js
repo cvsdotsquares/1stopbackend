@@ -2,30 +2,43 @@
 require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
+const { getClientIp, getTrustProxySetting } = require('./utils/clientIp');
 const createAuthRoutes = require('./routes/auth');
 const createCourseRoutes = require('./routes/courses');
 const createBookingRoutes = require('./routes/bookings');
-const createDatabaseRoutes = require('./routes/database');
 const createCMSRoutes = require('./routes/cms');
+const createCMSPagesRoutes = require('./routes/cmspages');
+const createHomepageRoutes = require('./routes/homepage');
 const BookingStatusManager = require('./middleware/bookingStatusManager');
-
+const createContactUsRoutes = require('./routes/contactus');
+const createSearchRoutes = require('./routes/search');
+const locationCourseRoutes = require('./routes/locationcourse');
+const allLocationsRoutes = require('./routes/alllocation');
+const pageMenuRoutes = require('./routes/pagemenu');
+const dynamicDataRoutes = require('./routes/dynamicData');
+const createPreBookingRoutes = require('./routes/preBooking');
+const bookingFlowRoutes = require('./routes/bookingFlow');
+const createHelperRoutes = require('./routes/helper');
+const createPriceCalculationRoutes = require('./routes/priceCalculation');
+// const createManualPaymentRoutes = require('./routes/manualPayment');
+const createDashboardRoutes = require('./routes/dashboard');
+const createUserRoutes = require('./routes/user');
+const createAttendeeRoutes = require('./routes/attendee');
+const createGiftVoucherRoutes = require('./routes/giftVoucher');
+const createDebugVoucherRoutes = require('./routes/debugVoucher');
+const createCheckAvailabilityRoutes = require('./routes/checkAvailability');
+const createConfirmBookingRoutes = require('./routes/confirmBooking');
+const createGetcourseRoutes = require('./routes/getcourse');
+const createHoldSpaceRoutes = require('./routes/holdSpace');
+const createRemoveSpaceRoutes = require('./routes/removeSpace');
+const createFAQRoutes = require('./routes/faq');
+const PreBookingController = require('./controllers/preBooking');
+const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
+const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
+const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const app = express();
-
-// Middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// CORS headers (basic setup - customize for production)
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
+app.set('trust proxy', getTrustProxySetting());
+console.log('[SECURITY] trust proxy', process.env.TRUST_PROXY || 'loopback/private/Cloudflare only');
 
 // MySQL pool (uses env vars)
 const pool = mysql.createPool({
@@ -37,6 +50,54 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+});
+
+// IMPORTANT: Stripe webhook route MUST be registered BEFORE express.json() middleware
+// because Stripe needs raw body for signature verification
+const createStripeWebhookRoutes = require('./routes/stripeWebhook');
+app.use('/api/webhook', createStripeWebhookRoutes(pool));
+
+// Middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// IP address extraction middleware (must be before CORS)
+app.use((req, res, next) => {
+  req.clientIp = getClientIp(req);
+  next();
+});
+
+// CORS headers
+// Allow-Headers MUST list every non-standard request header the frontend sends
+// (Authorization is standard, but X-Requested-With is not, so without it the
+// browser blocks the preflight). Origin pinning lets us flip on credentialed
+// requests (cookies/Authorization with credentials:'include') without breaking,
+// since `Access-Control-Allow-Origin: *` is incompatible with
+// `Access-Control-Allow-Credentials: true`.
+const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const requestOrigin = req.headers.origin;
+  if (corsAllowedOrigins.length === 0) {
+    // No allowlist configured → fall back to the existing permissive behaviour.
+    res.header('Access-Control-Allow-Origin', '*');
+  } else if (requestOrigin && corsAllowedOrigins.includes(requestOrigin)) {
+    res.header('Access-Control-Allow-Origin', requestOrigin);
+    res.header('Vary', 'Origin');
+  }
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization'
+  );
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+  } else {
+    next();
+  }
 });
 
 // Health check
@@ -64,106 +125,66 @@ app.get('/db-test', async (req, res) => {
   }
 });
 
-// Booking status management middleware (runs before routes)
-app.use(BookingStatusManager.createStatusUpdateMiddleware(pool));
+// NOTE: BookingStatusManager.createStatusUpdateMiddleware is intentionally
+// NOT mounted. Its previous implementation auto-rewrote `bookings.status`
+// (e.g. flipping confirmed->2 for "completed") which collided with the
+// legacy PHP REFUNDED:2 semantics and made bookings disappear from admin
+// lists. Status mutations are now driven only by explicit business actions
+// (payment success, refund, move) and by the dedicated cleanup crons.
 
 // API Routes
 app.use('/api/auth', createAuthRoutes(pool));
 app.use('/api/courses', createCourseRoutes(pool));
 app.use('/api/bookings', createBookingRoutes(pool));
-app.use('/api/database', createDatabaseRoutes(pool));
 app.use('/api/cms', createCMSRoutes(pool));
-
-// API Documentation endpoint
-app.get('/api', (req, res) => {
-  res.json({
-    success: true,
-    message: '1Stop Instruction API',
-    version: '1.0.0',
-    endpoints: {
-      auth: {
-        'POST /api/auth/register': 'Register new user',
-        'POST /api/auth/login': 'Login user',
-        'GET /api/auth/profile': 'Get user profile (requires token)',
-        'PUT /api/auth/profile': 'Update user profile (requires token)',
-        'POST /api/auth/change-password': 'Change password (requires token)',
-        'GET /api/auth/verify': 'Verify token (requires token)'
-      },
-      courses: {
-        'GET /api/courses': 'List all courses',
-        'GET /api/courses/featured': 'Get featured courses',
-        'GET /api/courses/search': 'Search courses with filters',
-        'GET /api/courses/:id': 'Get course details by ID',
-        'GET /api/courses/:id/stats': 'Get course statistics (requires token)'
-      },
-      locations: {
-        'GET /api/courses/locations/all': 'List all locations',
-        'GET /api/courses/locations/with-courses': 'Get locations with available courses',
-        'GET /api/courses/locations/nearest': 'Find nearest locations',
-        'GET /api/courses/locations/:id': 'Get location details by ID',
-        'GET /api/courses/locations/stats': 'Get location statistics (requires token)'
-      },
-      events: {
-        'GET /api/courses/events/all': 'List course events/schedules',
-        'GET /api/courses/events/available-dates': 'Get available dates for booking',
-        'GET /api/courses/events/calendar': 'Get event calendar',
-        'GET /api/courses/events/check-availability': 'Check specific event availability',
-        'GET /api/courses/events/:id': 'Get event details by ID'
-      },
-      bookings: {
-        'POST /api/bookings': 'Create a new booking (requires token)',
-        'GET /api/bookings': 'Get user bookings with pagination (requires token)',
-        'GET /api/bookings/stats': 'Get user booking statistics (requires token)',
-        'GET /api/bookings/:id': 'Get booking details by ID (requires token)',
-        'PUT /api/bookings/:id': 'Update booking details (requires token)',
-        'POST /api/bookings/:id/cancel': 'Cancel a booking (requires token)',
-        'GET /api/bookings/admin/all': 'Get all bookings - admin only (requires admin token)',
-        'PUT /api/bookings/admin/:id/status': 'Update booking status - admin only (requires admin token)',
-        'GET /api/bookings/admin/statistics': 'Get booking statistics - admin only (requires admin token)'
-      },
-      cms: {
-        'GET /api/cms/pages': 'Get all pages with pagination and filtering',
-        'GET /api/cms/pages/:identifier': 'Get page by ID or slug',
-        'POST /api/cms/pages': 'Create new page (requires admin token)',
-        'PUT /api/cms/pages/:id': 'Update page (requires admin token)',
-        'DELETE /api/cms/pages/:id': 'Delete page (requires admin token)',
-        'GET /api/cms/testimonials': 'Get testimonials with pagination',
-        'POST /api/cms/testimonials': 'Create testimonial (public but requires moderation)',
-        'GET /api/cms/faqs': 'Get FAQs with categories',
-        'GET /api/cms/carousels': 'Get carousel/slider images',
-        'GET /api/cms/settings': 'Get site settings and configuration',
-        'GET /api/cms/menu': 'Get page hierarchy for navigation menu'
-      },
-      cms_admin: {
-        'GET /api/cms/admin/dashboard': 'Get CMS dashboard statistics (requires admin token)',
-        'PUT /api/cms/admin/pages/bulk-update': 'Bulk update multiple pages (requires admin token)',
-        'PUT /api/cms/admin/testimonials/:id/status': 'Approve/reject testimonials (requires admin token)',
-        'POST /api/cms/admin/faqs': 'Create new FAQ (requires admin token)',
-        'PUT /api/cms/admin/faqs/:id': 'Update FAQ (requires admin token)',
-        'POST /api/cms/admin/carousels': 'Create carousel item (requires admin token)',
-        'PUT /api/cms/admin/carousels/:id': 'Update carousel item (requires admin token)',
-        'PUT /api/cms/admin/settings': 'Update site settings (requires admin token)',
-        'GET /api/cms/admin/search': 'Global CMS content search (requires admin token)',
-        'GET /api/cms/admin/export': 'Export CMS content backup (requires admin token)'
-      },
-      system: {
-        'GET /health': 'Health check',
-        'GET /db-test': 'Database connection test'
-      }
-    },
-    authentication: {
-      type: 'Bearer Token',
-      header: 'Authorization: Bearer <token>',
-      note: 'Get token from /api/auth/login endpoint'
-    }
-  });
-});
+app.use('/api/cmspages', createCMSPagesRoutes(pool));
+app.use('/api/homepage', createHomepageRoutes(pool));
+app.use('/api/contactus', createContactUsRoutes(pool));
+app.use('/api/search', createSearchRoutes(pool));
+app.use('/api/location-course', locationCourseRoutes(pool));
+app.use('/api/all-locations', allLocationsRoutes(pool));
+app.use('/api/pagemenu', pageMenuRoutes(pool));
+app.use('/api/get-data', dynamicDataRoutes(pool));
+app.use('/api/booking', createPreBookingRoutes(pool));
+app.use('/api/booking', bookingFlowRoutes(pool));
+app.use('/api/booking-flow', bookingFlowRoutes(pool));
+app.use('/api/helper', createHelperRoutes(pool));
+app.use('/api/booking/pricing', createPriceCalculationRoutes(pool));
+// app.use('/api/payment', createManualPaymentRoutes(pool));
+app.use('/api/dashboard', createDashboardRoutes(pool));
+app.use('/api/user', createUserRoutes(pool));
+app.use('/api/attendee', createAttendeeRoutes(pool));
+app.use('/api/vouchers', createGiftVoucherRoutes(pool));
+app.use('/api/vouchers', createDebugVoucherRoutes(pool));
+app.use('/restapi/booking', createCheckAvailabilityRoutes(pool));
+app.use('/restapi/booking', createConfirmBookingRoutes(pool));
+app.use('/restapi/booking', createGetcourseRoutes(pool));
+app.use('/restapi/booking', createHoldSpaceRoutes(pool));
+app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
+app.use('/api/faq', createFAQRoutes(pool));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 1Stop Instruction API server listening on http://localhost:${PORT}`);
-  console.log(`📋 API Documentation: http://localhost:${PORT}/api`);
-  console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
-  console.log(`🔧 DB Test: http://localhost:${PORT}/db-test`);
-  console.log(`🔐 Auth Endpoints: http://localhost:${PORT}/api/auth/*`);
+  console.log(`1Stop Instruction API server listening on http://localhost:${PORT}`);
+  console.log(`Health Check: http://localhost:${PORT}/health`);
+  console.log(`DB Test: http://localhost:${PORT}/db-test`);
+  console.log(`Auth Endpoints: http://localhost:${PORT}/api/auth/*`);
+
+  // NOTE: BookingStatusManager.startCleanupJob is intentionally not invoked.
+  // It previously auto-wrote status=2 (confused with PHP REFUNDED) and
+  // status=3 (a value PHP does not understand) which corrupted live data.
+  // Unpaid-booking expiry is owned by BookingCleanupCron below; lock expiry
+  // is owned by ExpiredLockCleanupCron.
+
+  // Start unpaid bookings cleanup cron
+  const cleanupCron = new BookingCleanupCron(pool);
+  cleanupCron.start();
+
+  // Start expired lock cleanup cron
+  const expiredLockCleanupCron = new ExpiredLockCleanupCron(pool);
+  expiredLockCleanupCron.start();
+
+  // Start Google contacts sync cron
+  const googleContactsSyncCron = new GoogleContactsSyncCron(pool);
+  googleContactsSyncCron.start();
 });

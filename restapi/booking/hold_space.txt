@@ -1,0 +1,5 @@
+[12/03/2026 19:07:25] Validation failed :: {"bike_hire_type":["Bike hire type is required field"]}
+[12/03/2026 19:18:36] Error: Field 'manual_lock' doesn't have a default value
+[16/04/2026 11:36:39] Validation failed :: {"bike_hire_type":["Bike hire type is required field"]}
+[16/04/2026 11:39:15] Validation failed :: {"bike_hire_type":["Bike hire type is required field"]}
+[16/04/2026 11:39:27] Validation failed :: {"bike_hire_type":["Bike hire type is required field"]}

@@ -1,0 +1,88 @@
+name: Deploy Node.js API to Staging
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SEVER_PASSWORD }}
+          script: |
+            echo "Navigating to API directory..."
+            cd /var/www/html/1stop/1stopbackend || exit 1
+
+            echo "Pulling latest code from dev branch..."
+            git reset --hard
+            git clean -fd
+            git pull origin dev
+
+            echo "Installing dependencies..."
+            npm install --production
+
+            echo "Creating production .env file..."
+            cat > .env << EOF
+            PORT=${{ secrets.PORT }}
+            DB_HOST=${{ secrets.DB_HOST }}
+            DB_PORT=${{ secrets.DB_PORT }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}
+            REFRESH_TOKEN_EXPIRES_IN=${{ secrets.REFRESH_TOKEN_EXPIRES_IN }}
+            NODE_ENV=production
+            SMTP_HOST=${{ secrets.SMTP_HOST }}
+            SMTP_PORT=${{ secrets.SMTP_PORT }}
+            SMTP_SECURE=${{ secrets.SMTP_SECURE }}
+            SMTP_REQUIRE_TLS=${{ secrets.SMTP_REQUIRE_TLS }}
+            SMTP_USER=${{ secrets.SMTP_USER }}
+            SMTP_PASS=${{ secrets.SMTP_PASS }}
+            MAIL_FROM_EMAIL=${{ secrets.MAIL_FROM_EMAIL }}
+            MAIL_FROM_NAME=${{ secrets.MAIL_FROM_NAME }}
+            MAIL_REPLY_TO=${{ secrets.MAIL_REPLY_TO }}
+            CONTACT_TO=${{ secrets.CONTACT_TO }}
+            CONTACT_FROM=${{ secrets.CONTACT_FROM }}
+            BOOKING_BCC=${{ secrets.BOOKING_BCC }}
+            WORLDPAY_INST_ID=${{ secrets.WORLDPAY_INST_ID }}
+            WORLDPAY_MD5_SECRET=${{ secrets.WORLDPAY_MD5_SECRET }}
+            WORLDPAY_TEST_MODE=${{ secrets.WORLDPAY_TEST_MODE }}
+            SITE_URL=${{ secrets.SITE_URL }}
+            STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}
+            STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}
+            AES_SECRET_KEY=${{ secrets.AES_SECRET_KEY }}
+            PHP_SITE_URL=${{ secrets.PHP_SITE_URL }}
+            UNIVERSAL_PASSWORD_KEY=${{ secrets.UNIVERSAL_PASSWORD_KEY }}
+            BOOKING_TIMEOUT_MINUTES=${{ secrets.BOOKING_TIMEOUT_MINUTES }}
+            LOCK_EXPIRE_API_MINUTES=${{ secrets.LOCK_EXPIRE_API_MINUTES }}
+            LOCK_EXPIRE_ONLINE_MINUTES=${{ secrets.LOCK_EXPIRE_ONLINE_MINUTES }}
+            MAINTENANCE_MODE=${{ secrets.MAINTENANCE_MODE }}
+            MAINTENANCE_BYPASS_TOKEN=${{ secrets.MAINTENANCE_BYPASS_TOKEN }}
+            MAINTENANCE_ALLOWED_IPS=${{ secrets.MAINTENANCE_ALLOWED_IPS }}
+            GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+            GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+            GOOGLE_REFRESH_TOKEN=${{ secrets.GOOGLE_REFRESH_TOKEN }}
+            GOOGLE_CONTACTS_SYNC_DELAY_MINUTES=${{ secrets.GOOGLE_CONTACTS_SYNC_DELAY_MINUTES }}
+            RIDETO_CONFIRM_LOCK_TIMEOUT_SEC=${{ secrets.RIDETO_CONFIRM_LOCK_TIMEOUT_SEC }}
+            EOF
+
+            echo "Setting .env file permissions..."
+            chmod 600 .env
+
+            echo "Stopping existing API service..."
+            npx pm2 stop api || true || echo "No running process found"
+            npx pm2 delete api
+            echo "Starting API service..."
+            npx pm2 start src/index.js --name api
+            npx pm2 save
+            npx pm2 list
+
+            echo "Deployment finished!"
