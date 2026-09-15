@@ -10,6 +10,7 @@ const {
   searchExistingCustomers,
   submitAddBookingAttendees,
   cancelAddBookingWizard,
+  checkWizardAttendeeLicence,
   checkAdminBookingPromoCode,
   cancelAdminBookingPromoCode,
 } = require('../services/addBookingWizardService');
@@ -213,6 +214,30 @@ class BookingsController {
     }
   }
 
+  async checkWizardAttendeeLicence(req, res) {
+    try {
+      const result = await checkWizardAttendeeLicence(
+        this.pool,
+        req.body?.license_number
+      );
+      if (!result.ok) {
+        return res.json({
+          success: false,
+          data: result,
+          message: result.message,
+          code: result.issue === 'blacklist' ? 'BLACKLISTED' : 'LICENCE_FORMAT',
+        });
+      }
+      return res.json({ success: true, data: result, message: 'Licence OK' });
+    } catch (err) {
+      console.error('[ADMIN][BOOKINGS][LICENCE_CHECK]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: err.message || 'Unable to check driving licence',
+      });
+    }
+  }
+
   async cancelWizard(req, res) {
     try {
       const saveClient = Boolean(req.body?.save_client_details);
@@ -220,7 +245,8 @@ class BookingsController {
         this.pool,
         req.session,
         saveClient,
-        this.getAdminId(req)
+        this.getAdminId(req),
+        req.body || {}
       );
       return res.json({
         success: true,

@@ -33,6 +33,9 @@ function createBookingsRoutes(pool) {
   router.post('/wizard/attendees', requireAdminSession, (req, res) =>
     controller.submitWizardAttendees(req, res)
   );
+  router.post('/wizard/attendee-licence/check', requireAdminSession, (req, res) =>
+    controller.checkWizardAttendeeLicence(req, res)
+  );
   router.get('/wizard/worldpay', requireAdminSession, (req, res) =>
     controller.getWizardWorldpay(req, res)
   );

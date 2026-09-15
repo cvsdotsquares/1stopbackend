@@ -7,7 +7,10 @@
  */
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { findOrCreateStripeCustomerByEmail } = require('../../utils/stripeCustomer');
-const { sendAdminStripePaymentLinkEmail } = require('../../utils/emailService');
+const {
+  sendAdminStripePaymentLinkEmail,
+  buildPaymentLinkEmailDateLines,
+} = require('../../utils/emailService');
 const { getAdminFrontendBase } = require('./motoPaymentService');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
 const { LOCK_EXPIRE_TIME_MINUTES, STRIPE_PAYMENT_LINK_LOCKED_BY } = require('../constants');
@@ -427,14 +430,43 @@ async function createAdminStripePaymentLink(pool, session, {
     email_sent: false,
   };
 
+  const [courseDateRows] = await pool.query(
+    `SELECT event_date, event_start_time, event_end_time
+     FROM course_event_dates
+     WHERE course_event_id = ?
+     ORDER BY event_date ASC`,
+    [eventId]
+  );
+  const amountDueFromForm = (attendees || []).reduce(
+    (sum, attendee) => sum + (Number(attendee.payment_received) || 0),
+    0
+  );
+  const locationAddress = [
+    event?.address1,
+    event?.address2,
+    event?.address3,
+    event?.address4,
+    event?.postcode,
+  ]
+    .map(trim)
+    .filter(Boolean)
+    .join(', ');
+
   const emailResult = await sendAdminStripePaymentLinkEmail({
     to: primary.email,
-    customerName: primaryName,
+    firstName: trim(primary.first_name),
+    attendees: (attendees || []).map((attendee, index) => ({
+      bookingRef: bookingRefs[index] || '',
+      firstName: trim(attendee.first_name),
+      surName: trim(attendee.sur_name),
+    })),
     courseName: event?.course_name,
-    amountLabel: formatAmountLabel(amount, 'gbp'),
+    courseDateLines: buildPaymentLinkEmailDateLines(courseDateRows),
+    locationName: event?.location_name,
+    locationAddress,
+    amountLabel: formatAmountLabel(amountDueFromForm, 'gbp'),
     paymentUrl: checkoutSession.url,
     expireMinutes: quotedMinutes,
-    bookingRefs: bookingRefs.join(', '),
   });
   payload.email_sent = Boolean(emailResult?.sent);
   if (!emailResult?.sent) {
