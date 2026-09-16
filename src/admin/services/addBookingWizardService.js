@@ -11,6 +11,13 @@ const {
   syncAdminOriginalAmount,
   showDepositPrice,
 } = require('./adminBookingPromoService');
+const {
+  resolveAdminWizardTypeOfBook,
+  getAdminCompletionPaymentType,
+  ensureTypeOfBookEnum,
+  normalizeTypeOfBookCode,
+  ADMIN_WIZARD_PAYMENT_TYPE_VALUES,
+} = require('../../utils/typeOfBook');
 
 const TBC_DATE = '0000-00-00';
 
@@ -780,7 +787,7 @@ async function saveAttendee(pool, bookingId, attendee) {
   return bookingRef;
 }
 
-async function saveBookingCompleteCash(pool, bookingId) {
+async function saveBookingCompleteCash(pool, bookingId, typeOfBook = 't') {
   await pool.query(
     'UPDATE bookings SET payment_due = payment_due - admin_payment_received, status = 1 WHERE id = ?',
     [bookingId]
@@ -791,18 +798,28 @@ async function saveBookingCompleteCash(pool, bookingId) {
   );
   const amount = bookRows?.[0]?.admin_payment_received || 0;
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const paymentType = getAdminCompletionPaymentType(typeOfBook);
   await pool.query(
     `INSERT INTO booking_payments
       (booking_id, payment_type, transation_id, response, amount, created)
-     VALUES (?, 'CASH', '', '', ?, ?)`,
-    [bookingId, amount, now]
+     VALUES (?, ?, '', '', ?, ?)`,
+    [bookingId, paymentType, amount, now]
   );
 
   const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
   await sendAdminBookingConfirmationEmail(pool, bookingId);
 }
 
-async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lockId, session) {
+async function saveBookingRecord(
+  pool,
+  attendee,
+  event,
+  adminId,
+  paymentMode,
+  lockId,
+  session,
+  typeOfBook
+) {
   const amount = Number(attendee.course_cost) || 0;
   const paymentReceived = Number(attendee.payment_received) || 0;
   const vatRate = getVatRate(session);
@@ -829,7 +846,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lo
       event.course_id,
       event.id,
       adminId,
-      paymentMode === 'worldpay' ? 'm' : paymentMode === 'stripe' ? 'o' : 't',
+      typeOfBook,
       amount,
       amount,
       vatRate,
@@ -849,7 +866,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lo
   const bookingRef = await saveAttendee(pool, bookingId, attendee);
 
   if (paymentMode !== 'worldpay' && paymentMode !== 'stripe') {
-    await saveBookingCompleteCash(pool, bookingId);
+    await saveBookingCompleteCash(pool, bookingId, typeOfBook);
   }
 
   return { bookingId, bookingRef };
@@ -1356,6 +1373,19 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
   }
 
   const paymentMode = stripePayment ? 'stripe' : moto ? 'worldpay' : 'cash';
+  const baPaymentType = normalizeTypeOfBookCode(body?.BA?.payment_type);
+  const adminPaymentType =
+    body?.admin_payment_type ??
+    body?.payment_type ??
+    (ADMIN_WIZARD_PAYMENT_TYPE_VALUES.has(baPaymentType)
+      ? baPaymentType
+      : null) ??
+    't';
+  const typeOfBook = resolveAdminWizardTypeOfBook({
+    adminPaymentType,
+    paymentMode,
+  });
+  await ensureTypeOfBookEnum(pool);
   const lockId = Number(adminBooking.lock_session?.id) || 0;
   const bookingRefs = [];
   const bookingIds = [];
@@ -1384,7 +1414,8 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
       adminId,
       paymentMode,
       lockId,
-      session
+      session,
+      typeOfBook
     );
     bookingRefs.push(saved.bookingRef);
     bookingIds.push(saved.bookingId);

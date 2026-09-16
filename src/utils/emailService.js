@@ -2,6 +2,13 @@ const nodemailer = require('nodemailer');
 const { formatDateToDDMMYYYY, formatMySQLDateToDDMMYYYY } = require('./dateFormat');
 const { replaceTokens } = require('./tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('./mailFrom');
+const {
+  getBookingRefEmailSuffix,
+  isKnownTypeOfBookCode,
+  resolveBookingConfirmationRefSuffix,
+} = require('./typeOfBook');
+
+const DISPLAY_REF_SUFFIX = /^(PL|BT|R2|T|O|M|C|Z|W)$/i;
 
 // SMTP transport configuration:
 //   - SMTP_SECURE=true (port 465) → implicit TLS from the first byte.
@@ -271,6 +278,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    course_name,
    booking_ref,
    booking_type = 'O',
+  type_of_book,
+  payment_type,
   bookingRefSuffix = '',
    refundable = 0,
    attendees = [],
@@ -383,7 +392,24 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     ? undefined
     : (String(bcc || process.env.BOOKING_BCC || '').trim() || undefined);
 
-  const bookingTypeLabel = `${String(booking_type).charAt(0).toUpperCase()}${String(bookingRefSuffix || '').trim().toUpperCase()}`;
+  const resendExtra = String(bookingRefSuffix || '').trim().toUpperCase();
+  const rawBookingType = String(booking_type || '').trim();
+  let bookingTypeLabel;
+  if (type_of_book != null || payment_type != null) {
+    bookingTypeLabel = resolveBookingConfirmationRefSuffix({
+      typeOfBook: type_of_book,
+      paymentType: payment_type,
+    });
+  } else if (DISPLAY_REF_SUFFIX.test(rawBookingType)) {
+    bookingTypeLabel = rawBookingType.toUpperCase();
+  } else if (isKnownTypeOfBookCode(booking_type)) {
+    bookingTypeLabel = getBookingRefEmailSuffix(booking_type);
+  } else if (rawBookingType.length > 1) {
+    bookingTypeLabel = rawBookingType;
+  } else {
+    bookingTypeLabel = `${rawBookingType.charAt(0).toUpperCase() || 'O'}`;
+  }
+  bookingTypeLabel = `${bookingTypeLabel}${resendExtra}`;
 
   const createBookingEmailHtml = (recipientAttendee) => {
    const recipientFirstName = recipientAttendee.first_name || 'Customer';
@@ -1452,6 +1478,15 @@ function paymentLinkTrim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+/** Matches DB / public booking name formatting (bookingFlow.js). */
+function paymentLinkTitleCase(value) {
+  const s = paymentLinkTrim(value);
+  if (!s) return '';
+  return s.replace(/\w\S*/g, (txt) =>
+    txt.charAt(0).toUpperCase() + txt.slice(1).toLowerCase()
+  );
+}
+
 function paymentLinkToDateKey(value) {
   if (value == null || value === '') return '';
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -1578,7 +1613,7 @@ exports.sendAdminStripePaymentLinkEmail = async ({
     return { sent: false, reason: 'no_recipient' };
   }
 
-  const greetingName = paymentLinkTrim(firstName) || 'there';
+  const greetingName = paymentLinkTitleCase(firstName) || 'there';
   const minutes = Math.max(1, Number(expireMinutes) || 1);
   const course = paymentLinkTrim(courseName) || 'course';
   const subject = `Payment for your ${course} with 1 Stop Instruction`;
@@ -1586,7 +1621,8 @@ exports.sendAdminStripePaymentLinkEmail = async ({
   const attendeeLines = (attendees || [])
     .map((row) => {
       const ref = paymentLinkTrim(row.bookingRef);
-      const name = `${paymentLinkTrim(row.firstName)} ${paymentLinkTrim(row.surName)}`.trim();
+      const name =
+        `${paymentLinkTitleCase(row.firstName)} ${paymentLinkTitleCase(row.surName)}`.trim();
       if (!ref && !name) return '';
       if (ref && name) return `${ref} - ${name}`;
       return ref || name;
