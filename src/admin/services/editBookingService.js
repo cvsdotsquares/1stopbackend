@@ -11,13 +11,11 @@ const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
 
 const TBC_DATE = '0000-00-00';
 
-const TOB_LABELS = {
-  m: 'MOTO',
-  o: 'Online',
-  t: 'Terminal',
-  w: 'Worldpay',
-  r: 'RideTo',
-};
+const { getTypeOfBookLabel } = require('../../utils/typeOfBook');
+
+function tobLabel(code) {
+  return getTypeOfBookLabel(code) || code || '';
+}
 
 const VEHICLE_TYPE_LABELS = {
   0: 'Manual',
@@ -803,7 +801,7 @@ function buildBookingPayload(booking, dates, extras = {}) {
       !extras.eventDatePassed,
     can_reinstate: Number(booking.on_hold) === 1,
     type_of_book: booking.type_of_book,
-    type_of_book_label: TOB_LABELS[booking.type_of_book] || booking.type_of_book,
+    type_of_book_label: tobLabel(booking.type_of_book),
     customer_name: resolveCustomerName(booking),
     booking_made_by_label: extras.booking_made_by_label || '',
     booking_created: booking.booking_created,
@@ -854,7 +852,7 @@ function buildBookingPayload(booking, dates, extras = {}) {
         ? new Date(`${firstDateKey}T12:00:00`).toLocaleDateString('en-GB')
         : '',
       formatCurrency(paymentReceived),
-      TOB_LABELS[booking.type_of_book] || booking.type_of_book,
+      tobLabel(booking.type_of_book),
     ]
       .filter(Boolean)
       .join(' '),

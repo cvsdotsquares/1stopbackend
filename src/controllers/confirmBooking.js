@@ -5,6 +5,7 @@ const { replaceTokens } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const { sendDeveloperAlert } = require('../utils/emailService');
+const { getBookingRefEmailSuffix } = require('../utils/typeOfBook');
 const { applyGroupSpaceDelta, getLinkedParentKey } = require('../utils/courseEventGroup');
 
 const isDeadlockError = (err) =>
@@ -283,9 +284,7 @@ const buildBookingEmailData = async (connection, {
 
   return {
     booking_ref,
-    booking_type: String(booking.type_of_book || '').trim().toLowerCase() === 'r'
-      ? 'R2'
-      : String(booking.type_of_book || 'R2').toUpperCase(),
+    booking_type: getBookingRefEmailSuffix(booking.type_of_book || 'r'),
     first_name,
     sur_name: last_name || '',
     rideto_ref: rideToOrderId ? `rt#${rideToOrderId}` : '',

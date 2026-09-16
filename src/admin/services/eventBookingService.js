@@ -6,13 +6,10 @@ const {
 } = require('./adminBookingHoldService');
 const { isStripePaymentLinkLockedBy } = require('../constants');
 
-const TOB_LABELS = {
-  m: 'MOTO',
-  o: 'Online',
-  t: 'Terminal',
-  w: 'Worldpay',
-  r: 'RideTo',
-};
+const {
+  getTypeOfBookLabel,
+  TYPE_OF_BOOK_LABELS,
+} = require('../../utils/typeOfBook');
 
 const VEHICLE_TYPE_LABELS = {
   0: 'Manual',
@@ -345,7 +342,7 @@ async function getEventBookingPage(pool, evId, session) {
       booking_ref: row.booking_ref,
       attendee_name: `${row.first_name || ''} ${row.sur_name || ''}`.trim(),
       type_of_book: row.type_of_book,
-      type_of_book_label: TOB_LABELS[row.type_of_book] || row.type_of_book,
+      type_of_book_label: getTypeOfBookLabel(row.type_of_book),
       vehicle_type: row.vehicle_type,
       vehicle_type_label:
         VEHICLE_TYPE_LABELS[row.vehicle_type] ||
@@ -444,7 +441,7 @@ async function getEventBookingPage(pool, evId, session) {
     locks,
     bookings,
     vehicle_type_labels: VEHICLE_TYPE_LABELS,
-    tob_labels: TOB_LABELS,
+    tob_labels: TYPE_OF_BOOK_LABELS,
   };
 }
 

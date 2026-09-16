@@ -242,6 +242,13 @@ app.listen(PORT, () => {
       err.message
     );
   });
+  const { ensureTypeOfBookEnum } = require('./utils/typeOfBook');
+  ensureTypeOfBookEnum(pool).catch((err) => {
+    console.error(
+      '[BOOKINGS] Failed to extend bookings.type_of_book enum (pl, bt, c, z):',
+      err.message
+    );
+  });
 
   // Start Google contacts sync cron
   const googleContactsSyncCron = new GoogleContactsSyncCron(pool);

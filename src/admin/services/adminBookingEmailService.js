@@ -7,6 +7,10 @@ const {
   sendBookingDeleteEmail,
   sendBookingFeedbackEmail,
 } = require('../../utils/emailService');
+const {
+  resolveBookingConfirmationRefSuffix,
+  normalizeTypeOfBookCode,
+} = require('../../utils/typeOfBook');
 
 async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) {
   const id = Number(bookingId);
@@ -86,14 +90,23 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
       `SELECT booking_bcc FROM settings LIMIT 1`
     );
 
-    const bookingType = String(booking.type_of_book || 't').toUpperCase();
+    const [paymentRows] = await connection.query(
+      `SELECT payment_type FROM booking_payments
+       WHERE booking_id = ? AND (isDelete IS NULL OR isDelete = 0)
+       ORDER BY id DESC LIMIT 1`,
+      [id]
+    );
+    const paymentType = paymentRows?.[0]?.payment_type;
+
     const isResend = resendMode > 0 || Boolean(overrideEmail);
-    const bookingRefSuffix =
-      resendMode > 0 && resendMode !== 13
-        ? String(booking.type_of_book || '').toLowerCase() === 'r'
-          ? '2R'
-          : 'R'
-        : '';
+    let bookingTypeLabel = resolveBookingConfirmationRefSuffix({
+      typeOfBook: booking.type_of_book,
+      paymentType,
+    });
+    if (resendMode > 0 && resendMode !== 13) {
+      bookingTypeLabel +=
+        normalizeTypeOfBookCode(booking.type_of_book) === 'r' ? '2R' : 'R';
+    }
     const adminBcc =
       settingsData[0]?.booking_bcc ||
       process.env.BOOKING_BCC ||
@@ -115,8 +128,10 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
       {
         course_name: courseData[0]?.course_name || 'Course',
         booking_ref: booking.booking_ref,
-        booking_type: bookingType,
-        bookingRefSuffix,
+        booking_type: bookingTypeLabel,
+        type_of_book: booking.type_of_book,
+        payment_type: paymentType,
+        bookingRefSuffix: '',
         refundable: Number(booking.refundable) || 0,
         attendees,
         ...(targetEmails.length ? { targetEmails } : {}),
