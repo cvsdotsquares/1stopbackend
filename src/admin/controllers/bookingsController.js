@@ -27,6 +27,7 @@ const {
 } = require('../services/bookingStripeLinkService');
 const {
   getBookingView,
+  getBookingHistory: loadBookingHistory,
   getEditBookingForm,
   updateBooking,
 } = require('../services/editBookingService');
@@ -42,6 +43,12 @@ const {
   saveInvoice,
   emailInvoice,
 } = require('../services/bookingInvoiceService');
+const {
+  holdBooking: holdAdminBooking,
+  reinstateBooking: reinstateAdminBooking,
+  getReinstateOptions: getAdminReinstateOptions,
+} = require('../services/adminBookingHoldService');
+const { listBookings } = require('../services/bookingsListService');
 
 class BookingsController {
   constructor(pool) {
@@ -53,6 +60,25 @@ class BookingsController {
     const adminId =
       loggedIn?.admin_id || loggedIn?.id || req.session?.admin || 0;
     return Number(adminId) || 0;
+  }
+
+  async listBookings(req, res) {
+    try {
+      const data = await listBookings(this.pool, {
+        page: req.query.page,
+        searchterm: {
+          name_scr: req.query.name_scr,
+          status_scr: req.query.status_scr,
+        },
+      });
+      return res.json({ success: true, data });
+    } catch (err) {
+      console.error('[ADMIN][BOOKINGS][LIST]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load bookings',
+      });
+    }
   }
 
   async getEventPage(req, res) {
@@ -470,6 +496,20 @@ class BookingsController {
     }
   }
 
+  async getBookingHistory(req, res) {
+    try {
+      const data = await loadBookingHistory(this.pool, req.params.id);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][HISTORY]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load booking history',
+      });
+    }
+  }
+
   async getBookingEditForm(req, res) {
     try {
       const newEventId = req.query.newEventId || req.query.new_event_id || null;
@@ -562,6 +602,60 @@ class BookingsController {
       return res.status(status).json({
         success: false,
         message: err.message || 'Unable to delete booking',
+      });
+    }
+  }
+
+  async holdBooking(req, res) {
+    try {
+      const data = await holdAdminBooking(
+        this.pool,
+        req.params.id,
+        this.getAdminId(req),
+        req.body || {}
+      );
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][HOLD]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to place booking on hold',
+      });
+    }
+  }
+
+  async getReinstateOptions(req, res) {
+    try {
+      const data = await getAdminReinstateOptions(this.pool, req.params.id, {
+        courseId: req.query.course_id,
+      });
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][REINSTATE-OPTIONS]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load reinstatement options',
+      });
+    }
+  }
+
+  async reinstateBooking(req, res) {
+    try {
+      const data = await reinstateAdminBooking(
+        this.pool,
+        req.params.id,
+        this.getAdminId(req),
+        req.body || {}
+      );
+      return res.json({ success: true, data, message: data.message });
+    } catch (err) {
+      const status = err.status || 500;
+      console.error('[ADMIN][BOOKINGS][REINSTATE]', err.message);
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to reinstate booking',
       });
     }
   }

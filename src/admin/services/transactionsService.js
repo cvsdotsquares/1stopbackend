@@ -52,6 +52,21 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+function parseMoneyFilter(value) {
+  const raw = trim(value).replace(/^£/, '');
+  if (!raw) return null;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : null;
+}
+
+const TOB_FILTER_OPTIONS = [
+  { value: '', label: 'All types' },
+  { value: 'o', label: 'Online' },
+  { value: 't', label: 'Terminal' },
+  { value: 'm', label: 'MOTO' },
+  { value: 'r', label: 'RideTo' },
+];
+
 function parseExtraInfo(raw) {
   if (raw == null || raw === '') return null;
   if (typeof raw === 'object') return raw;
