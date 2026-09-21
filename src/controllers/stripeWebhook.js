@@ -605,8 +605,13 @@ class StripeWebhookController {
       }
 
       // Get payment intent from Stripe
-      const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent);
+      const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent, {
+        expand: ['latest_charge'],
+      });
       const bookingIdFromMeta = paymentIntent.metadata?.booking_id;
+      const latestCharge = paymentIntent.latest_charge;
+      const amountRefunded = Number(latestCharge?.amount_refunded || 0);
+      const isRefunded = Boolean(latestCharge?.refunded) || amountRefunded > 0;
 
       // If payment succeeded, try to find the created booking
       if (paymentIntent.status === 'succeeded') {
@@ -623,7 +628,7 @@ class StripeWebhookController {
           LIMIT 1
         `, bookingIdFromMeta ? [bookingIdFromMeta] : []);
 
-        if (bookings.length > 0) {
+        if (bookings.length > 0 && !isRefunded) {
           const booking = bookings[0];
           return res.json({
             success: true,
@@ -637,6 +642,24 @@ class StripeWebhookController {
             },
           });
         }
+
+        // Paid, but the seat is gone: the booking timed out and was removed
+        // (a Pay by Bank QR stays scannable until its PaymentIntent is
+        // cancelled), so the webhook refunds instead of confirming. Never
+        // report this as a successful booking.
+        return res.json({
+          success: true,
+          data: {
+            payment_status: isRefunded ? 'refunded' : 'booking_released',
+            payment_method_type: paymentIntent.payment_method_types?.[0] || null,
+            temp_ref: temp_ref || null,
+            amount_paid: paymentIntent.amount_received / 100,
+            amount_refunded: amountRefunded / 100,
+            message: isRefunded
+              ? 'Payment refunded because the booking was no longer held'
+              : 'Payment received but the booking was no longer held; a refund is being issued',
+          },
+        });
       }
 
       // Payment not yet processed or failed
