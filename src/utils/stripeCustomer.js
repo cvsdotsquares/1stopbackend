@@ -44,6 +44,7 @@ async function findOrCreateStripeCustomerByEmail({ email, name, phone, metadata 
   try {
     const customer = await stripe.customers.create({
       email: normalizedEmail,
+      address: { country: 'GB' },
       ...(name ? { name: String(name).trim().slice(0, 256) } : {}),
       ...(phone ? { phone: String(phone).trim().slice(0, 50) } : {}),
       ...(metadata ? { metadata } : {})

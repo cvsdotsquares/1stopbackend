@@ -32,6 +32,33 @@ const IN_FLIGHT_PI_STATUSES = new Set([
   'requires_capture',
 ]);
 
+// Pay by Bank keeps its seat only for BOOKING_TIMEOUT_MINUTES, unlike cards
+// which are deferred while in flight. It waits on the customer's banking app,
+// so without this an unpaid seat could be held indefinitely.
+const BANK_PAYMENT_METHOD_TYPES = new Set(['pay_by_bank']);
+
+/**
+ * Which payment method the customer actually chose. Our PaymentIntents are
+ * created with several allowed types, so `payment_method_types` alone cannot
+ * answer this — only the attached PaymentMethod can.
+ */
+async function resolveChosenPaymentMethodType(paymentIntent) {
+  const paymentMethod = paymentIntent?.payment_method;
+  if (!paymentMethod) return null;
+  if (typeof paymentMethod === 'object') return paymentMethod.type || null;
+
+  try {
+    const method = await stripe.paymentMethods.retrieve(paymentMethod);
+    return method?.type || null;
+  } catch (error) {
+    console.error(
+      `[CLEANUP CRON] Could not resolve payment method ${paymentMethod}:`,
+      error.message
+    );
+    return null;
+  }
+}
+
 class BookingCleanupCron {
   constructor(pool) {
     this.pool = pool;
@@ -68,6 +95,31 @@ class BookingCleanupCron {
 
       const inFlight = search.data.find((p) => IN_FLIGHT_PI_STATUSES.has(p.status));
       if (inFlight) {
+        // Every booking reaching this point is already older than
+        // BOOKING_TIMEOUT_MINUTES (the cron's own query guarantees it), so a
+        // bank payment still in flight has used up its hold. Cancel the
+        // PaymentIntent first — that stops a late payment being taken for a
+        // seat we are about to give away. Cards keep the old defer behaviour.
+        const methodType = await resolveChosenPaymentMethodType(inFlight);
+
+        if (BANK_PAYMENT_METHOD_TYPES.has(methodType)) {
+          try {
+            await stripe.paymentIntents.cancel(inFlight.id);
+            console.log(
+              `[CLEANUP CRON] Booking ${booking.id}: cancelled unpaid ${methodType} ` +
+              `PaymentIntent ${inFlight.id} (held for BOOKING_TIMEOUT_MINUTES); releasing seat`
+            );
+            return { action: 'delete', paymentIntent: inFlight };
+          } catch (cancelError) {
+            console.error(
+              `[CLEANUP CRON] Failed to cancel PaymentIntent ${inFlight.id}; deferring to keep ` +
+              `the seat rather than risk taking payment for a released booking:`,
+              cancelError.message
+            );
+            return { action: 'defer', paymentIntent: inFlight };
+          }
+        }
+
         return { action: 'defer', paymentIntent: inFlight };
       }
 
