@@ -40,6 +40,10 @@ class StripeWebhookController {
         case 'payment_intent.created':
           console.log('ℹ️ Payment intent created (no action needed)');
           break;
+        case 'payment_intent.processing':
+        case 'payment_intent.requires_action':
+          console.log(`ℹ️ Payment still in progress (${event.type}); booking stays pending until payment_intent.succeeded`);
+          break;
         case 'payment_intent.succeeded':
           const paymentIntent = event.data.object;
           if (paymentIntent.metadata?.type === 'gift_voucher') {
@@ -479,6 +483,7 @@ class StripeWebhookController {
 
       // Get payment intent from Stripe
       const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent);
+      const bookingIdFromMeta = paymentIntent.metadata?.booking_id;
 
       // If payment succeeded, try to find the created booking
       if (paymentIntent.status === 'succeeded') {
@@ -488,10 +493,12 @@ class StripeWebhookController {
           FROM bookings b
           JOIN booking_attendees ba ON b.id = ba.booking_id
           WHERE ba.\`primary\` = 1
-          AND b.created >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+          AND (
+            ${bookingIdFromMeta ? 'b.id = ?' : 'b.created >= DATE_SUB(NOW(), INTERVAL 1 HOUR)'}
+          )
           ORDER BY b.created DESC
           LIMIT 1
-        `);
+        `, bookingIdFromMeta ? [bookingIdFromMeta] : []);
 
         if (bookings.length > 0) {
           const booking = bookings[0];
@@ -514,8 +521,12 @@ class StripeWebhookController {
         success: true,
         data: {
           payment_status: paymentIntent.status,
+          payment_method_type: paymentIntent.payment_method_types?.[0] || null,
           temp_ref: temp_ref || null,
           message: paymentIntent.status === 'succeeded' ? 'Payment processing...' : 'Payment pending',
+          // Lets the return page explain *why* a redirect payment came back unpaid
+          // (declined card, abandoned bank authorisation, etc.).
+          last_payment_error: paymentIntent.last_payment_error?.message || null,
         },
       });
 
