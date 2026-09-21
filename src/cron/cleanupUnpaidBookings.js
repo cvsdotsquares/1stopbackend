@@ -22,25 +22,26 @@ const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
 const StripeWebhookController = require('../controllers/stripeWebhook');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
-// Stripe statuses that indicate the customer's payment is still in motion.
-// While a PaymentIntent is in any of these we MUST NOT delete the booking —
-// the next sweep (15 minutes later) will reconsider.
-const IN_FLIGHT_PI_STATUSES = new Set([
-  'processing',
-  'requires_action',
+// Money is already moving — do not cancel or delete; wait for succeeded/failed.
+const PROCESSING_PI_STATUSES = new Set(['processing', 'requires_capture']);
+
+// Still collectable. Pay by Bank QR / client_secret stay valid in these states
+// until the PaymentIntent is cancelled.
+const CANCELABLE_PI_STATUSES = new Set([
+  'requires_payment_method',
   'requires_confirmation',
-  'requires_capture',
+  'requires_action',
 ]);
 
 // Pay by Bank keeps its seat only for BOOKING_TIMEOUT_MINUTES, unlike cards
-// which are deferred while in flight. It waits on the customer's banking app,
-// so without this an unpaid seat could be held indefinitely.
+// which are deferred while in flight (3DS). It waits on the customer's banking
+// app, so without a cancel the QR can still take payment after we delete.
 const BANK_PAYMENT_METHOD_TYPES = new Set(['pay_by_bank']);
 
 /**
  * Which payment method the customer actually chose. Our PaymentIntents are
  * created with several allowed types, so `payment_method_types` alone cannot
- * answer this — only the attached PaymentMethod can.
+ * answer this — only the attached PaymentMethod (or next_action) can.
  */
 async function resolveChosenPaymentMethodType(paymentIntent) {
   const paymentMethod = paymentIntent?.payment_method;
@@ -56,6 +57,38 @@ async function resolveChosenPaymentMethodType(paymentIntent) {
       error.message
     );
     return null;
+  }
+}
+
+function isPayByBankIntent(paymentIntent, methodType) {
+  if (BANK_PAYMENT_METHOD_TYPES.has(methodType)) return true;
+  const nextType = String(paymentIntent?.next_action?.type || '');
+  return nextType.includes('pay_by_bank');
+}
+
+async function cancelPaymentIntentOrExplain(paymentIntent) {
+  try {
+    const canceled = await stripe.paymentIntents.cancel(paymentIntent.id, {
+      cancellation_reason: 'abandoned',
+    });
+    return { outcome: 'canceled', paymentIntent: canceled };
+  } catch (cancelError) {
+    let fresh = paymentIntent;
+    try {
+      fresh = await stripe.paymentIntents.retrieve(paymentIntent.id);
+    } catch (_) {
+      // keep last known object
+    }
+    if (fresh.status === 'succeeded') {
+      return { outcome: 'succeeded', paymentIntent: fresh };
+    }
+    if (fresh.status === 'canceled') {
+      return { outcome: 'canceled', paymentIntent: fresh };
+    }
+    if (fresh.status === 'processing') {
+      return { outcome: 'processing', paymentIntent: fresh, error: cancelError };
+    }
+    return { outcome: 'failed', paymentIntent: fresh, error: cancelError };
   }
 }
 
@@ -86,46 +119,64 @@ class BookingCleanupCron {
       const search = await stripe.paymentIntents.search({
         query: `metadata['booking_id']:'${booking.id}'`,
         limit: 10,
+        expand: ['data.payment_method'],
       });
+      const intents = search.data || [];
 
-      const succeeded = search.data.find((p) => p.status === 'succeeded');
+      const succeeded = intents.find((p) => p.status === 'succeeded');
       if (succeeded) {
         return { action: 'recover', paymentIntent: succeeded };
       }
 
-      const inFlight = search.data.find((p) => IN_FLIGHT_PI_STATUSES.has(p.status));
-      if (inFlight) {
-        // Every booking reaching this point is already older than
-        // BOOKING_TIMEOUT_MINUTES (the cron's own query guarantees it), so a
-        // bank payment still in flight has used up its hold. Cancel the
-        // PaymentIntent first — that stops a late payment being taken for a
-        // seat we are about to give away. Cards keep the old defer behaviour.
-        const methodType = await resolveChosenPaymentMethodType(inFlight);
-
-        if (BANK_PAYMENT_METHOD_TYPES.has(methodType)) {
-          try {
-            await stripe.paymentIntents.cancel(inFlight.id);
-            console.log(
-              `[CLEANUP CRON] Booking ${booking.id}: cancelled unpaid ${methodType} ` +
-              `PaymentIntent ${inFlight.id} (held for BOOKING_TIMEOUT_MINUTES); releasing seat`
-            );
-            return { action: 'delete', paymentIntent: inFlight };
-          } catch (cancelError) {
-            console.error(
-              `[CLEANUP CRON] Failed to cancel PaymentIntent ${inFlight.id}; deferring to keep ` +
-              `the seat rather than risk taking payment for a released booking:`,
-              cancelError.message
-            );
-            return { action: 'defer', paymentIntent: inFlight };
-          }
-        }
-
-        return { action: 'defer', paymentIntent: inFlight };
+      const processing = intents.find((p) => PROCESSING_PI_STATUSES.has(p.status));
+      if (processing) {
+        return { action: 'defer', paymentIntent: processing };
       }
 
-      // Either no PI at all, or only canceled / requires_payment_method PIs.
-      // Genuinely abandoned — safe to delete.
-      return { action: 'delete', paymentIntent: search.data[0] || null };
+      // Card 3DS (and similar) stays deferred. Pay by Bank / unknown
+      // requires_action is cancelled below so the QR cannot outlive the seat.
+      for (const pi of intents) {
+        if (pi.status !== 'requires_action' && pi.status !== 'requires_confirmation') {
+          continue;
+        }
+        const methodType = await resolveChosenPaymentMethodType(pi);
+        if (methodType && !isPayByBankIntent(pi, methodType)) {
+          return { action: 'defer', paymentIntent: pi };
+        }
+      }
+
+      let last = intents[0] || null;
+      for (const pi of intents) {
+        if (!CANCELABLE_PI_STATUSES.has(pi.status)) continue;
+
+        const methodType = await resolveChosenPaymentMethodType(pi);
+        console.log(
+          `[CLEANUP CRON] Booking ${booking.id}: cancelling PaymentIntent ${pi.id} ` +
+          `(status=${pi.status}, method=${methodType || 'unknown'}) before releasing the seat`
+        );
+
+        const result = await cancelPaymentIntentOrExplain(pi);
+        last = result.paymentIntent || pi;
+
+        if (result.outcome === 'succeeded') {
+          return { action: 'recover', paymentIntent: result.paymentIntent };
+        }
+        if (result.outcome === 'processing' || result.outcome === 'failed') {
+          console.error(
+            `[CLEANUP CRON] Failed to cancel PaymentIntent ${pi.id}; deferring to keep ` +
+            `the seat rather than risk taking payment for a released booking:`,
+            result.error?.message || result.outcome
+          );
+          return { action: 'defer', paymentIntent: result.paymentIntent };
+        }
+
+        console.log(
+          `[CLEANUP CRON] Booking ${booking.id}: cancelled unpaid ` +
+          `${methodType || pi.status} PaymentIntent ${pi.id}`
+        );
+      }
+
+      return { action: 'delete', paymentIntent: last };
     } catch (error) {
       console.error(
         `[CLEANUP CRON] Stripe lookup failed for booking ${booking.id}; deferring delete to be safe:`,
