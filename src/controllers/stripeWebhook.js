@@ -179,6 +179,19 @@ class StripeWebhookController {
         allBookingIds
       );
 
+      // Cron (or another environment) already removed the unpaid rows. The Pay
+      // by Bank QR can still complete after that unless the PaymentIntent was
+      // cancelled — never confirm a ghost booking; refund instead.
+      if (bookingRows.length === 0) {
+        await connection.rollback();
+        console.error(
+          `[stripeWebhook] Payment ${session.id} succeeded but bookings ` +
+          `${allBookingIds.join(', ')} no longer exist; refunding`
+        );
+        await this.refundOrphanedPaymentIntent(session);
+        return;
+      }
+
       const bookingAmounts = allBookingIds.map((bid) => {
         const b = bookingRows.find((row) => Number(row.id) === Number(bid));
         if (!b) return paidAmount / allBookingIds.length;
@@ -311,6 +324,36 @@ class StripeWebhookController {
       throw error;
     } finally {
       connection.release();
+    }
+  }
+
+  /**
+   * Last resort: money arrived after the unpaid booking was already deleted.
+   * Cancelling the PaymentIntent is the primary fix; this refunds if a late
+   * Pay by Bank authorisation still succeeded.
+   */
+  async refundOrphanedPaymentIntent(paymentIntent) {
+    const piId = paymentIntent.id;
+    if (!piId) return;
+
+    try {
+      const refund = await stripe.refunds.create({
+        payment_intent: piId,
+        reason: 'requested_by_customer',
+        metadata: {
+          reason: 'booking_removed_before_payment_completed',
+          booking_id: String(paymentIntent.metadata?.booking_id || ''),
+          booking_ids: String(paymentIntent.metadata?.booking_ids || ''),
+        },
+      });
+      console.error(
+        `[stripeWebhook] Refunded orphaned PaymentIntent ${piId} as ${refund.id}`
+      );
+    } catch (error) {
+      console.error(
+        `[stripeWebhook] FAILED to refund orphaned PaymentIntent ${piId}:`,
+        error.message
+      );
     }
   }
 
