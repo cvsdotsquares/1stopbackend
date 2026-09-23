@@ -40,6 +40,10 @@ class StripeWebhookController {
         case 'payment_intent.created':
           console.log('ℹ️ Payment intent created (no action needed)');
           break;
+        case 'payment_intent.processing':
+        case 'payment_intent.requires_action':
+          console.log(`ℹ️ Payment still in progress (${event.type}); booking stays pending until payment_intent.succeeded`);
+          break;
         case 'payment_intent.succeeded':
           const paymentIntent = event.data.object;
           if (paymentIntent.metadata?.type === 'gift_voucher') {
@@ -175,6 +179,19 @@ class StripeWebhookController {
         allBookingIds
       );
 
+      // Cron (or another environment) already removed the unpaid rows. The Pay
+      // by Bank QR can still complete after that unless the PaymentIntent was
+      // cancelled — never confirm a ghost booking; refund instead.
+      if (bookingRows.length === 0) {
+        await connection.rollback();
+        console.error(
+          `[stripeWebhook] Payment ${session.id} succeeded but bookings ` +
+          `${allBookingIds.join(', ')} no longer exist; refunding`
+        );
+        await this.refundOrphanedPaymentIntent(session);
+        return;
+      }
+
       const bookingAmounts = allBookingIds.map((bid) => {
         const b = bookingRows.find((row) => Number(row.id) === Number(bid));
         if (!b) return paidAmount / allBookingIds.length;
@@ -307,6 +324,36 @@ class StripeWebhookController {
       throw error;
     } finally {
       connection.release();
+    }
+  }
+
+  /**
+   * Last resort: money arrived after the unpaid booking was already deleted.
+   * Cancelling the PaymentIntent is the primary fix; this refunds if a late
+   * Pay by Bank authorisation still succeeded.
+   */
+  async refundOrphanedPaymentIntent(paymentIntent) {
+    const piId = paymentIntent.id;
+    if (!piId) return;
+
+    try {
+      const refund = await stripe.refunds.create({
+        payment_intent: piId,
+        reason: 'requested_by_customer',
+        metadata: {
+          reason: 'booking_removed_before_payment_completed',
+          booking_id: String(paymentIntent.metadata?.booking_id || ''),
+          booking_ids: String(paymentIntent.metadata?.booking_ids || ''),
+        },
+      });
+      console.error(
+        `[stripeWebhook] Refunded orphaned PaymentIntent ${piId} as ${refund.id}`
+      );
+    } catch (error) {
+      console.error(
+        `[stripeWebhook] FAILED to refund orphaned PaymentIntent ${piId}:`,
+        error.message
+      );
     }
   }
 
@@ -558,7 +605,13 @@ class StripeWebhookController {
       }
 
       // Get payment intent from Stripe
-      const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent);
+      const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent, {
+        expand: ['latest_charge'],
+      });
+      const bookingIdFromMeta = paymentIntent.metadata?.booking_id;
+      const latestCharge = paymentIntent.latest_charge;
+      const amountRefunded = Number(latestCharge?.amount_refunded || 0);
+      const isRefunded = Boolean(latestCharge?.refunded) || amountRefunded > 0;
 
       // If payment succeeded, try to find the created booking
       if (paymentIntent.status === 'succeeded') {
@@ -568,12 +621,14 @@ class StripeWebhookController {
           FROM bookings b
           JOIN booking_attendees ba ON b.id = ba.booking_id
           WHERE ba.\`primary\` = 1
-          AND b.created >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+          AND (
+            ${bookingIdFromMeta ? 'b.id = ?' : 'b.created >= DATE_SUB(NOW(), INTERVAL 1 HOUR)'}
+          )
           ORDER BY b.created DESC
           LIMIT 1
-        `);
+        `, bookingIdFromMeta ? [bookingIdFromMeta] : []);
 
-        if (bookings.length > 0) {
+        if (bookings.length > 0 && !isRefunded) {
           const booking = bookings[0];
           return res.json({
             success: true,
@@ -587,6 +642,24 @@ class StripeWebhookController {
             },
           });
         }
+
+        // Paid, but the seat is gone: the booking timed out and was removed
+        // (a Pay by Bank QR stays scannable until its PaymentIntent is
+        // cancelled), so the webhook refunds instead of confirming. Never
+        // report this as a successful booking.
+        return res.json({
+          success: true,
+          data: {
+            payment_status: isRefunded ? 'refunded' : 'booking_released',
+            payment_method_type: paymentIntent.payment_method_types?.[0] || null,
+            temp_ref: temp_ref || null,
+            amount_paid: paymentIntent.amount_received / 100,
+            amount_refunded: amountRefunded / 100,
+            message: isRefunded
+              ? 'Payment refunded because the booking was no longer held'
+              : 'Payment received but the booking was no longer held; a refund is being issued',
+          },
+        });
       }
 
       // Payment not yet processed or failed
@@ -594,8 +667,12 @@ class StripeWebhookController {
         success: true,
         data: {
           payment_status: paymentIntent.status,
+          payment_method_type: paymentIntent.payment_method_types?.[0] || null,
           temp_ref: temp_ref || null,
           message: paymentIntent.status === 'succeeded' ? 'Payment processing...' : 'Payment pending',
+          // Lets the return page explain *why* a redirect payment came back unpaid
+          // (declined card, abandoned bank authorisation, etc.).
+          last_payment_error: paymentIntent.last_payment_error?.message || null,
         },
       });
 

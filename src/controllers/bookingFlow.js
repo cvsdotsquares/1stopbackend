@@ -5,6 +5,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendBookingConfirmation } = require('../utils/emailService');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const { findOrCreateStripeCustomerByEmail } = require('../utils/stripeCustomer');
+const { createBookingPaymentIntent } = require('../utils/stripeBookingPayment');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const {
   loadAvailabilityCohortCache,
@@ -1743,31 +1744,29 @@ class BookingFlowController {
             }
           });
 
-          const paymentIntent = await stripe.paymentIntents.create({
-            amount: Math.round(amountToChargeNow * 100),
-            currency: 'gbp',
-            automatic_payment_methods: { enabled: true },
-            ...(stripeCustomerId ? { customer: stripeCustomerId } : {}),
-            metadata: {
-              booking_id: primaryBookingId.toString(),
-              booking_ref: primaryBookingRef,
-              booking_ids: bookingIds.join(','),
-              booking_refs: bookingRefs.join(','),
-              course_id: course_id.toString(),
-              course_event_id: course_event_id.toString(),
-              spaces: attendees_count.toString(),
-              user_id: userIds[0].toString(),
-              attendees_count: attendees_count.toString(),
-              first_attendee_name: primaryAttendeeName,
-              first_attendee_phone: String(primaryAttendee?.contact1 || ''),
-              first_attendee_email: String(primaryAttendee?.email || ''),
-              first_attendee_driving_licence: String(primaryAttendee?.license_number || ''),
-              course_date: courseDateText,
-              // Carried to webhook for email_logs.ip (customer IP, not Stripe's server)
-              client_ip: String((req.clientIp || req.ip || '')).replace(/^::ffff:/, '').trim().slice(0, 500)
-            },
-            description: stripeDescription,
-            receipt_email: attendees[0].email
+          const paymentIntent = await createBookingPaymentIntent(stripe, {
+              amount: Math.round(amountToChargeNow * 100),
+              customer: stripeCustomerId,
+              metadata: {
+                booking_id: primaryBookingId.toString(),
+                booking_ref: primaryBookingRef,
+                booking_ids: bookingIds.join(','),
+                booking_refs: bookingRefs.join(','),
+                course_id: course_id.toString(),
+                course_event_id: course_event_id.toString(),
+                spaces: attendees_count.toString(),
+                user_id: userIds[0].toString(),
+                attendees_count: attendees_count.toString(),
+                first_attendee_name: primaryAttendeeName,
+                first_attendee_phone: String(primaryAttendee?.contact1 || ''),
+                first_attendee_email: String(primaryAttendee?.email || ''),
+                first_attendee_driving_licence: String(primaryAttendee?.license_number || ''),
+                course_date: courseDateText,
+                // Carried to webhook for email_logs.ip (customer IP, not Stripe's server)
+                client_ip: String((req.clientIp || req.ip || '')).replace(/^::ffff:/, '').trim().slice(0, 500)
+              },
+              description: stripeDescription,
+              receiptEmail: attendees[0].email
           });
 
           await connection.commit();

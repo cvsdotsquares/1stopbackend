@@ -664,6 +664,23 @@ async function applyGroupSpaceDelta(connection, courseEventId, { lockDelta = 0, 
       params
     );
   }
+
+  // A zero-row update means the seat counters silently did not move, which
+  // would let the same space be sold twice.
+  if (!result?.affectedRows) {
+    console.error(
+      `[SPACE DELTA] No course_events rows updated for event ${courseEventId} ` +
+      `(lockDelta=${lockDelta}, bookingsDoneDelta=${bookingsDoneDelta}, ` +
+      `useParentGroup=${useParentGroup}, parentKey=${parentKey})`
+    );
+    return;
+  }
+
+  console.log(
+    `[SPACE DELTA] event ${courseEventId}: lockDelta=${lockDelta}, ` +
+    `bookingsDoneDelta=${bookingsDoneDelta}, rows=${result.affectedRows}` +
+    (useParentGroup ? ` (cohort parent ${parentKey})` : '')
+  );
 }
 
 /**
