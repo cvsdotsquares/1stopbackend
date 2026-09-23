@@ -1,18 +1,11 @@
 const { removeExpirelocks } = require('./bookingService');
 const { isEventFrozen } = require('./courseEventWizardService');
-const {
-  getLatestEventDateFromRows,
-  isEventDatePassed,
-} = require('./adminBookingHoldService');
 const { isStripePaymentLinkLockedBy } = require('../constants');
 
-const TOB_LABELS = {
-  m: 'MOTO',
-  o: 'Online',
-  t: 'Terminal',
-  w: 'Worldpay',
-  r: 'RideTo',
-};
+const {
+  getTypeOfBookLabel,
+  TYPE_OF_BOOK_LABELS,
+} = require('../../utils/typeOfBook');
 
 const VEHICLE_TYPE_LABELS = {
   0: 'Manual',
@@ -161,9 +154,6 @@ function showDepositCancellationWarning(event, dates) {
 }
 
 function deriveBookingDisplayStatus(booking) {
-  if (Number(booking.on_hold) === 1) {
-    return 'On Hold';
-  }
   if (Number(booking.status) === 1 && Number(booking.refundable) === 0) {
     return 'Confirmed';
   }
@@ -291,7 +281,6 @@ async function getEventBookingPage(pool, evId, session) {
     [eventId]
   );
   const dates = buildEventDatesMap(dateRows);
-  const eventDatePassed = isEventDatePassed(getLatestEventDateFromRows(dateRows));
 
   const frozen = await getFrozenData(pool, eventId);
   const isFrozen = Boolean(frozen);
@@ -320,8 +309,7 @@ async function getEventBookingPage(pool, evId, session) {
   const [bookingRows] = await pool.query(
     `SELECT total_amount, payment_due, refundable, booking_ref,
             first_name, sur_name, type_of_book, spaces, status,
-            bookings.created, bookings.id, booking_id, vehicle_type,
-            IFNULL(bookings.on_hold, 0) AS on_hold
+            bookings.created, bookings.id, booking_id, vehicle_type
      FROM bookings
      LEFT JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
      WHERE course_event_id = ? AND bookings.status = 1
@@ -345,7 +333,7 @@ async function getEventBookingPage(pool, evId, session) {
       booking_ref: row.booking_ref,
       attendee_name: `${row.first_name || ''} ${row.sur_name || ''}`.trim(),
       type_of_book: row.type_of_book,
-      type_of_book_label: TOB_LABELS[row.type_of_book] || row.type_of_book,
+      type_of_book_label: getTypeOfBookLabel(row.type_of_book),
       vehicle_type: row.vehicle_type,
       vehicle_type_label:
         VEHICLE_TYPE_LABELS[row.vehicle_type] ||
@@ -359,23 +347,11 @@ async function getEventBookingPage(pool, evId, session) {
       created_label: formatBookingCreated(row.created),
       total_amount: row.total_amount,
       payment_due: row.payment_due,
-      on_hold: Number(row.on_hold) === 1,
       can_edit:
-        Number(row.status) === 1 &&
-        Number(row.refundable) === 0 &&
-        Number(row.on_hold) !== 1,
-      can_refund:
-        Number(row.refundable) === 1 && Number(row.on_hold) !== 1,
+        Number(row.status) === 1 && Number(row.refundable) === 0,
+      can_refund: Number(row.refundable) === 1,
       can_delete:
-        Number(row.status) === 1 &&
-        Number(row.refundable) === 0 &&
-        Number(row.on_hold) !== 1,
-      can_hold:
-        Number(row.status) === 1 &&
-        Number(row.refundable) === 0 &&
-        Number(row.on_hold) !== 1 &&
-        !eventDatePassed,
-      can_reinstate: Number(row.on_hold) === 1,
+        Number(row.status) === 1 && Number(row.refundable) === 0,
     });
   }
 
@@ -444,7 +420,7 @@ async function getEventBookingPage(pool, evId, session) {
     locks,
     bookings,
     vehicle_type_labels: VEHICLE_TYPE_LABELS,
-    tob_labels: TOB_LABELS,
+    tob_labels: TYPE_OF_BOOK_LABELS,
   };
 }
 

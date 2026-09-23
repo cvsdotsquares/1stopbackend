@@ -103,7 +103,7 @@ class DashboardController {
           courseAvailsDashboard(this.pool, searchterm, req.query),
           selectFutureCourses(this.pool),
           selectLocations(this.pool),
-          getCurrentLocksTotal(this.pool),
+          getCurrentLocksTotal(this.pool, req.session),
         ]);
 
       let layout;
@@ -157,7 +157,7 @@ class DashboardController {
 
   async getCurrentLockCount(req, res) {
     try {
-      const total = await getCurrentLocksTotal(this.pool);
+      const total = await getCurrentLocksTotal(this.pool, req.session);
       return res.json({
         success: true,
         data: {

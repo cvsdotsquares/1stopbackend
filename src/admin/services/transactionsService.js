@@ -8,36 +8,49 @@
  * - Attendee join prefers primary attendee to avoid payment-row duplication.
  */
 const { phpUnserialize } = require('../../utils/phpSerialize');
+const {
+  getTransactionTypeLabel,
+  getTransactionTypeFilterOptions,
+  normalizeTypeOfBookCode,
+} = require('../../utils/typeOfBook');
+
+/** Only completed / confirmed money received — no pending Stripe links or abandoned MOTO. */
+const CONFIRMED_PAYMENT_SQL = `
+  booking_payments.isDelete = 0
+  AND booking_payments.payment_type <> 'STRIPE_LINK'
+  AND COALESCE(booking_payments.transation_type, 'booking') NOT IN ('pending_link')
+  AND (
+    booking_payments.transation_type IN ('custom_payment', 'gift_voucher')
+    OR bookings.status = 1
+  )
+`;
+
+const TOB_FILTER_PAYMENT_TYPES = {
+  pl: ['payment_link', 'PAYMENT_LINK'],
+  bt: ['BANK_TRANSFER'],
+  c: ['IN_PERSON'],
+  z: ['ZERO_COST'],
+  t: ['TERMINAL', 'CASH'],
+  m: ['MOTO'],
+};
 
 const RECORDS_PER_PAGE = 10;
 
-const BOOKING_STATUS = ['Pending', 'Confirmed', 'Refunded'];
-const TOB_LABELS = {
-  m: 'MOTO',
-  o: 'Online',
-  t: 'Terminal',
-  w: 'Worldpay',
-  r: 'RideTo',
+const TOB_NAME_SEARCH = {
+  TERMINAL: 't',
+  MOTO: 'm',
+  ONLINE: 'o',
+  RIDETO: 'r',
+  WORLDPAY: 'w',
+  'PAYMENT LINK': 'pl',
+  'BANK TRANSFER': 'bt',
+  'IN PERSON': 'c',
+  'ZERO COST': 'z',
 };
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
 }
-
-function parseMoneyFilter(value) {
-  const raw = trim(value).replace(/^£/, '');
-  if (!raw) return null;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : null;
-}
-
-const TOB_FILTER_OPTIONS = [
-  { value: '', label: 'All types' },
-  { value: 'o', label: 'Online' },
-  { value: 't', label: 'Terminal' },
-  { value: 'm', label: 'MOTO' },
-  { value: 'r', label: 'RideTo' },
-];
 
 function parseExtraInfo(raw) {
   if (raw == null || raw === '') return null;
@@ -68,7 +81,7 @@ function parseExtraInfo(raw) {
  * }}
  */
 function buildListWhere(searchterm = {}) {
-  const whereParts = ['(bookings.status != 5 OR bookings.status IS NULL)'];
+  const whereParts = [`(${CONFIRMED_PAYMENT_SQL.trim()})`];
   const params = [];
   let needsAttendee = false;
   let needsCourse = false;
@@ -80,9 +93,9 @@ function buildListWhere(searchterm = {}) {
     const upper = nameScr.toUpperCase();
     needsDeletedSearch = true;
 
-    if (upper === 'TERMINAL' || upper === 'MOTO' || upper === 'ONLINE') {
-      const tob =
-        upper === 'TERMINAL' ? 't' : upper === 'MOTO' ? 'm' : 'o';
+    const tobFromName = TOB_NAME_SEARCH[upper];
+    if (tobFromName) {
+      const tob = tobFromName;
       needsAttendee = true;
       whereParts.push(`(
         booking_attendees.booking_ref LIKE ?
@@ -134,18 +147,22 @@ function buildListWhere(searchterm = {}) {
     }
   }
 
-  const statusScr = trim(searchterm.status_scr);
-  if (statusScr !== '') {
-    if (statusScr === '0') {
-      whereParts.push('bookings.status = ?');
-      params.push(2);
-    } else if (statusScr === '1') {
-      whereParts.push('bookings.status = ?');
-      params.push(1);
-    } else if (statusScr === '2') {
-      whereParts.push('booking_payments.transation_type = ?');
-      params.push('custom_payment');
-    }
+  const amountScr = trim(searchterm.amount_scr);
+  if (amountScr && /^-?\d+(\.\d+)?$/.test(amountScr)) {
+    whereParts.push('booking_payments.amount = ?');
+    params.push(Number(amountScr));
+  }
+
+  const amountFromScr = trim(searchterm.amount_from_scr);
+  if (amountFromScr && /^-?\d+(\.\d+)?$/.test(amountFromScr)) {
+    whereParts.push('booking_payments.amount >= ?');
+    params.push(Number(amountFromScr));
+  }
+
+  const amountToScr = trim(searchterm.amount_to_scr);
+  if (amountToScr && /^-?\d+(\.\d+)?$/.test(amountToScr)) {
+    whereParts.push('booking_payments.amount <= ?');
+    params.push(Number(amountToScr));
   }
 
   // Prefer range predicates so created index can be used (avoid DATE()).
@@ -161,32 +178,28 @@ function buildListWhere(searchterm = {}) {
     params.push(toScr);
   }
 
-  const tobScr = trim(searchterm.tob_scr).toLowerCase();
+  const tobScr = normalizeTypeOfBookCode(searchterm.tob_scr);
   if (tobScr) {
-    const label = TOB_LABELS[tobScr] || '';
-    whereParts.push(`(
-      bookings.type_of_book = ?
-      OR booking_payments.payment_type = ?
-      OR LOWER(booking_payments.payment_type) = LOWER(?)
-    )`);
-    params.push(tobScr, tobScr, label);
-  }
-
-  const exactAmount = parseMoneyFilter(searchterm.amount_scr);
-  const amountFrom = parseMoneyFilter(searchterm.amount_from_scr);
-  const amountTo = parseMoneyFilter(searchterm.amount_to_scr);
-
-  if (exactAmount != null) {
-    whereParts.push('booking_payments.amount = ?');
-    params.push(exactAmount);
-  } else {
-    if (amountFrom != null) {
-      whereParts.push('booking_payments.amount >= ?');
-      params.push(amountFrom);
-    }
-    if (amountTo != null) {
-      whereParts.push('booking_payments.amount <= ?');
-      params.push(amountTo);
+    const paymentTypes = TOB_FILTER_PAYMENT_TYPES[tobScr];
+    if (tobScr === 'm') {
+      whereParts.push(`(
+        bookings.type_of_book = ?
+        OR (
+          booking_payments.transation_type = 'custom_payment'
+          AND booking_payments.payment_type = 'MOTO'
+        )
+      )`);
+      params.push(tobScr);
+    } else if (paymentTypes?.length) {
+      whereParts.push(
+        `(bookings.type_of_book = ? OR booking_payments.payment_type IN (${paymentTypes
+          .map(() => '?')
+          .join(',')}))`
+      );
+      params.push(tobScr, ...paymentTypes);
+    } else {
+      whereParts.push('bookings.type_of_book = ?');
+      params.push(tobScr);
     }
   }
 
@@ -254,8 +267,11 @@ function mapTransactionRow(row) {
   let attendee = `${trim(row.first_name)} ${trim(row.sur_name)}`.trim();
   let course = row.course_name || '';
   let company = row.franchise_name || '';
-  let tob = row.type_of_book ? TOB_LABELS[row.type_of_book] || row.type_of_book : '';
-  let statusLabel = '';
+  let tob = getTransactionTypeLabel({
+    typeOfBook: row.type_of_book,
+    paymentType: row.payment_type,
+    transactionType,
+  });
   let linkHint = null;
 
   if (transactionType === 'custom_payment' || transactionType === 'gift_voucher') {
@@ -269,23 +285,12 @@ function mapTransactionRow(row) {
       }
     }
     ref = row.custom_payment_booking_ref || ref;
-    tob = row.payment_type || tob;
-    statusLabel = 'Completed';
     linkHint =
       transactionType === 'gift_voucher'
         ? { type: 'gift_voucher', booking_id: row.bpbid }
-        : { type: 'custom_payment', booking_id: row.bpbid };
-  } else {
-    const bstatus = row.bstatus == null ? null : Number(row.bstatus);
-    statusLabel =
-      bstatus != null && BOOKING_STATUS[bstatus]
-        ? BOOKING_STATUS[bstatus]
-        : 'Deleted';
-    if (Number(row.bstatus) === 1 && Number(row.isDelete) === 0) {
-      linkHint = { type: 'booking', booking_id: row.bid };
-    } else if (Number(row.isDelete) === 1) {
-      linkHint = { type: 'deleted_booking', booking_id: row.bpbid };
-    }
+        : null;
+  } else if (Number(row.bstatus) === 1 && Number(row.isDelete) === 0 && row.bid) {
+    linkHint = { type: 'booking', booking_id: row.bid };
   }
 
   return {
@@ -298,7 +303,7 @@ function mapTransactionRow(row) {
     amount: Number(row.amount) || 0,
     course,
     company,
-    status: statusLabel,
+    status: 'Confirmed',
     booking_status: row.bstatus == null ? null : Number(row.bstatus),
     isDelete: Number(row.isDelete) || 0,
     transaction_type: transactionType,
@@ -411,7 +416,6 @@ async function listTransactions(pool, { page = 1, searchterm = {} } = {}) {
     },
     filters: {
       name_scr: trim(searchterm.name_scr),
-      status_scr: trim(searchterm.status_scr),
       from_scr: trim(searchterm.from_scr),
       to_scr: trim(searchterm.to_scr),
       tob_scr: trim(searchterm.tob_scr),
@@ -419,13 +423,7 @@ async function listTransactions(pool, { page = 1, searchterm = {} } = {}) {
       amount_from_scr: trim(searchterm.amount_from_scr),
       amount_to_scr: trim(searchterm.amount_to_scr),
     },
-    statusOptions: [
-      { value: '', label: 'All' },
-      { value: '1', label: 'Confirmed' },
-      { value: '0', label: 'Refunded' },
-      { value: '2', label: 'Sale' },
-    ],
-    typeOptions: TOB_FILTER_OPTIONS,
+    typeOptions: getTransactionTypeFilterOptions(),
   };
 }
 

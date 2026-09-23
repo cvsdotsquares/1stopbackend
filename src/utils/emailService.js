@@ -2,6 +2,13 @@ const nodemailer = require('nodemailer');
 const { formatDateToDDMMYYYY, formatMySQLDateToDDMMYYYY } = require('./dateFormat');
 const { replaceTokens } = require('./tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('./mailFrom');
+const {
+  getBookingRefEmailSuffix,
+  isKnownTypeOfBookCode,
+  resolveBookingConfirmationRefSuffix,
+} = require('./typeOfBook');
+
+const DISPLAY_REF_SUFFIX = /^(PL|BT|R2|T|O|M|C|Z|W)$/i;
 
 // SMTP transport configuration:
 //   - SMTP_SECURE=true (port 465) → implicit TLS from the first byte.
@@ -271,6 +278,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    course_name,
    booking_ref,
    booking_type = 'O',
+  type_of_book,
+  payment_type,
   bookingRefSuffix = '',
    refundable = 0,
    attendees = [],
@@ -383,7 +392,24 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     ? undefined
     : (String(bcc || process.env.BOOKING_BCC || '').trim() || undefined);
 
-  const bookingTypeLabel = `${String(booking_type).charAt(0).toUpperCase()}${String(bookingRefSuffix || '').trim().toUpperCase()}`;
+  const resendExtra = String(bookingRefSuffix || '').trim().toUpperCase();
+  const rawBookingType = String(booking_type || '').trim();
+  let bookingTypeLabel;
+  if (type_of_book != null || payment_type != null) {
+    bookingTypeLabel = resolveBookingConfirmationRefSuffix({
+      typeOfBook: type_of_book,
+      paymentType: payment_type,
+    });
+  } else if (DISPLAY_REF_SUFFIX.test(rawBookingType)) {
+    bookingTypeLabel = rawBookingType.toUpperCase();
+  } else if (isKnownTypeOfBookCode(booking_type)) {
+    bookingTypeLabel = getBookingRefEmailSuffix(booking_type);
+  } else if (rawBookingType.length > 1) {
+    bookingTypeLabel = rawBookingType;
+  } else {
+    bookingTypeLabel = `${rawBookingType.charAt(0).toUpperCase() || 'O'}`;
+  }
+  bookingTypeLabel = `${bookingTypeLabel}${resendExtra}`;
 
   const createBookingEmailHtml = (recipientAttendee) => {
    const recipientFirstName = recipientAttendee.first_name || 'Customer';
@@ -1448,36 +1474,201 @@ function escapePaymentLinkHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
+function paymentLinkTrim(value) {
+  return value == null ? '' : String(value).trim();
+}
+
+/** Matches DB / public booking name formatting (bookingFlow.js). */
+function paymentLinkTitleCase(value) {
+  const s = paymentLinkTrim(value);
+  if (!s) return '';
+  return s.replace(/\w\S*/g, (txt) =>
+    txt.charAt(0).toUpperCase() + txt.slice(1).toLowerCase()
+  );
+}
+
+function paymentLinkToDateKey(value) {
+  if (value == null || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    const key = `${y}-${m}-${d}`;
+    return key === '0000-00-00' || y < 1900 ? 'TBC' : key;
+  }
+  const raw = paymentLinkTrim(value);
+  if (!raw || raw === 'TBC') return raw === 'TBC' ? 'TBC' : '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const key = raw.slice(0, 10);
+    return key === '0000-00-00' ? 'TBC' : key;
+  }
+  return raw;
+}
+
+function formatPaymentLinkLongDate(value) {
+  if (!value || value === '0000-00-00' || value === 'TBC') return 'TBC';
+  const d = new Date(`${String(value).slice(0, 10)}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(value);
+  const weekdays = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
+  const months = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  const dayNum = d.getDate();
+  const suffix =
+    dayNum % 10 === 1 && dayNum !== 11
+      ? 'st'
+      : dayNum % 10 === 2 && dayNum !== 12
+        ? 'nd'
+        : dayNum % 10 === 3 && dayNum !== 13
+          ? 'rd'
+          : 'th';
+  return `${weekdays[d.getDay()]} ${dayNum}${suffix} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+function formatPaymentLinkTimeAmPm(timeRange) {
+  if (!timeRange) return '';
+  const parts = String(timeRange).split('-');
+  const formatOne = (t) => {
+    const raw = paymentLinkTrim(t);
+    if (!raw) return '';
+    const num = Number(raw.replace(':', '.'));
+    const hourPart = paymentLinkTrim(raw).replace(/^0+/, '') || '0';
+    if (Number.isNaN(num)) return raw;
+    return num >= 12 ? `${hourPart}pm` : `${hourPart}am`;
+  };
+  const one = formatOne(parts[0]);
+  const two = parts[1] ? formatOne(parts[1]) : '';
+  return two ? `${one} - ${two}` : one;
+}
+
+/** Date/time lines for payment-link email (matches admin booking wizard / website listing). */
+function buildPaymentLinkEmailDateLines(dateRows) {
+  const entries = [];
+  let dayNumber = 0;
+  let nonTbcCount = 0;
+
+  for (const row of dateRows || []) {
+    dayNumber += 1;
+    const dateKey = paymentLinkToDateKey(row.event_date);
+    const isTbc = !dateKey || dateKey === 'TBC';
+    if (!isTbc) nonTbcCount += 1;
+    const timeLabel = formatPaymentLinkTimeAmPm(
+      `${row.event_start_time || ''} - ${row.event_end_time || ''}`
+    );
+    entries.push({ dayNumber, isTbc, dateKey, timeLabel });
+  }
+
+  const isMultiDay = nonTbcCount > 1;
+
+  return entries.map((entry) => {
+    if (entry.isTbc) {
+      return isMultiDay
+        ? `Day ${entry.dayNumber} - TBC`
+        : `Day ${entry.dayNumber} - TBC`;
+    }
+    const dateLabel = formatPaymentLinkLongDate(entry.dateKey);
+    const segment = `${dateLabel} (${entry.timeLabel})`;
+    if (isMultiDay) {
+      return `Day ${entry.dayNumber} - ${segment}`;
+    }
+    return segment;
+  });
+}
+
+exports.buildPaymentLinkEmailDateLines = buildPaymentLinkEmailDateLines;
+
 exports.sendAdminStripePaymentLinkEmail = async ({
   to,
-  customerName,
+  firstName,
+  attendees,
   courseName,
+  courseDateLines,
+  locationName,
+  locationAddress,
   amountLabel,
   paymentUrl,
   expireMinutes,
-  bookingRefs,
 } = {}) => {
   const recipient = String(to || '').trim();
   if (!recipient) {
     return { sent: false, reason: 'no_recipient' };
   }
 
-  const greetingName = String(customerName || '').trim() || 'there';
-  const refs = String(bookingRefs || '').trim();
+  const greetingName = paymentLinkTitleCase(firstName) || 'there';
   const minutes = Math.max(1, Number(expireMinutes) || 1);
-  const subject = `Payment link for your ${courseName || 'course'} booking`;
+  const course = paymentLinkTrim(courseName) || 'course';
+  const subject = `Payment for your ${course} with 1 Stop Instruction`;
+
+  const attendeeLines = (attendees || [])
+    .map((row) => {
+      const ref = paymentLinkTrim(row.bookingRef);
+      const name =
+        `${paymentLinkTitleCase(row.firstName)} ${paymentLinkTitleCase(row.surName)}`.trim();
+      if (!ref && !name) return '';
+      if (ref && name) return `${ref} - ${name}`;
+      return ref || name;
+    })
+    .filter(Boolean);
+
+  const dateLines = Array.isArray(courseDateLines)
+    ? courseDateLines.filter((line) => paymentLinkTrim(line))
+    : [];
+  const dateHtml = dateLines.length
+    ? dateLines
+        .map((line) => escapePaymentLinkHtml(line))
+        .join('<br />')
+    : '—';
+
+  const safeUrl = escapePaymentLinkHtml(paymentUrl);
   const html = `
     <p>Hi ${escapePaymentLinkHtml(greetingName)},</p>
-    <p>Please complete payment for your 1 Stop Instruction booking using the link below.</p>
-    ${refs ? `<p>Booking reference: <strong>${escapePaymentLinkHtml(refs)}</strong></p>` : ''}
-    ${amountLabel ? `<p>Amount due: <strong>${escapePaymentLinkHtml(amountLabel)}</strong></p>` : ''}
-    <p>
-      <a href="${escapePaymentLinkHtml(paymentUrl)}" target="_blank" rel="noopener noreferrer">
-        Pay now
+    <p>Please use this link to make payment for your training course with 1 Stop Instruction.</p>
+    <p>The payment relates to Booking Reference(s):</p>
+    ${
+      attendeeLines.length
+        ? attendeeLines
+            .map(
+              (line) =>
+                `<p>${escapePaymentLinkHtml(line)}</p>`
+            )
+            .join('')
+        : '<p>—</p>'
+    }
+    <p><strong>Course:</strong> ${escapePaymentLinkHtml(course)}</p>
+    <p><strong>Date &amp; Time:</strong><br />${dateHtml}</p>
+    <p><strong>Location:</strong> ${escapePaymentLinkHtml(locationName || '—')}</p>
+    <p><strong>Address:</strong> ${escapePaymentLinkHtml(locationAddress || '—')}</p>
+    <p><strong>Amount Due:</strong> ${escapePaymentLinkHtml(amountLabel || '—')}</p>
+    <p style="margin: 20px 0;">
+      <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #cc0000; font-weight: bold; font-size: 16px; text-decoration: underline;">
+        PAY NOW
       </a>
     </p>
-    <p>This link can be used <strong>once</strong> and expires in <strong>${minutes} minute${minutes === 1 ? '' : 's'}</strong>.</p>
+    <p>This payment link is a one-time link, and will expire in ${minutes} minute${minutes === 1 ? '' : 's'} or once the payment has been made (whichever happens first).</p>
     <p>If the link has expired, please contact us for a new one.</p>
+    <p>Please note, your booking(s) will only be confirmed once payment has been received.</p>
+    <p>After you have made a successful payment, each attendee will receive an email booking confirmation with full details about the course.</p>
+    <p>If you or any other attendee does not receive an email booking confirmation shortly after making your payment, please check your junk/spam inboxes, but if it has not been received within 1 hour, please reach out and contact us as soon as possible either by phone or email.</p>
+    <p>Regards,<br />1 Stop Instruction</p>
   `;
 
   try {

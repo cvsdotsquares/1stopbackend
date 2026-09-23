@@ -1,4 +1,8 @@
 const { removeExpirelocks } = require('./bookingService');
+const {
+  normalizeDrivingLicence,
+  validateDrivingLicenceNumber,
+} = require('../../utils/drivingLicenceValidation');
 const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../constants');
 const { phpSerialize } = require('../../utils/phpSerialize');
 const {
@@ -7,6 +11,13 @@ const {
   syncAdminOriginalAmount,
   showDepositPrice,
 } = require('./adminBookingPromoService');
+const {
+  resolveAdminWizardTypeOfBook,
+  getAdminCompletionPaymentType,
+  ensureTypeOfBookEnum,
+  normalizeTypeOfBookCode,
+  ADMIN_WIZARD_PAYMENT_TYPE_VALUES,
+} = require('../../utils/typeOfBook');
 
 const TBC_DATE = '0000-00-00';
 
@@ -465,7 +476,7 @@ async function getContactCard(pool, userId) {
 }
 
 async function checkBlacklisted(pool, licenseNumber) {
-  const license = trim(licenseNumber);
+  const license = normalizeDrivingLicence(licenseNumber);
   if (!license) return null;
   const [rows] = await pool.query(
     `SELECT * FROM booking_attendees_dropdown
@@ -474,6 +485,108 @@ async function checkBlacklisted(pool, licenseNumber) {
     [license]
   );
   return rows?.[0] || null;
+}
+
+async function checkWizardAttendeeLicence(pool, licenseNumber) {
+  const format = validateDrivingLicenceNumber(licenseNumber, { required: true });
+  if (!format.valid) {
+    return {
+      ok: false,
+      issue: 'format',
+      message: format.message || 'Driving licence number is not valid',
+    };
+  }
+
+  const blackData = await checkBlacklisted(pool, licenseNumber);
+  if (blackData) {
+    const name = `${trim(blackData.first_name)} ${trim(blackData.sur_name)}`.trim();
+    return {
+      ok: false,
+      issue: 'blacklist',
+      message:
+        'This driving licence number is on the blacklist. Please contact the office if you need to proceed.',
+      data: {
+        id: blackData.id,
+        full_name: name,
+        license_number: blackData.license_number || normalizeDrivingLicence(licenseNumber),
+        notes: blackData.notes || '',
+      },
+    };
+  }
+
+  return { ok: true };
+}
+
+async function saveContactCardDraft(pool, attendee) {
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const license = normalizeDrivingLicence(attendee.license_number);
+  const cardId = Number(attendee.self_attendee) || 0;
+  const hasAnyDetail =
+    trim(attendee.first_name) ||
+    trim(attendee.sur_name) ||
+    trim(attendee.email) ||
+    trim(attendee.contact1) ||
+    license;
+
+  if (!hasAnyDetail) return null;
+
+  const payload = [
+    titleCase(attendee.first_name),
+    titleCase(attendee.sur_name),
+    trim(attendee.contact1).replace(/\s/g, ''),
+    trim(attendee.contact2).replace(/\s/g, ''),
+    trim(attendee.contact3).replace(/\s/g, ''),
+    parseDateOfBirth(attendee.date_of_birth),
+    trim(attendee.email),
+    attendee.vehicle_type === '' || attendee.vehicle_type == null
+      ? null
+      : attendee.vehicle_type,
+    attendee.license_type === '' || attendee.license_type == null
+      ? null
+      : attendee.license_type,
+    license,
+    trim(attendee.theory_number),
+    trim(attendee.notes),
+  ];
+
+  if (cardId > 0) {
+    await pool.query(
+      `UPDATE booking_attendees_dropdown
+       SET first_name = ?, sur_name = ?, contact1 = ?, contact2 = ?, contact3 = ?,
+           date_of_birth = ?, email = ?, vehicle_type = ?, license_type = ?,
+           license_number = ?, theory_number = ?, notes = ?
+       WHERE id = ?`,
+      [...payload, cardId]
+    );
+    return cardId;
+  }
+
+  if (license) {
+    const [existing] = await pool.query(
+      'SELECT id FROM booking_attendees_dropdown WHERE license_number = ? LIMIT 1',
+      [license]
+    );
+    if (existing?.[0]?.id) {
+      await pool.query(
+        `UPDATE booking_attendees_dropdown
+         SET first_name = ?, sur_name = ?, contact1 = ?, contact2 = ?, contact3 = ?,
+             date_of_birth = ?, email = ?, vehicle_type = ?, license_type = ?,
+             license_number = ?, theory_number = ?, notes = ?
+         WHERE id = ?`,
+        [...payload, existing[0].id]
+      );
+      return existing[0].id;
+    }
+  }
+
+  const [insertResult] = await pool.query(
+    `INSERT INTO booking_attendees_dropdown
+      (first_name, sur_name, contact1, contact2, contact3, date_of_birth, email,
+       vehicle_type, license_type, license_number, theory_number, notes, created)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [...payload, now]
+  );
+  return insertResult.insertId;
 }
 
 function getVatRate(session) {
@@ -674,7 +787,7 @@ async function saveAttendee(pool, bookingId, attendee) {
   return bookingRef;
 }
 
-async function saveBookingCompleteCash(pool, bookingId) {
+async function saveBookingCompleteCash(pool, bookingId, typeOfBook = 't') {
   await pool.query(
     'UPDATE bookings SET payment_due = payment_due - admin_payment_received, status = 1 WHERE id = ?',
     [bookingId]
@@ -685,18 +798,28 @@ async function saveBookingCompleteCash(pool, bookingId) {
   );
   const amount = bookRows?.[0]?.admin_payment_received || 0;
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const paymentType = getAdminCompletionPaymentType(typeOfBook);
   await pool.query(
     `INSERT INTO booking_payments
       (booking_id, payment_type, transation_id, response, amount, created)
-     VALUES (?, 'CASH', '', '', ?, ?)`,
-    [bookingId, amount, now]
+     VALUES (?, ?, '', '', ?, ?)`,
+    [bookingId, paymentType, amount, now]
   );
 
   const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
   await sendAdminBookingConfirmationEmail(pool, bookingId);
 }
 
-async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lockId, session) {
+async function saveBookingRecord(
+  pool,
+  attendee,
+  event,
+  adminId,
+  paymentMode,
+  lockId,
+  session,
+  typeOfBook
+) {
   const amount = Number(attendee.course_cost) || 0;
   const paymentReceived = Number(attendee.payment_received) || 0;
   const vatRate = getVatRate(session);
@@ -723,7 +846,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lo
       event.course_id,
       event.id,
       adminId,
-      paymentMode === 'worldpay' ? 'm' : paymentMode === 'stripe' ? 'o' : 't',
+      typeOfBook,
       amount,
       amount,
       vatRate,
@@ -743,7 +866,7 @@ async function saveBookingRecord(pool, attendee, event, adminId, paymentMode, lo
   const bookingRef = await saveAttendee(pool, bookingId, attendee);
 
   if (paymentMode !== 'worldpay' && paymentMode !== 'stripe') {
-    await saveBookingCompleteCash(pool, bookingId);
+    await saveBookingCompleteCash(pool, bookingId, typeOfBook);
   }
 
   return { bookingId, bookingRef };
@@ -984,7 +1107,15 @@ async function getAddBookingWizard(pool, session) {
 
   const defaultPricing = getDefaultAttendeePricing(event, showCancellation);
   const vehiclePricing = getVehiclePricingMap(event, showCancellation);
-  const savedAttendees = adminBooking.Booking_data || {};
+  const preFill =
+    session?.preFillData && typeof session.preFillData === 'object'
+      ? session.preFillData
+      : {};
+  const bookingData =
+    adminBooking.Booking_data && typeof adminBooking.Booking_data === 'object'
+      ? adminBooking.Booking_data
+      : {};
+  const savedAttendees = { ...preFill, ...bookingData };
   const blacklisted = session?.blacklisted || null;
   const promoData = adminBooking.BookingPromoData || null;
   const firstEventDate = firstEventDateFromDates(dates);
@@ -1091,7 +1222,7 @@ function normalizeAttendeesPayload(body, spaceRequired) {
   return attendees;
 }
 
-function validateAttendee(row) {
+function validateAttendee(row, { skipLicenceFormat = false } = {}) {
   const errors = [];
   if (row.vehicle_type === '' || row.vehicle_type == null) {
     errors.push('Vehicle type is required');
@@ -1099,9 +1230,16 @@ function validateAttendee(row) {
   if (row.license_type === '' || row.license_type == null) {
     errors.push('Licence type is required');
   }
-  const licence = trim(row.license_number);
-  if (licence && licence.length !== 16) {
-    errors.push('Licence number must be 16 characters');
+  const licence = normalizeDrivingLicence(row.license_number);
+  if (!licence) {
+    errors.push('Driving licence number is required');
+  } else if (!skipLicenceFormat) {
+    const licenceCheck = validateDrivingLicenceNumber(licence, {
+      required: true,
+    });
+    if (!licenceCheck.valid) {
+      errors.push(licenceCheck.message || 'Driving licence number is not valid');
+    }
   }
   return errors;
 }
@@ -1135,8 +1273,15 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
 
   if (session) delete session.blacklisted;
 
+  const blacklistOverrides = body?.blacklist_overrides || {};
+
   for (const attendee of attendees) {
-    const fieldErrors = validateAttendee(attendee);
+    const overridden =
+      blacklistOverrides[String(attendee.index)] ||
+      blacklistOverrides[attendee.index];
+    const fieldErrors = validateAttendee(attendee, {
+      skipLicenceFormat: Boolean(overridden),
+    });
     if (fieldErrors.length) {
       const err = new Error(fieldErrors.join('; '));
       err.status = 400;
@@ -1161,6 +1306,12 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
   }
 
   for (const attendee of attendees) {
+    if (
+      blacklistOverrides[String(attendee.index)] ||
+      blacklistOverrides[attendee.index]
+    ) {
+      continue;
+    }
     const blackData = await checkBlacklisted(pool, attendee.license_number);
     if (blackData) {
       if (session) {
@@ -1222,6 +1373,19 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
   }
 
   const paymentMode = stripePayment ? 'stripe' : moto ? 'worldpay' : 'cash';
+  const baPaymentType = normalizeTypeOfBookCode(body?.BA?.payment_type);
+  const adminPaymentType =
+    body?.admin_payment_type ??
+    body?.payment_type ??
+    (ADMIN_WIZARD_PAYMENT_TYPE_VALUES.has(baPaymentType)
+      ? baPaymentType
+      : null) ??
+    't';
+  const typeOfBook = resolveAdminWizardTypeOfBook({
+    adminPaymentType,
+    paymentMode,
+  });
+  await ensureTypeOfBookEnum(pool);
   const lockId = Number(adminBooking.lock_session?.id) || 0;
   const bookingRefs = [];
   const bookingIds = [];
@@ -1250,7 +1414,8 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
       adminId,
       paymentMode,
       lockId,
-      session
+      session,
+      typeOfBook
     );
     bookingRefs.push(saved.bookingRef);
     bookingIds.push(saved.bookingId);
@@ -1328,10 +1493,31 @@ async function cancelAddBookingWizard(
   pool,
   session,
   saveClientDetails = false,
-  adminId = 0
+  adminId = 0,
+  body = {}
 ) {
-  if (saveClientDetails && session?.adminBooking?.Booking_data) {
-    session.preFillData = session.adminBooking.Booking_data;
+  const adminBooking = session?.adminBooking;
+  const payload = body?.BA || body?.attendees || null;
+
+  if (payload && adminBooking) {
+    adminBooking.Booking_data = payload;
+  }
+
+  if (saveClientDetails) {
+    const spaceRequired = Number(adminBooking?.space_required) || 0;
+    const keyCount = payload ? Object.keys(payload).length : 0;
+    const spaces = Math.max(spaceRequired, keyCount, 1);
+    const attendees = normalizeAttendeesPayload(
+      { BA: payload || adminBooking?.Booking_data || {} },
+      spaces
+    );
+    for (const attendee of attendees) {
+      await saveContactCardDraft(pool, attendee);
+    }
+    const toPrefill = payload || adminBooking?.Booking_data;
+    if (toPrefill && typeof toPrefill === 'object') {
+      session.preFillData = toPrefill;
+    }
   }
 
   const resolvedAdminId =
@@ -1358,6 +1544,7 @@ module.exports = {
   searchExistingCustomers,
   submitAddBookingAttendees,
   cancelAddBookingWizard,
+  checkWizardAttendeeLicence,
   removeAllTerminalLocksForAdmin,
   checkAdminBookingPromoCode,
   cancelAdminBookingPromoCode,

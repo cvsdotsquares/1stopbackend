@@ -7,6 +7,10 @@ const {
   sendBookingDeleteEmail,
   sendBookingFeedbackEmail,
 } = require('../../utils/emailService');
+const {
+  resolveBookingConfirmationRefSuffix,
+  normalizeTypeOfBookCode,
+} = require('../../utils/typeOfBook');
 
 async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) {
   const id = Number(bookingId);
@@ -18,7 +22,6 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
       `SELECT
          b.id, b.course_id, b.course_event_id, b.total_amount,
          b.payment_due, b.vat, b.total_fees, b.type_of_book, b.refundable,
-         IFNULL(b.on_hold, 0) AS on_hold,
          ba.booking_ref, ba.email
        FROM bookings b
        JOIN booking_attendees ba ON b.id = ba.booking_id
@@ -33,9 +36,6 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     }
 
     const booking = bookings[0];
-    if (Number(booking.on_hold) === 1) {
-      return { sent: false, reason: 'booking_on_hold' };
-    }
     const resendMode = Number(options.resendMode) || 0;
     const overrideEmail = String(options.overrideEmail || '').trim();
     const attendeeEmail = String(booking.email || '').trim();
@@ -86,14 +86,23 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
       `SELECT booking_bcc FROM settings LIMIT 1`
     );
 
-    const bookingType = String(booking.type_of_book || 't').toUpperCase();
+    const [paymentRows] = await connection.query(
+      `SELECT payment_type FROM booking_payments
+       WHERE booking_id = ? AND (isDelete IS NULL OR isDelete = 0)
+       ORDER BY id DESC LIMIT 1`,
+      [id]
+    );
+    const paymentType = paymentRows?.[0]?.payment_type;
+
     const isResend = resendMode > 0 || Boolean(overrideEmail);
-    const bookingRefSuffix =
-      resendMode > 0 && resendMode !== 13
-        ? String(booking.type_of_book || '').toLowerCase() === 'r'
-          ? '2R'
-          : 'R'
-        : '';
+    let bookingTypeLabel = resolveBookingConfirmationRefSuffix({
+      typeOfBook: booking.type_of_book,
+      paymentType,
+    });
+    if (resendMode > 0 && resendMode !== 13) {
+      bookingTypeLabel +=
+        normalizeTypeOfBookCode(booking.type_of_book) === 'r' ? '2R' : 'R';
+    }
     const adminBcc =
       settingsData[0]?.booking_bcc ||
       process.env.BOOKING_BCC ||
@@ -115,8 +124,10 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
       {
         course_name: courseData[0]?.course_name || 'Course',
         booking_ref: booking.booking_ref,
-        booking_type: bookingType,
-        bookingRefSuffix,
+        booking_type: bookingTypeLabel,
+        type_of_book: booking.type_of_book,
+        payment_type: paymentType,
+        bookingRefSuffix: '',
         refundable: Number(booking.refundable) || 0,
         attendees,
         ...(targetEmails.length ? { targetEmails } : {}),
@@ -199,13 +210,6 @@ async function sendAdminBookingFeedbackEmail(pool, bookingId, options = {}) {
   if (!Number.isFinite(id) || id <= 0) return { sent: false, reason: 'invalid_id' };
 
   try {
-    const [holdRows] = await pool.query(
-      'SELECT IFNULL(on_hold, 0) AS on_hold FROM bookings WHERE id = ? LIMIT 1',
-      [id]
-    );
-    if (Number(holdRows?.[0]?.on_hold) === 1) {
-      return { sent: false, reason: 'booking_on_hold' };
-    }
     const result = await sendBookingFeedbackEmail(pool, id, options);
     if (result?.sent) {
       console.log(`[ADMIN][BOOKING][EMAIL] Feedback sent for booking ${id}`);

@@ -7,18 +7,23 @@
  */
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { findOrCreateStripeCustomerByEmail } = require('../../utils/stripeCustomer');
-const { sendAdminStripePaymentLinkEmail } = require('../../utils/emailService');
+const {
+  sendAdminStripePaymentLinkEmail,
+  buildPaymentLinkEmailDateLines,
+} = require('../../utils/emailService');
 const { getAdminFrontendBase } = require('./motoPaymentService');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
 const { LOCK_EXPIRE_TIME_MINUTES, STRIPE_PAYMENT_LINK_LOCKED_BY } = require('../constants');
 
 const METADATA_TYPE = 'admin_payment_link';
 const PENDING_PAYMENT_TYPE = 'STRIPE_LINK';
+/** Set on booking_payments when Checkout payment succeeds (not SALE). */
+const COMPLETED_PAYMENT_TYPE = 'payment_link';
 let stripeLockTypeReady = false;
 
 /**
  * One booking_payments row per booking: reuse the pending STRIPE_LINK row
- * (or any existing row) instead of inserting SALE beside it.
+ * (or any existing row) instead of inserting a second payment row.
  */
 async function upsertSingleBookingPayment(pool, {
   bookingId,
@@ -84,6 +89,114 @@ async function upsertSingleBookingPayment(pool, {
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
+}
+
+/** Same rules as public checkout / DB attendee names (bookingFlow.js). */
+function titleCase(value) {
+  const s = trim(value);
+  if (!s) return '';
+  return s.replace(/\w\S*/g, (txt) =>
+    txt.charAt(0).toUpperCase() + txt.slice(1).toLowerCase()
+  );
+}
+
+/** Stripe dashboard date format — matches bookingFlow.js payment intents. */
+function formatStripeDate(dateValue) {
+  if (!dateValue) return '';
+  if (typeof dateValue === 'string') {
+    const match = dateValue.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      const [, year, month, day] = match;
+      return `${Number(day)}/${Number(month)}/${year.slice(-2)}`;
+    }
+  }
+  if (dateValue instanceof Date && !Number.isNaN(dateValue.getTime())) {
+    const day = dateValue.getUTCDate();
+    const month = dateValue.getUTCMonth() + 1;
+    const yearShort = String(dateValue.getUTCFullYear()).slice(-2);
+    return `${day}/${month}/${yearShort}`;
+  }
+  const dateObj = new Date(dateValue);
+  if (Number.isNaN(dateObj.getTime())) return '';
+  const day = dateObj.getUTCDate();
+  const month = dateObj.getUTCMonth() + 1;
+  const yearShort = String(dateObj.getUTCFullYear()).slice(-2);
+  return `${day}/${month}/${yearShort}`;
+}
+
+/**
+ * Payment descriptor for Checkout + PaymentIntent (Stripe Dashboard).
+ * Parity with bookingFlow.js: Proper Case names, course, loc abb, date(s).
+ */
+async function buildAdminStripePaymentDescription(
+  pool,
+  { eventId, event, attendees, bookingRefs }
+) {
+  let courseName = trim(event?.course_name) || '';
+  let locAbb = trim(event?.location_name) || '';
+
+  if (eventId) {
+    const [ctxRows] = await pool.query(
+      `SELECT c.course_name, l.loc_abb, l.location_name
+       FROM course_events ce
+       LEFT JOIN courses c ON c.id = ce.course_id
+       LEFT JOIN locations l ON l.id = ce.location_id
+       WHERE ce.id = ?
+       LIMIT 1`,
+      [eventId]
+    );
+    const ctx = ctxRows?.[0];
+    if (ctx) {
+      courseName = trim(ctx.course_name) || courseName;
+      locAbb = trim(ctx.loc_abb) || trim(ctx.location_name) || locAbb;
+    }
+
+    const [dateRows] = await pool.query(
+      `SELECT event_date FROM course_event_dates
+       WHERE course_event_id = ?
+       ORDER BY event_date ASC`,
+      [eventId]
+    );
+    const dateParts = (dateRows || [])
+      .map((row) => formatStripeDate(row.event_date))
+      .filter(Boolean);
+    const courseDateText = dateParts.join(' & ');
+
+    const attendeeParts = (attendees || [])
+      .map((attendee, index) => {
+        const fullName =
+          `${titleCase(attendee.first_name)} ${titleCase(attendee.sur_name)}`.trim();
+        const ref = bookingRefs[index] || '';
+        return ref ? `${fullName} (${ref})` : fullName;
+      })
+      .filter(Boolean);
+
+    const attendeeSummary = attendeeParts.join(' & ');
+    const stripeDescriptionParts = [
+      attendeeSummary,
+      '-',
+      courseName || 'Course',
+      locAbb || 'Location',
+      courseDateText,
+    ].filter(Boolean);
+
+    return stripeDescriptionParts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  const attendeeParts = (attendees || [])
+    .map((attendee, index) => {
+      const fullName =
+        `${titleCase(attendee.first_name)} ${titleCase(attendee.sur_name)}`.trim();
+      const ref = bookingRefs[index] || '';
+      return ref ? `${fullName} (${ref})` : fullName;
+    })
+    .filter(Boolean);
+
+  return [attendeeParts.join(' & '), '-', courseName, locAbb]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function nowMysql() {
@@ -297,7 +410,8 @@ async function createAdminStripePaymentLink(pool, session, {
   }
 
   const primary = attendees?.[0] || {};
-  const primaryName = `${trim(primary.first_name)} ${trim(primary.sur_name)}`.trim();
+  const primaryName =
+    `${titleCase(primary.first_name)} ${titleCase(primary.sur_name)}`.trim();
   const cartId = (bookingRefs || []).join('-');
   const { expiresAt, quotedMinutes } = computePaymentLinkExpiry();
   const adminBase = getAdminFrontendBase();
@@ -312,21 +426,14 @@ async function createAdminStripePaymentLink(pool, session, {
   }
   const spaces = bookingIds.length;
 
-  const attendeeSummary = (attendees || [])
-    .map((attendee, index) => {
-      const name = `${trim(attendee.first_name)} ${trim(attendee.sur_name)}`.trim();
-      const ref = bookingRefs[index] || '';
-      return `${name}${ref ? ` (${ref})` : ''}`.trim();
+  const description = (
+    await buildAdminStripePaymentDescription(pool, {
+      eventId,
+      event,
+      attendees,
+      bookingRefs,
     })
-    .filter(Boolean)
-    .join(' & ');
-
-  const description = [attendeeSummary, '-', event?.course_name, event?.location_name]
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 1000);
+  ).slice(0, 1000);
 
   const stripeCustomerId = await findOrCreateStripeCustomerByEmail({
     email: primary.email,
@@ -427,14 +534,43 @@ async function createAdminStripePaymentLink(pool, session, {
     email_sent: false,
   };
 
+  const [courseDateRows] = await pool.query(
+    `SELECT event_date, event_start_time, event_end_time
+     FROM course_event_dates
+     WHERE course_event_id = ?
+     ORDER BY event_date ASC`,
+    [eventId]
+  );
+  const amountDueFromForm = (attendees || []).reduce(
+    (sum, attendee) => sum + (Number(attendee.payment_received) || 0),
+    0
+  );
+  const locationAddress = [
+    event?.address1,
+    event?.address2,
+    event?.address3,
+    event?.address4,
+    event?.postcode,
+  ]
+    .map(trim)
+    .filter(Boolean)
+    .join(', ');
+
   const emailResult = await sendAdminStripePaymentLinkEmail({
     to: primary.email,
-    customerName: primaryName,
+    firstName: titleCase(primary.first_name),
+    attendees: (attendees || []).map((attendee, index) => ({
+      bookingRef: bookingRefs[index] || '',
+      firstName: titleCase(attendee.first_name),
+      surName: titleCase(attendee.sur_name),
+    })),
     courseName: event?.course_name,
-    amountLabel: formatAmountLabel(amount, 'gbp'),
+    courseDateLines: buildPaymentLinkEmailDateLines(courseDateRows),
+    locationName: event?.location_name,
+    locationAddress,
+    amountLabel: formatAmountLabel(amountDueFromForm, 'gbp'),
     paymentUrl: checkoutSession.url,
     expireMinutes: quotedMinutes,
-    bookingRefs: bookingRefs.join(', '),
   });
   payload.email_sent = Boolean(emailResult?.sent);
   if (!emailResult?.sent) {
@@ -610,7 +746,7 @@ async function confirmAdminStripePaymentLink(pool, source) {
 
     await upsertSingleBookingPayment(pool, {
       bookingId,
-      paymentType: 'SALE',
+      paymentType: COMPLETED_PAYMENT_TYPE,
       transactionId: transactionId || checkoutSessionId,
       amount: amt,
       transationType: 'booking',
