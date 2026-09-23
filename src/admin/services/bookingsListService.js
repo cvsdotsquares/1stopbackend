@@ -1,14 +1,13 @@
 const { isEventDatePassed } = require('./adminBookingHoldService');
+const { getTransactionTypeLabel } = require('../../utils/typeOfBook');
+const {
+  getExpireMinutes,
+  getExpireGraceMs,
+  PENDING_PAYMENT_TYPE,
+} = require('./bookingStripeLinkService');
 
 const RECORDS_PER_PAGE = 10;
-
-const TOB_LABELS = {
-  m: 'MOTO',
-  o: 'Online',
-  t: 'Terminal',
-  w: 'Worldpay',
-  r: 'RideTo',
-};
+const COMPLETED_PL_PAYMENT_TYPE = 'payment_link';
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -51,7 +50,39 @@ function formatBookingCreated(value) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(h12)}:${pad(d.getMinutes())} ${ampm}`;
 }
 
-function deriveBookingDisplayStatus(booking) {
+function parseStripeLinkExpiresMs(paymentRow) {
+  if (!paymentRow?.response) return null;
+  try {
+    const parsed =
+      typeof paymentRow.response === 'string'
+        ? JSON.parse(paymentRow.response)
+        : paymentRow.response;
+    if (parsed?.expires_at) {
+      const ms = Date.parse(parsed.expires_at);
+      if (Number.isFinite(ms)) return ms;
+    }
+  } catch {
+    /* ignore */
+  }
+  if (!paymentRow.payment_created) return null;
+  const created = new Date(paymentRow.payment_created);
+  if (Number.isNaN(created.getTime())) return null;
+  return created.getTime() + getExpireMinutes() * 60 * 1000;
+}
+
+function isExpiredAdminStripePaymentLink(booking, paymentRow) {
+  if (Number(booking.status) !== 0) return false;
+  const pt = trim(paymentRow?.payment_type).toUpperCase();
+  if (pt !== PENDING_PAYMENT_TYPE && pt !== 'STRIPE_LINK') return false;
+  const expiresMs = parseStripeLinkExpiresMs(paymentRow);
+  if (!expiresMs) return false;
+  return Date.now() > expiresMs + getExpireGraceMs();
+}
+
+function deriveBookingDisplayStatus(booking, { expiredPaymentLink } = {}) {
+  if (expiredPaymentLink) {
+    return 'Expired';
+  }
   if (Number(booking.on_hold) === 1) {
     return 'On Hold';
   }
@@ -65,6 +96,19 @@ function deriveBookingDisplayStatus(booking) {
     return 'Over Booking';
   }
   return 'In Process';
+}
+
+function resolveBookedLabel(booking, paymentRow, expiredPaymentLink) {
+  if (expiredPaymentLink) return '';
+  const pt = trim(paymentRow?.payment_type).toLowerCase();
+  if (
+    Number(booking.status) === 1 &&
+    (pt === COMPLETED_PL_PAYMENT_TYPE || pt === 'payment_link') &&
+    paymentRow?.payment_created
+  ) {
+    return formatBookingCreated(paymentRow.payment_created);
+  }
+  return formatBookingCreated(booking.created);
 }
 
 function buildStatusFilter(statusScr) {
@@ -90,7 +134,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   const nameScr = trim(searchterm?.name_scr);
   const statusScr = trim(searchterm?.status_scr);
 
-  let where = ' WHERE bookings.status != 5 ';
+  // Confirmed / on-hold / refunded only — unpaid (status 0) live on In Progress page.
+  let where = ' WHERE bookings.status != 5 AND bookings.status != 0 ';
   const params = [];
 
   where += buildStatusFilter(statusScr);
@@ -148,6 +193,15 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
       GROUP BY course_event_id
     ) AS course_event_dates
       ON course_event_dates.course_event_id = bookings.course_event_id
+    LEFT JOIN booking_payments AS latest_payment
+      ON latest_payment.id = (
+        SELECT bp.id
+        FROM booking_payments bp
+        WHERE bp.booking_id = bookings.id
+          AND (bp.isDelete IS NULL OR bp.isDelete = 0)
+        ORDER BY bp.id DESC
+        LIMIT 1
+      )
   `;
 
   const [countRows] = await pool.query(
@@ -175,7 +229,10 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
         courses.course_abb,
         locations.location_name,
         course_event_dates.event_date AS course_date,
-        course_event_dates.latest_event_date
+        course_event_dates.latest_event_date,
+        latest_payment.payment_type AS latest_payment_type,
+        latest_payment.created AS latest_payment_created,
+        latest_payment.response AS latest_payment_response
      ${fromJoin}
      ${where}
      ORDER BY bookings.created DESC, bookings.id DESC
@@ -184,44 +241,63 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   );
 
   const items = (rows || []).map((row) => {
-    const eventDatePassed = isEventDatePassed(row.latest_event_date);
-    return {
-    id: Number(row.id),
-    course_event_id: Number(row.course_event_id) || 0,
-    booking_ref: row.booking_ref || '',
-    attendee_name: `${trim(row.first_name)} ${trim(row.sur_name)}`.trim(),
-    course_name: row.course_name || '',
-    course_abb: row.course_abb || '',
-    location_name: row.location_name || '',
-    course_date: formatUkDate(row.course_date),
-    status: Number(row.status),
-    refundable: Number(row.refundable),
-    display_status: deriveBookingDisplayStatus(row),
-    on_hold: Number(row.on_hold) === 1,
-    type_of_book: row.type_of_book || '',
-    type_of_book_label: TOB_LABELS[row.type_of_book] || row.type_of_book || '',
-    total_amount: row.total_amount,
-    payment_due: row.payment_due,
-    amount_paid:
-      Number(row.total_amount || 0) - Number(row.payment_due || 0),
-    created: row.created,
-    created_label: formatBookingCreated(row.created),
-    can_edit:
-      Number(row.status) === 1 &&
-      Number(row.refundable) === 0 &&
-      Number(row.on_hold) !== 1,
-    can_refund: Number(row.refundable) === 1 && Number(row.on_hold) !== 1,
-    can_delete:
-      Number(row.status) === 1 &&
-      Number(row.refundable) === 0 &&
-      Number(row.on_hold) !== 1,
-    can_hold:
-      Number(row.status) === 1 &&
-      Number(row.refundable) === 0 &&
-      Number(row.on_hold) !== 1 &&
-      !eventDatePassed,
-    can_reinstate: Number(row.on_hold) === 1,
-  };
+      const paymentRow = {
+        payment_type: row.latest_payment_type,
+        payment_created: row.latest_payment_created,
+        response: row.latest_payment_response,
+      };
+      const expiredPaymentLink = isExpiredAdminStripePaymentLink(row, paymentRow);
+      const eventDatePassed = isEventDatePassed(row.latest_event_date);
+      const showActions = !expiredPaymentLink;
+
+      return {
+        id: Number(row.id),
+        course_event_id: Number(row.course_event_id) || 0,
+        booking_ref: row.booking_ref || '',
+        attendee_name: `${trim(row.first_name)} ${trim(row.sur_name)}`.trim(),
+        course_name: row.course_name || '',
+        course_abb: row.course_abb || '',
+        location_name: row.location_name || '',
+        course_date: formatUkDate(row.course_date),
+        status: Number(row.status),
+        refundable: Number(row.refundable),
+        display_status: deriveBookingDisplayStatus(row, { expiredPaymentLink }),
+        on_hold: Number(row.on_hold) === 1,
+        is_expired_payment_link: expiredPaymentLink,
+        can_link_ref: !expiredPaymentLink,
+        show_actions: showActions,
+        type_of_book: row.type_of_book || '',
+        type_of_book_label: getTransactionTypeLabel({
+          typeOfBook: row.type_of_book,
+          paymentType: row.latest_payment_type,
+          transactionType: 'booking',
+        }),
+        total_amount: row.total_amount,
+        payment_due: row.payment_due,
+        amount_paid:
+          Number(row.total_amount || 0) - Number(row.payment_due || 0),
+        created: row.created,
+        created_label: resolveBookedLabel(row, paymentRow, expiredPaymentLink),
+        can_edit:
+          showActions &&
+          Number(row.status) === 1 &&
+          Number(row.refundable) === 0 &&
+          Number(row.on_hold) !== 1,
+        can_refund:
+          showActions && Number(row.refundable) === 1 && Number(row.on_hold) !== 1,
+        can_delete:
+          showActions &&
+          Number(row.status) === 1 &&
+          Number(row.refundable) === 0 &&
+          Number(row.on_hold) !== 1,
+        can_hold:
+          showActions &&
+          Number(row.status) === 1 &&
+          Number(row.refundable) === 0 &&
+          Number(row.on_hold) !== 1 &&
+          !eventDatePassed,
+        can_reinstate: showActions && Number(row.on_hold) === 1,
+      };
   });
 
   return {

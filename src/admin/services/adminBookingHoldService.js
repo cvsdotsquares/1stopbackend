@@ -3,6 +3,11 @@
  * Confirmed bookings stay status=1; on_hold=1 releases capacity and skips auto-comms.
  */
 const { isEventFrozen } = require('./courseEventWizardService');
+const {
+  courseEventsHasOwnVehicleFlag,
+  inferOwnVehicleEnabled,
+  attachInferredOwnVehicle,
+} = require('../../utils/ownVehicleAvailability');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
 
@@ -114,9 +119,10 @@ function formatLongDate(value) {
   return `${weekdays[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-function seatSetClauses(vehicleType, direction) {
+function seatSetClauses(vehicleType, direction, spaces = 1) {
   const op = direction === 'consume' ? '+' : '-';
-  const sets = [`bookings_done = GREATEST(0, bookings_done ${op} 1)`];
+  const seatDelta = Math.max(1, Number(spaces) || 1);
+  const sets = [`bookings_done = GREATEST(0, bookings_done ${op} ${seatDelta})`];
   const vt = Number(vehicleType);
   if (vt === 0) {
     sets.push(`manual_lock_done = GREATEST(0, manual_lock_done ${op} 1)`);
@@ -126,9 +132,15 @@ function seatSetClauses(vehicleType, direction) {
   return sets;
 }
 
-async function applySeatChange(connection, eventId, vehicleType, direction) {
+async function applySeatChange(
+  connection,
+  eventId,
+  vehicleType,
+  direction,
+  spaces = 1
+) {
   const frozen = await isEventFrozen(connection, eventId);
-  const sets = seatSetClauses(vehicleType, direction);
+  const sets = seatSetClauses(vehicleType, direction, spaces);
 
   if (frozen) {
     await connection.query(
@@ -205,16 +217,18 @@ async function writeAudit(connection, {
   );
 }
 
-async function loadEventCapacity(connection, eventId) {
+async function loadEventCapacity(connection, eventId, { forUpdate = false } = {}) {
+  const lockSql = forUpdate ? ' FOR UPDATE' : '';
   const [rows] = await connection.query(
     `SELECT id, course_id, booking_limit, bookings_done, current_locks,
-            vehicle_type_manual, vehicle_type_automatic, vehicle_type_own, status
+            vehicle_type_manual, vehicle_type_automatic, status,
+            own_one_off_price, own_deposit_price, own_total_price
      FROM course_events
      WHERE id = ?
-     LIMIT 1`,
+     LIMIT 1${lockSql}`,
     [eventId]
   );
-  return rows?.[0] || null;
+  return attachInferredOwnVehicle(rows?.[0] || null);
 }
 
 function eventHasSpace(event, spaces = 1) {
@@ -223,6 +237,86 @@ function eventHasSpace(event, spaces = 1) {
     (Number(event.bookings_done) || 0) -
     (Number(event.current_locks) || 0);
   return available >= spaces;
+}
+
+function vehicleTypeLabel(vehicleType) {
+  const vt = Number(vehicleType);
+  if (vt === 0) return 'manual';
+  if (vt === 1) return 'automatic';
+  if (vt === 3) return 'own vehicle';
+  return 'selected vehicle';
+}
+
+function vehicleTypeUnavailableMessage(vehicleType) {
+  const label = vehicleTypeLabel(vehicleType);
+  return (
+    `The date you are trying to move the booking to does not have a ${label} option available. ` +
+    'Please either try an alternative location/date, or change the type of vehicle.'
+  );
+}
+
+function rowHasVehicleTypeAvailable(row, vehicleType) {
+  if (!row) return false;
+  const vt = Number(vehicleType);
+  if (vt === 3) {
+    return inferOwnVehicleEnabled(row) > 0;
+  }
+  if (vt === 0) {
+    return (
+      Number(row.vehicle_type_manual || 0) >
+      Number(row.manual_lock_done || 0)
+    );
+  }
+  if (vt === 1) {
+    return (
+      Number(row.vehicle_type_automatic || 0) >
+      Number(row.automatic_lock_done || 0)
+    );
+  }
+  return true;
+}
+
+async function loadEventVehicleRow(connection, eventId) {
+  const hasOwnVehicleColumn = await courseEventsHasOwnVehicleFlag(connection);
+  const ownVehicleSelect = hasOwnVehicleColumn ? 'vehicle_type_own,' : '';
+  const [eventRows] = await connection.query(
+    `SELECT vehicle_type_manual, vehicle_type_automatic, manual_lock_done,
+            automatic_lock_done, ${ownVehicleSelect}
+            own_one_off_price, own_deposit_price, own_total_price
+     FROM course_events
+     WHERE id = ?
+     LIMIT 1`,
+    [eventId]
+  );
+  let row = eventRows?.[0] || null;
+  if (!row) return null;
+
+  const frozen = await isEventFrozen(connection, eventId);
+  if (frozen) {
+    const [freezeRows] = await connection.query(
+      `SELECT vehicle_type_manual, vehicle_type_automatic,
+              manual_lock_done, automatic_lock_done
+       FROM freeze
+       WHERE course_event_id = ?
+       LIMIT 1`,
+      [eventId]
+    );
+    const freezeRow = freezeRows?.[0];
+    if (freezeRow) {
+      row = { ...row, ...freezeRow };
+    }
+  }
+
+  return attachInferredOwnVehicle(row);
+}
+
+async function assertTargetEventVehicleAvailable(connection, eventId, vehicleType) {
+  const row = await loadEventVehicleRow(connection, eventId);
+  if (!rowHasVehicleTypeAvailable(row, vehicleType)) {
+    const err = httpError(vehicleTypeUnavailableMessage(vehicleType));
+    err.code = 'VEHICLE_TYPE_UNAVAILABLE';
+    throw err;
+  }
 }
 
 function spacesRemaining(row) {
@@ -285,11 +379,13 @@ async function holdBooking(pool, bookingIdParam, adminId = 0, options = {}) {
     const attendee = await loadPrimaryAttendee(connection, bookingId);
     if (!attendee) throw httpError('Booking attendee not found', 404);
 
+    const holdSpaces = Number(booking.spaces) || 1;
     await applySeatChange(
       connection,
       Number(booking.course_event_id),
       attendee.vehicle_type,
-      'release'
+      'release',
+      holdSpaces
     );
 
     const now = getCurrentMysqlDateTime();
@@ -336,6 +432,7 @@ async function loadEventOption(pool, eventId) {
     `SELECT
        ce.id AS course_event_id,
        ce.course_id,
+       ce.location_id,
        ce.booking_limit,
        ce.bookings_done,
        ce.current_locks,
@@ -371,16 +468,10 @@ async function getReinstateOptions(pool, bookingIdParam, { courseId } = {}) {
   }
 
   const currentEventId = Number(booking.course_event_id);
-  const filterCourseId = Number(courseId) || Number(booking.course_id);
+  const filterCourseId = Number(booking.course_id);
   const today = getCurrentMysqlDateTime().slice(0, 10);
-
-  const [courseRows] = await pool.query(
-    `SELECT id, course_name
-     FROM courses
-     WHERE (isDeleted = '0' OR isDeleted = 0 OR isDeleted IS NULL)
-       AND status IN ('1', '2', 1, 2)
-     ORDER BY course_name ASC`
-  );
+  const attendee = await loadPrimaryAttendee(pool, bookingId);
+  const spacesNeeded = Number(booking.spaces) || 1;
 
   const [rows] = await pool.query(
     `SELECT
@@ -407,10 +498,10 @@ async function getReinstateOptions(pool, bookingIdParam, { courseId } = {}) {
        AND f.id IS NULL
      GROUP BY ce.id, ce.course_id, c.course_name, l.location_name,
               ce.booking_limit, ce.bookings_done, ce.current_locks
-     HAVING (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) > 0
+     HAVING (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) >= ?
          OR ce.id = ?
      ORDER BY event_date ASC, l.location_name ASC, event_start_time ASC`,
-    [filterCourseId, today, currentEventId]
+    [filterCourseId, today, spacesNeeded, currentEventId]
   );
 
   const events = [];
@@ -433,20 +524,31 @@ async function getReinstateOptions(pool, bookingIdParam, { courseId } = {}) {
     seen.add(eventId);
   }
 
-  const currentHasSpace = events.some(
-    (event) => event.is_current && event.spaces_available > 0
-  );
+  const currentRowForSpace = await loadEventOption(pool, currentEventId);
+  const currentHasSpace = currentRowForSpace
+    ? spacesRemaining(currentRowForSpace) >= spacesNeeded
+    : false;
+
+  const currentEventRow = await loadEventOption(pool, currentEventId);
+  const courseName =
+    currentEventRow?.course_name ||
+    events.find((event) => event.is_current)?.course_name ||
+    '';
 
   return {
     booking_id: bookingId,
     current_event_id: currentEventId,
-    current_course_id: Number(booking.course_id),
+    current_course_id: filterCourseId,
+    course_name: courseName,
+    location_id: Number(currentEventRow?.location_id) || 0,
+    location_name: currentEventRow?.location_name || '',
+    booking_spaces: Number(booking.spaces) || 1,
+    vehicle_type:
+      attendee?.vehicle_type != null ? Number(attendee.vehicle_type) : null,
+    vehicle_type_label: vehicleTypeLabel(attendee?.vehicle_type),
     current_event_has_space: currentHasSpace,
     selected_course_id: filterCourseId,
-    courses: (courseRows || []).map((row) => ({
-      id: Number(row.id),
-      label: row.course_name,
-    })),
+    courses: [{ id: filterCourseId, label: courseName }],
     events,
   };
 }
@@ -476,29 +578,43 @@ async function reinstateBooking(pool, bookingIdParam, adminId = 0, options = {})
 
     const fromEventId = Number(booking.course_event_id);
     const targetEventId = requestedEventId || fromEventId;
-    const targetEvent = await loadEventCapacity(connection, targetEventId);
+    const targetEvent = await loadEventCapacity(connection, targetEventId, {
+      forUpdate: true,
+    });
     if (!targetEvent) throw httpError('Selected course date was not found', 404);
     if (Number(targetEvent.status) !== 1) {
       throw httpError('Selected course date is not available');
     }
 
     const returningToOriginal = targetEventId === fromEventId;
+    const spacesNeeded = Number(booking.spaces) || 1;
     if (!returningToOriginal) {
       if (await isEventFrozen(connection, targetEventId)) {
         throw httpError('Selected course date is frozen');
       }
-      if (!eventHasSpace(targetEvent, Number(booking.spaces) || 1)) {
+      if (!eventHasSpace(targetEvent, spacesNeeded)) {
         throw httpError(
           'This date has no remaining spaces. Please choose another course date and location.'
         );
       }
+    } else if (!eventHasSpace(targetEvent, spacesNeeded)) {
+      throw httpError(
+        'This date has no remaining spaces. Please choose another course date and location.'
+      );
     }
+
+    await assertTargetEventVehicleAvailable(
+      connection,
+      targetEventId,
+      attendee.vehicle_type
+    );
 
     await applySeatChange(
       connection,
       targetEventId,
       attendee.vehicle_type,
-      'consume'
+      'consume',
+      spacesNeeded
     );
 
     const now = getCurrentMysqlDateTime();
@@ -534,28 +650,48 @@ async function reinstateBooking(pool, bookingIdParam, adminId = 0, options = {})
     await connection.commit();
 
     let confirmationEmailSent = false;
-    try {
-      const emailResult = await sendAdminBookingConfirmationEmail(pool, bookingId, {
-        logType: 'Updated Booking Confirmation',
-      });
-      confirmationEmailSent = Boolean(emailResult?.sent);
-      if (!confirmationEmailSent) {
-        console.warn(
-          `[ADMIN][BOOKING][REINSTATE] confirmation email not sent for booking ${bookingId}: ${emailResult?.reason || 'unknown'}`
+    const wantsResend =
+      options.send_resend_confirmation === true ||
+      options.send_resend_confirmation === 'yes' ||
+      options.send_resend_confirmation === 1 ||
+      options.send_resend_confirmation === '1';
+
+    if (wantsResend) {
+      try {
+        const forwardEmail = trim(options.resend_confirmation_email);
+        const resendMode = Number(options.resend_confirmation) || 0;
+        const emailOpts = { logType: 'Re-Sent Booking Confirmation' };
+        if (forwardEmail) {
+          emailOpts.overrideEmail = forwardEmail;
+        } else if (resendMode > 0) {
+          emailOpts.resendMode = resendMode;
+        } else {
+          throw new Error('Resend recipient not specified');
+        }
+        const emailResult = await sendAdminBookingConfirmationEmail(
+          pool,
+          bookingId,
+          emailOpts
+        );
+        confirmationEmailSent = Boolean(emailResult?.sent);
+        if (!confirmationEmailSent) {
+          console.warn(
+            `[ADMIN][BOOKING][REINSTATE] re-sent confirmation not sent for booking ${bookingId}: ${emailResult?.reason || 'unknown'}`
+          );
+        }
+      } catch (emailError) {
+        console.error(
+          `[ADMIN][BOOKING][REINSTATE] re-sent confirmation failed for booking ${bookingId}:`,
+          emailError
         );
       }
-    } catch (emailError) {
-      console.error(
-        `[ADMIN][BOOKING][REINSTATE] confirmation email failed for booking ${bookingId}:`,
-        emailError
-      );
     }
 
     const baseMessage = moved
       ? 'Booking reinstated onto the selected course date.'
       : 'Booking reinstated. Course capacity has been reserved again.';
     const emailSuffix = confirmationEmailSent
-      ? ' An updated booking confirmation has been emailed to the attendee.'
+      ? ' A re-sent booking confirmation email was sent.'
       : '';
 
     return {

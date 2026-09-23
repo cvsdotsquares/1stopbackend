@@ -1052,7 +1052,10 @@ class StripeWebhookController {
         SELECT booking_bcc FROM settings LIMIT 1
       `);
 
-      const { sendBookingConfirmation } = require('../utils/emailService');
+      const {
+        sendBookingConfirmation,
+        resolveBookingBcc,
+      } = require('../utils/emailService');
 
       await sendBookingConfirmation({
         course_name: courseData[0]?.course_name || 'Course',
@@ -1070,7 +1073,7 @@ class StripeWebhookController {
         },
         course_email_content: courseData[0]?.email_content || '',
         franchise: franchiseData[0] || {},
-        bcc: settingsData[0]?.booking_bcc || 'bookings@1stopinstruction.com',
+        bcc: resolveBookingBcc(settingsData[0]?.booking_bcc),
         ip: clientIp
       }, this.pool);
 

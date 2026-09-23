@@ -95,6 +95,14 @@ function mergeWizardState(session, patch) {
   return next;
 }
 
+const WIZARD_DATE_INSTANCE_SEP = '::';
+
+function storageDateKeyToEventDate(dateKey) {
+  const raw = trim(dateKey);
+  if (raw === TBC_EVENT_DATE) return raw;
+  return raw.split(WIZARD_DATE_INSTANCE_SEP)[0].slice(0, 10);
+}
+
 function sortEventDateKeys(eventsDates) {
   const keys = Object.keys(eventsDates || {});
   return keys.sort((a, b) => {
@@ -102,6 +110,9 @@ function sortEventDateKeys(eventsDates) {
     const bTbc = b === TBC_EVENT_DATE;
     if (aTbc && !bTbc) return 1;
     if (!aTbc && bTbc) return -1;
+    const baseA = storageDateKeyToEventDate(a);
+    const baseB = storageDateKeyToEventDate(b);
+    if (baseA !== baseB) return baseA.localeCompare(baseB);
     return a.localeCompare(b);
   });
 }
@@ -412,12 +423,13 @@ async function applyFrozenState(pool, eventId, eventsDates, freezeAllDates) {
   ]);
 
   for (const [dateKey, times] of Object.entries(eventsDates || {})) {
+    const eventDate = storageDateKeyToEventDate(dateKey);
     await pool.query(
       `UPDATE course_event_dates
        SET freeze = 1
        WHERE course_event_id = ? AND event_date = ?
          AND event_start_time = ? AND event_end_time = ?`,
-      [eventId, dateKey, times.s || '', times.e || '']
+      [eventId, eventDate, times.s || '', times.e || '']
     );
   }
 }
@@ -506,11 +518,12 @@ async function assertBookingLimit(pool, eventId, bookingLimit) {
 async function insertEventDates(pool, eventId, eventsDates) {
   for (const dateKey of sortEventDateKeys(eventsDates)) {
     const times = eventsDates[dateKey];
+    const eventDate = storageDateKeyToEventDate(dateKey);
     await pool.query(
       `INSERT INTO course_event_dates
         (course_event_id, event_date, event_start_time, event_end_time)
        VALUES (?, ?, ?, ?)`,
-      [eventId, dateKey, times.s || '', times.e || '']
+      [eventId, eventDate, times.s || '', times.e || '']
     );
   }
 }
@@ -777,7 +790,12 @@ async function saveWizard(pool, session, payload) {
               `INSERT INTO course_event_dates
                 (course_event_id, event_date, event_start_time, event_end_time)
                VALUES (?, ?, ?, ?)`,
-              [state.id, dateKey, times.s || '', times.e || '']
+              [
+                state.id,
+                storageDateKeyToEventDate(dateKey),
+                times.s || '',
+                times.e || '',
+              ]
             );
             if (freezeAllDates) {
               await applyFrozenState(
@@ -830,7 +848,12 @@ async function saveWizard(pool, session, payload) {
             `INSERT INTO course_event_dates
               (course_event_id, event_date, event_start_time, event_end_time)
              VALUES (?, ?, ?, ?)`,
-            [newId, dateKey, times.s || '', times.e || '']
+            [
+              newId,
+              storageDateKeyToEventDate(dateKey),
+              times.s || '',
+              times.e || '',
+            ]
           );
           if (freezeAllDates) {
             await applyFrozenState(

@@ -38,17 +38,17 @@ const {
 } = require('../services/adminBookingRefundDeleteService');
 const { getAdminFrontendBase } = require('../services/motoPaymentService');
 const { getInProgressBookings } = require('../services/inProgressBookingsService');
+const { listBookings } = require('../services/bookingsListService');
 const {
   getInvoice,
   saveInvoice,
   emailInvoice,
 } = require('../services/bookingInvoiceService');
 const {
-  holdBooking: holdAdminBooking,
-  reinstateBooking: reinstateAdminBooking,
-  getReinstateOptions: getAdminReinstateOptions,
+  holdBooking: holdBookingService,
+  reinstateBooking: reinstateBookingService,
+  getReinstateOptions,
 } = require('../services/adminBookingHoldService');
-const { listBookings } = require('../services/bookingsListService');
 
 class BookingsController {
   constructor(pool) {
@@ -62,10 +62,11 @@ class BookingsController {
     return Number(adminId) || 0;
   }
 
-  async listBookings(req, res) {
+  async list(req, res) {
     try {
+      const page = Number(req.query.page) || 1;
       const data = await listBookings(this.pool, {
-        page: req.query.page,
+        page,
         searchterm: {
           name_scr: req.query.name_scr,
           status_scr: req.query.status_scr,
@@ -73,10 +74,10 @@ class BookingsController {
       });
       return res.json({ success: true, data });
     } catch (err) {
-      console.error('[ADMIN][BOOKINGS][LIST]', err.message);
+      console.error('[ADMIN][BOOKINGS][LIST]', err.message, err.stack);
       return res.status(500).json({
         success: false,
-        message: 'Unable to load bookings',
+        message: err.message || 'Unable to load bookings',
       });
     }
   }
@@ -506,6 +507,8 @@ class BookingsController {
       return res.status(status).json({
         success: false,
         message: err.message || 'Unable to load booking history',
+        code: err.code,
+        deleted_booking_id: err.deleted_booking_id,
       });
     }
   }
@@ -608,11 +611,11 @@ class BookingsController {
 
   async holdBooking(req, res) {
     try {
-      const data = await holdAdminBooking(
+      const data = await holdBookingService(
         this.pool,
         req.params.id,
         this.getAdminId(req),
-        req.body || {}
+        { notes: req.body?.notes }
       );
       return res.json({ success: true, data, message: data.message });
     } catch (err) {
@@ -627,8 +630,9 @@ class BookingsController {
 
   async getReinstateOptions(req, res) {
     try {
-      const data = await getAdminReinstateOptions(this.pool, req.params.id, {
-        courseId: req.query.course_id,
+      const courseId = req.query.course_id;
+      const data = await getReinstateOptions(this.pool, req.params.id, {
+        courseId,
       });
       return res.json({ success: true, data });
     } catch (err) {
@@ -636,18 +640,25 @@ class BookingsController {
       console.error('[ADMIN][BOOKINGS][REINSTATE-OPTIONS]', err.message);
       return res.status(status).json({
         success: false,
-        message: err.message || 'Unable to load reinstatement options',
+        message: err.message || 'Unable to load reinstate options',
       });
     }
   }
 
   async reinstateBooking(req, res) {
     try {
-      const data = await reinstateAdminBooking(
+      const body = req.body || {};
+      const data = await reinstateBookingService(
         this.pool,
         req.params.id,
         this.getAdminId(req),
-        req.body || {}
+        {
+          new_event_id: body.new_event_id,
+          notes: body.notes,
+          send_resend_confirmation: body.send_resend_confirmation,
+          resend_confirmation: body.resend_confirmation,
+          resend_confirmation_email: body.resend_confirmation_email,
+        }
       );
       return res.json({ success: true, data, message: data.message });
     } catch (err) {

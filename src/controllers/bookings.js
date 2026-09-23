@@ -1,7 +1,10 @@
 // src/controllers/bookings.js
 const { validationResult } = require('express-validator');
 const { formatMySQLDateToDDMMYYYY, formatDateToDDMMYYYY } = require('../utils/dateFormat');
-const { sendBookingConfirmation } = require('../utils/emailService');
+const {
+  sendBookingConfirmation,
+  resolveBookingBcc,
+} = require('../utils/emailService');
 const { phpSerialize } = require('../utils/phpSerialize');
 const BookingStatusManager = require('../middleware/bookingStatusManager');
 class BookingController {
@@ -109,7 +112,7 @@ class BookingController {
       },
       course_email_content: courseData[0]?.email_content || '',
       franchise: franchiseData[0] || {},
-      bcc: settingsData[0]?.booking_bcc || process.env.BOOKING_BCC || '',
+      bcc: resolveBookingBcc(settingsData[0]?.booking_bcc),
       ip: 'dashboard'
     };
   }

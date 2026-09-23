@@ -212,6 +212,59 @@ function getExpireMinutes() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : LOCK_EXPIRE_TIME_MINUTES;
 }
 
+/** Extra time after quoted expiry before deleting seats (in-flight card payments). */
+function getExpireGraceMs() {
+  const parsed = Number(process.env.STRIPE_PAYMENT_LINK_EXPIRE_GRACE_MS);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  return 3 * 60 * 1000;
+}
+
+const IN_FLIGHT_PI_STATUSES = new Set([
+  'processing',
+  'requires_action',
+  'requires_confirmation',
+]);
+
+async function retrieveAdminCheckoutPaymentState(sessionId) {
+  const id = trim(sessionId);
+  if (!id) return { state: 'unknown' };
+
+  const live = await stripe.checkout.sessions.retrieve(id, {
+    expand: ['payment_intent'],
+  });
+
+  let paymentIntent = null;
+  if (live.payment_intent && typeof live.payment_intent === 'object') {
+    paymentIntent = live.payment_intent;
+  } else if (typeof live.payment_intent === 'string' && live.payment_intent) {
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(live.payment_intent);
+    } catch (err) {
+      console.warn(
+        '[ADMIN][STRIPE_LINK] Could not retrieve PaymentIntent for checkout session',
+        id,
+        err.message
+      );
+    }
+  }
+
+  const piStatus = trim(paymentIntent?.status);
+
+  if (live.payment_status === 'paid' || piStatus === 'succeeded') {
+    return { state: 'paid', session: live, paymentIntent };
+  }
+  if (
+    live.payment_status === 'processing' ||
+    IN_FLIGHT_PI_STATUSES.has(piStatus)
+  ) {
+    return { state: 'in_flight', session: live, paymentIntent };
+  }
+  if (live.status === 'expired' || live.status === 'complete') {
+    return { state: live.status, session: live, paymentIntent };
+  }
+  return { state: 'open', session: live, paymentIntent };
+}
+
 function computePaymentLinkExpiry() {
   const quotedMinutes = getExpireMinutes();
   return {
@@ -465,6 +518,7 @@ async function createAdminStripePaymentLink(pool, session, {
         ? { customer_email: trim(primary.email) }
         : {}),
     client_reference_id: cartId.slice(0, 200),
+    expires_at: Math.floor(expiresAt.getTime() / 1000),
     success_url: `${adminBase}/pay/complete?status=success`,
     cancel_url: `${adminBase}/pay/complete?status=cancelled`,
     after_expiration: { recovery: { enabled: false } },
@@ -654,13 +708,18 @@ async function confirmAdminStripePaymentLink(pool, source) {
   let lastLockId = 0;
   const mailBookingIds = [];
 
+  let missingBookingIds = [];
+
   for (const bookingId of bookingIds) {
     const [bookingRows] = await pool.query(
       'SELECT * FROM bookings WHERE id = ? LIMIT 1',
       [bookingId]
     );
     const booking = bookingRows?.[0];
-    if (!booking) continue;
+    if (!booking) {
+      missingBookingIds.push(bookingId);
+      continue;
+    }
 
     lastLockId = Number(booking.lockid) || lastLockId;
     const amt = Number(booking.admin_payment_received) || 0;
@@ -755,19 +814,30 @@ async function confirmAdminStripePaymentLink(pool, source) {
     });
   }
 
+  if (missingBookingIds.length) {
+    console.error(
+      '[ADMIN][STRIPE_LINK] Payment confirmed in Stripe but booking row(s) missing — ' +
+        'likely expired/deleted before webhook. ids=',
+      missingBookingIds.join(','),
+      'metadata booking_ids=',
+      metadata.booking_ids || metadata.booking_id
+    );
+  }
+
   if (lastLockId) {
     await removeLockById(pool, lastLockId, false);
   }
 
-  for (const bookingId of mailBookingIds) {
-    try {
-      await sendAdminBookingConfirmationEmail(pool, bookingId);
-    } catch (emailError) {
-      console.error(
-        `[ADMIN][STRIPE_LINK] confirmation email failed for booking ${bookingId}:`,
-        emailError
-      );
-    }
+  const {
+    sendAdminBookingConfirmationEmails,
+  } = require('./adminBookingEmailService');
+  try {
+    await sendAdminBookingConfirmationEmails(pool, [...new Set(mailBookingIds)]);
+  } catch (emailError) {
+    console.error(
+      '[ADMIN][STRIPE_LINK] confirmation email batch failed:',
+      emailError
+    );
   }
 
   return {
@@ -781,9 +851,19 @@ async function expireAdminStripeCheckoutSession(sessionId) {
   const id = trim(sessionId);
   if (!id) return { expired: false };
   try {
-    const live = await stripe.checkout.sessions.retrieve(id);
-    if (live.status === 'expired') return { expired: true, already: true };
-    if (live.payment_status === 'paid') return { expired: false, paid: true, session: live };
+    const check = await retrieveAdminCheckoutPaymentState(id);
+    if (check.state === 'paid') {
+      return { expired: false, paid: true, session: check.session };
+    }
+    if (check.state === 'in_flight') {
+      return { expired: false, inFlight: true, session: check.session };
+    }
+    if (check.state === 'expired' || check.state === 'complete') {
+      if (check.paymentIntent?.status === 'succeeded') {
+        return { expired: false, paid: true, session: check.session };
+      }
+      return { expired: true, already: check.state === 'expired' };
+    }
     await stripe.checkout.sessions.expire(id);
     return { expired: true };
   } catch (err) {
@@ -799,6 +879,12 @@ async function expireAdminStripeCheckoutSession(sessionId) {
 async function expireAdminStripePaymentLink(pool, source, session) {
   const metadata = source?.metadata || {};
   const bookingIds = parseBookingIds(metadata);
+
+  if (isAdminPaymentLink(metadata) && trim(source?.payment_status) === 'paid') {
+    await confirmAdminStripePaymentLink(pool, source);
+    return { expired: false, paid: true };
+  }
+
   const checkoutSessionId =
     (typeof source?.id === 'string' && source.id.startsWith('cs_') ? source.id : '') ||
     trim(source?.checkout_session_id) ||
@@ -809,6 +895,13 @@ async function expireAdminStripePaymentLink(pool, source, session) {
     if (result.paid && result.session) {
       await confirmAdminStripePaymentLink(pool, result.session);
       return { expired: false, paid: true };
+    }
+    if (result.inFlight) {
+      console.log(
+        '[ADMIN][STRIPE_LINK] Deferring expiry — payment still in progress for',
+        checkoutSessionId
+      );
+      return { expired: false, deferred: true };
     }
   }
 
@@ -856,7 +949,8 @@ async function expireDueAdminStripePaymentLinks(pool) {
         expiresMs = created.getTime() + fallbackMinutes * 60 * 1000;
       }
     }
-    if (!expiresMs || expiresMs > now) continue;
+    const graceMs = getExpireGraceMs();
+    if (!expiresMs || expiresMs + graceMs > now) continue;
 
     const bookingIds = String(row.booking_ids || '')
       .split(',')
@@ -869,6 +963,8 @@ async function expireDueAdminStripePaymentLinks(pool) {
         booking_ids: bookingIds.join(','),
       },
     });
+    if (result?.paid) continue;
+    if (result?.deferred) continue;
     if (result?.cancelled || result?.expired) expired += 1;
   }
 
@@ -877,12 +973,14 @@ async function expireDueAdminStripePaymentLinks(pool) {
 
 async function expireDueStripePaymentLinkLocks(pool) {
   const minutes = getExpireMinutes();
+  const graceMinutes = Math.ceil(getExpireGraceMs() / 60000);
+  const lockAgeMinutes = minutes + Math.max(graceMinutes, 0);
   const [locks] = await pool.query(
     `SELECT id
      FROM lock_bookings
      WHERE locked_by = ?
        AND created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
-    [STRIPE_PAYMENT_LINK_LOCKED_BY, minutes]
+    [STRIPE_PAYMENT_LINK_LOCKED_BY, lockAgeMinutes]
   );
 
   if (!locks?.length) return { deleted: 0 };
@@ -921,6 +1019,9 @@ async function expireDueStripePaymentLinkLocks(pool) {
           booking_ids: bookingIds.join(','),
         },
       });
+      if (result?.paid || result?.deferred) {
+        continue;
+      }
       if (result?.cancelled || result?.expired) {
         deleted += 1;
         continue;
@@ -946,6 +1047,8 @@ module.exports = {
   PENDING_PAYMENT_TYPE,
   isAdminPaymentLink,
   getExpireMinutes,
+  getExpireGraceMs,
+  retrieveAdminCheckoutPaymentState,
   createAdminStripePaymentLink,
   getAdminStripePaymentLink,
   confirmAdminStripePaymentLink,

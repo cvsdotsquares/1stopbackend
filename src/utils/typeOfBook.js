@@ -12,6 +12,8 @@ const TYPE_OF_BOOK_LABELS = {
   bt: 'Bank Transfer',
   c: 'In Person',
   z: 'Zero Cost',
+  v: 'Various',
+  gv: 'Gift Voucher',
 };
 
 /** Shown on booking confirmation email: "1SRC12345 - PL" */
@@ -25,6 +27,8 @@ const BOOKING_REF_EMAIL_SUFFIX = {
   bt: 'BT',
   c: 'C',
   z: 'Z',
+  v: 'V',
+  gv: 'GV',
 };
 
 /** booking_payments.payment_type for admin immediate completion (non-MOTO / non-Stripe checkout). */
@@ -33,14 +37,16 @@ const ADMIN_COMPLETION_PAYMENT_TYPE = {
   bt: 'BANK_TRANSFER',
   c: 'IN_PERSON',
   z: 'ZERO_COST',
+  v: 'VARIOUS',
+  gv: 'GIFT_VOUCHER',
   pl: 'payment_link',
   r: 'RIDETO',
 };
 
-const ADMIN_WIZARD_PAYMENT_TYPE_VALUES = new Set(['t', 'bt', 'c', 'z', 'r']);
+const ADMIN_WIZARD_PAYMENT_TYPE_VALUES = new Set(['t', 'bt', 'c', 'z', 'r', 'v', 'gv']);
 
 /** Values added beyond legacy enum('o','m','t','w','r'). */
-const EXTENDED_TYPE_OF_BOOK_ENUM = ['pl', 'bt', 'c', 'z'];
+const EXTENDED_TYPE_OF_BOOK_ENUM = ['pl', 'bt', 'c', 'z', 'v', 'gv'];
 
 let typeOfBookEnumReady = false;
 
@@ -100,6 +106,8 @@ function getBookingRefSuffixFromPaymentType(paymentType) {
     bank_transfer: 'BT',
     in_person: 'C',
     zero_cost: 'Z',
+    various: 'V',
+    gift_voucher: 'GV',
     payment_link: 'PL',
     stripe_link: 'PL',
     moto: 'M',
@@ -176,6 +184,8 @@ function getTransactionTypeFilterOptions() {
     { value: 'bt', label: 'Bank Transfer' },
     { value: 'c', label: 'In Person' },
     { value: 'z', label: 'Zero Cost' },
+    { value: 'v', label: 'Various' },
+    { value: 'gv', label: 'Gift Voucher' },
   ];
 }
 
@@ -185,6 +195,8 @@ function getAdminWizardPaymentTypeOptions() {
     { value: 'bt', label: 'Bank Transfer' },
     { value: 'c', label: 'In Person' },
     { value: 'z', label: 'Zero Cost' },
+    { value: 'v', label: 'Various' },
+    { value: 'gv', label: 'Gift Voucher' },
     { value: 'r', label: 'RideTo' },
   ];
 }
@@ -216,6 +228,8 @@ function getTransactionTypeLabel({ typeOfBook, paymentType, transactionType } = 
     bank_transfer: 'Bank Transfer',
     in_person: 'In Person',
     zero_cost: 'Zero Cost',
+    various: 'Various',
+    gift_voucher: 'Gift Voucher',
     moto: 'MOTO',
     online: 'Online',
     sale: '',

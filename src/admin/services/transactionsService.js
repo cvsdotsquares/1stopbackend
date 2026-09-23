@@ -30,6 +30,8 @@ const TOB_FILTER_PAYMENT_TYPES = {
   bt: ['BANK_TRANSFER'],
   c: ['IN_PERSON'],
   z: ['ZERO_COST'],
+  v: ['VARIOUS'],
+  gv: ['GIFT_VOUCHER'],
   t: ['TERMINAL', 'CASH'],
   m: ['MOTO'],
 };
@@ -46,26 +48,13 @@ const TOB_NAME_SEARCH = {
   'BANK TRANSFER': 'bt',
   'IN PERSON': 'c',
   'ZERO COST': 'z',
+  VARIOUS: 'v',
+  'GIFT VOUCHER': 'gv',
 };
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
 }
-
-function parseMoneyFilter(value) {
-  const raw = trim(value).replace(/^£/, '');
-  if (!raw) return null;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : null;
-}
-
-const TOB_FILTER_OPTIONS = [
-  { value: '', label: 'All types' },
-  { value: 'o', label: 'Online' },
-  { value: 't', label: 'Terminal' },
-  { value: 'm', label: 'MOTO' },
-  { value: 'r', label: 'RideTo' },
-];
 
 function parseExtraInfo(raw) {
   if (raw == null || raw === '') return null;

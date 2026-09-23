@@ -3,6 +3,10 @@ const {
   normalizeDrivingLicence,
   validateDrivingLicenceNumber,
 } = require('../../utils/drivingLicenceValidation');
+const {
+  validateUkDateOfBirth,
+  sanitizePhoneInput,
+} = require('../../utils/ukDateValidation');
 const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../constants');
 const { phpSerialize } = require('../../utils/phpSerialize');
 const {
@@ -18,6 +22,12 @@ const {
   normalizeTypeOfBookCode,
   ADMIN_WIZARD_PAYMENT_TYPE_VALUES,
 } = require('../../utils/typeOfBook');
+const {
+  ensureReservedBookingsForLock,
+  deleteReservedBookingsForLock,
+  cleanupOrphanAdminPlaceholderBookings,
+  mergeReservedRefsIntoSavedAttendees,
+} = require('./adminBookingReserveService');
 
 const TBC_DATE = '0000-00-00';
 
@@ -488,7 +498,16 @@ async function checkBlacklisted(pool, licenseNumber) {
 }
 
 async function checkWizardAttendeeLicence(pool, licenseNumber) {
-  const format = validateDrivingLicenceNumber(licenseNumber, { required: true });
+  const licence = normalizeDrivingLicence(licenseNumber);
+  if (!licence) {
+    return {
+      ok: false,
+      issue: 'format',
+      message: 'No driving licence number has been entered.',
+    };
+  }
+
+  const format = validateDrivingLicenceNumber(licence, { required: false });
   if (!format.valid) {
     return {
       ok: false,
@@ -735,9 +754,68 @@ async function upsertContactCard(pool, attendee, bookingId, bookingRef) {
   return insertResult.insertId;
 }
 
+async function updateAttendeeOnBooking(pool, bookingId, attendee, bookingRef) {
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const contactCardId = await upsertContactCard(
+    pool,
+    attendee,
+    bookingId,
+    bookingRef
+  );
+
+  await pool.query(
+    `UPDATE booking_attendees SET
+       booking_ref = ?, first_name = ?, sur_name = ?, contact1 = ?, contact2 = ?, contact3 = ?,
+       date_of_birth = ?, email = ?, vehicle_type = ?, license_type = ?, license_number = ?,
+       theory_number = ?, admin_notes = ?, notes = ?, previousparent = ?, contact_card_id = ?
+     WHERE booking_id = ?`,
+    [
+      bookingRef,
+      titleCase(attendee.first_name),
+      titleCase(attendee.sur_name),
+      trim(attendee.contact1).replace(/\s/g, ''),
+      trim(attendee.contact2).replace(/\s/g, ''),
+      trim(attendee.contact3).replace(/\s/g, ''),
+      parseDateOfBirth(attendee.date_of_birth),
+      trim(attendee.email),
+      attendee.vehicle_type,
+      attendee.license_type,
+      trim(attendee.license_number).toUpperCase(),
+      trim(attendee.theory_number),
+      trim(attendee.admin_notes),
+      trim(attendee.notes),
+      trim(attendee.self_attendee_new),
+      contactCardId,
+      bookingId,
+    ]
+  );
+
+  if (trim(attendee.email)) {
+    let uid = await chkUserByEmail(pool, attendee.email);
+    if (!uid) {
+      uid = await insertNewUser(pool, attendee);
+    }
+    await pool.query('UPDATE bookings SET user_id = ? WHERE id = ?', [
+      uid,
+      bookingId,
+    ]);
+  }
+
+  return bookingRef;
+}
+
 async function saveAttendee(pool, bookingId, attendee) {
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const bookingRef = await bookingRefNo(pool, bookingId);
+
+  const [existingRows] = await pool.query(
+    'SELECT id FROM booking_attendees WHERE booking_id = ? LIMIT 1',
+    [bookingId]
+  );
+  if (existingRows?.[0]?.id) {
+    return updateAttendeeOnBooking(pool, bookingId, attendee, bookingRef);
+  }
+
   const contactCardId = await upsertContactCard(
     pool,
     attendee,
@@ -806,8 +884,6 @@ async function saveBookingCompleteCash(pool, bookingId, typeOfBook = 't') {
     [bookingId, paymentType, amount, now]
   );
 
-  const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
-  await sendAdminBookingConfirmationEmail(pool, bookingId);
 }
 
 async function saveBookingRecord(
@@ -818,7 +894,8 @@ async function saveBookingRecord(
   paymentMode,
   lockId,
   session,
-  typeOfBook
+  typeOfBook,
+  existingBookingId = 0
 ) {
   const amount = Number(attendee.course_cost) || 0;
   const paymentReceived = Number(attendee.payment_received) || 0;
@@ -835,34 +912,64 @@ async function saveBookingRecord(
     promo_id: promoCodeId,
   });
 
-  const [insertResult] = await pool.query(
-    `INSERT INTO bookings
-      (course_id, course_event_id, user_id, booking_made_by_id, booking_made_by,
-       type_of_book, spaces, payment_due, total_fees, vatrate, vat, total_amount,
-       status, lockid, created, modified, admin_payment_received,
-       is_promo_applied, promo_code_id, promo_code_data)
-     VALUES (?, ?, 0, ?, 'admin', ?, 1, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      event.course_id,
-      event.id,
-      adminId,
-      typeOfBook,
-      amount,
-      amount,
-      vatRate,
-      vat,
-      amount,
-      lockId || 0,
-      now,
-      now,
-      paymentReceived,
-      isPromoApplied,
-      promoCodeId,
-      promoCodeData,
-    ]
-  );
+  let bookingId = Number(existingBookingId) || 0;
+  if (bookingId > 0) {
+    await pool.query(
+      `UPDATE bookings SET
+         course_id = ?, course_event_id = ?, booking_made_by_id = ?, type_of_book = ?,
+         payment_due = ?, total_fees = ?, vatrate = ?, vat = ?, total_amount = ?,
+         lockid = ?, modified = ?, admin_payment_received = ?,
+         is_promo_applied = ?, promo_code_id = ?, promo_code_data = ?
+       WHERE id = ? AND booking_made_by = 'admin' AND status = 0`,
+      [
+        event.course_id,
+        event.id,
+        adminId,
+        typeOfBook,
+        amount,
+        amount,
+        vatRate,
+        vat,
+        amount,
+        lockId || 0,
+        now,
+        paymentReceived,
+        isPromoApplied,
+        promoCodeId,
+        promoCodeData,
+        bookingId,
+      ]
+    );
+  } else {
+    const [insertResult] = await pool.query(
+      `INSERT INTO bookings
+        (course_id, course_event_id, user_id, booking_made_by_id, booking_made_by,
+         type_of_book, spaces, payment_due, total_fees, vatrate, vat, total_amount,
+         status, lockid, created, modified, admin_payment_received,
+         is_promo_applied, promo_code_id, promo_code_data)
+       VALUES (?, ?, 0, ?, 'admin', ?, 1, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        event.course_id,
+        event.id,
+        adminId,
+        typeOfBook,
+        amount,
+        amount,
+        vatRate,
+        vat,
+        amount,
+        lockId || 0,
+        now,
+        now,
+        paymentReceived,
+        isPromoApplied,
+        promoCodeId,
+        promoCodeData,
+      ]
+    );
+    bookingId = insertResult.insertId;
+  }
 
-  const bookingId = insertResult.insertId;
   const bookingRef = await saveAttendee(pool, bookingId, attendee);
 
   if (paymentMode !== 'worldpay' && paymentMode !== 'stripe') {
@@ -907,6 +1014,8 @@ async function updateVehicleLocks(pool, session, manCount, autoCount) {
 async function removeLockRow(pool, lock, { notBooking = true } = {}) {
   const lockId = Number(lock?.id);
   if (!Number.isFinite(lockId) || lockId <= 0) return false;
+
+  await deleteReservedBookingsForLock(pool, lockId);
 
   const [deleteResult] = await pool.query(
     'DELETE FROM lock_bookings WHERE id = ?',
@@ -1050,6 +1159,7 @@ async function addBookingsDone(pool, session, evId, spaceRequired) {
 
 async function getAddBookingWizard(pool, session) {
   await removeExpirelocks(pool, session);
+  await cleanupOrphanAdminPlaceholderBookings(pool);
   const adminBooking = requireActiveBookingSession(session);
 
   const lockId = Number(adminBooking.lock_session?.id);
@@ -1059,6 +1169,8 @@ async function getAddBookingWizard(pool, session) {
       [lockId]
     );
     if (!lockRows?.[0]) {
+      await deleteReservedBookingsForLock(pool, lockId);
+      await cleanupOrphanAdminPlaceholderBookings(pool);
       if (session) delete session.adminBooking;
       const err = new Error(
         'Your session has been timed out and your booking has been cancelled.'
@@ -1115,7 +1227,26 @@ async function getAddBookingWizard(pool, session) {
     adminBooking.Booking_data && typeof adminBooking.Booking_data === 'object'
       ? adminBooking.Booking_data
       : {};
-  const savedAttendees = { ...preFill, ...bookingData };
+  let savedAttendees = { ...preFill, ...bookingData };
+  const adminIdForReserve =
+    Number(session?.loggedinAdmin?.id) ||
+    Number(session?.loggedinAdmin?.admin_id) ||
+    Number(session?.admin) ||
+    0;
+  let reservedBookingRefs = [];
+  if (lockId && spaceRequired > 0) {
+    const reserved = await ensureReservedBookingsForLock(pool, {
+      eventId,
+      lockId,
+      spaceRequired,
+      adminId: adminIdForReserve,
+    });
+    reservedBookingRefs = reserved.map((row) => row.booking_ref).filter(Boolean);
+    savedAttendees = mergeReservedRefsIntoSavedAttendees(
+      savedAttendees,
+      reserved
+    );
+  }
   const blacklisted = session?.blacklisted || null;
   const promoData = adminBooking.BookingPromoData || null;
   const firstEventDate = firstEventDateFromDates(dates);
@@ -1173,6 +1304,7 @@ async function getAddBookingWizard(pool, session) {
     default_pricing: defaultPricing,
     licence_types: await getLicenceTypes(pool),
     saved_attendees: savedAttendees,
+    reserved_booking_refs: reservedBookingRefs,
     blacklisted,
     cancellation_notice: buildCancellationNotice(event),
     promo: promoData?.is_promo_code_valid
@@ -1222,20 +1354,40 @@ function normalizeAttendeesPayload(body, spaceRequired) {
   return attendees;
 }
 
+function validatePhoneField(value, label) {
+  const raw = trim(value);
+  if (!raw) return null;
+  const sanitized = sanitizePhoneInput(raw);
+  if (sanitized !== raw) {
+    return `${label} may only contain digits, spaces and +`;
+  }
+  return null;
+}
+
 function validateAttendee(row, { skipLicenceFormat = false } = {}) {
   const errors = [];
+  const phoneErr = validatePhoneField(row.contact1, 'Phone');
+  if (phoneErr) errors.push(phoneErr);
+  const altPhoneErr = validatePhoneField(row.contact2, 'Alternative phone');
+  if (altPhoneErr) errors.push(altPhoneErr);
   if (row.vehicle_type === '' || row.vehicle_type == null) {
     errors.push('Vehicle type is required');
   }
   if (row.license_type === '' || row.license_type == null) {
     errors.push('Licence type is required');
   }
+  const dobCheck = validateUkDateOfBirth(row.date_of_birth);
+  if (!dobCheck.valid) {
+    errors.push(dobCheck.message || 'Date of birth is not valid');
+  }
   const licence = normalizeDrivingLicence(row.license_number);
   if (!licence) {
-    errors.push('Driving licence number is required');
+    if (!skipLicenceFormat) {
+      errors.push('Driving licence number is required');
+    }
   } else if (!skipLicenceFormat) {
     const licenceCheck = validateDrivingLicenceNumber(licence, {
-      required: true,
+      required: false,
     });
     if (!licenceCheck.valid) {
       errors.push(licenceCheck.message || 'Driving licence number is not valid');
@@ -1387,11 +1539,26 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
   });
   await ensureTypeOfBookEnum(pool);
   const lockId = Number(adminBooking.lock_session?.id) || 0;
+  const reservedSlots = await ensureReservedBookingsForLock(pool, {
+    eventId,
+    lockId,
+    spaceRequired,
+    adminId,
+  });
+  if (reservedSlots.length !== attendees.length) {
+    const err = new Error(
+      'Booking references are not ready. Please refresh and try again.'
+    );
+    err.status = 400;
+    throw err;
+  }
+
   const bookingRefs = [];
   const bookingIds = [];
   const chargedAttendees = [];
 
-  for (const attendee of attendees) {
+  for (let attendeeIndex = 0; attendeeIndex < attendees.length; attendeeIndex += 1) {
+    const attendee = attendees[attendeeIndex];
     const pricing = getPricingForVehicle(
       event,
       showCancellation,
@@ -1415,7 +1582,8 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
       paymentMode,
       lockId,
       session,
-      typeOfBook
+      typeOfBook,
+      reservedSlots[attendeeIndex].booking_id
     );
     bookingRefs.push(saved.bookingRef);
     bookingIds.push(saved.bookingId);
@@ -1475,17 +1643,25 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
     }
   }
 
+  const { sendAdminBookingConfirmationEmails } = require('./adminBookingEmailService');
+  await sendAdminBookingConfirmationEmails(pool, bookingIds);
+
   await addBookingsDone(pool, session, eventId, spaceRequired);
   if (session) {
     delete session.preFillData;
     delete session.courseEvent;
   }
 
+  const cartQuery =
+    bookingRefs.length > 0
+      ? `&cartId=${encodeURIComponent(bookingRefs.join('-'))}`
+      : '';
+
   return {
     payment_mode: 'cash',
     booking_ids: bookingIds,
     booking_refs: bookingRefs,
-    next_url: `/admin/bookings/confirmation?evId=${eventId}`,
+    next_url: `/admin/bookings/confirmation?evId=${eventId}${cartQuery}`,
   };
 }
 
@@ -1533,6 +1709,8 @@ async function cancelAddBookingWizard(
     session,
     resolvedAdminId
   );
+
+  await cleanupOrphanAdminPlaceholderBookings(pool);
 
   if (session) delete session.adminBooking;
   return { cancelled: true, removed: result.removed };
