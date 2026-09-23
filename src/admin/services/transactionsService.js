@@ -30,6 +30,8 @@ const TOB_FILTER_PAYMENT_TYPES = {
   bt: ['BANK_TRANSFER'],
   c: ['IN_PERSON'],
   z: ['ZERO_COST'],
+  v: ['VARIOUS'],
+  gv: ['GIFT_VOUCHER'],
   t: ['TERMINAL', 'CASH'],
   m: ['MOTO'],
 };
@@ -46,6 +48,8 @@ const TOB_NAME_SEARCH = {
   'BANK TRANSFER': 'bt',
   'IN PERSON': 'c',
   'ZERO COST': 'z',
+  VARIOUS: 'v',
+  'GIFT VOUCHER': 'gv',
 };
 
 function trim(value) {

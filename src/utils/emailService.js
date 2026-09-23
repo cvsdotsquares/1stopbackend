@@ -10,6 +10,22 @@ const {
 
 const DISPLAY_REF_SUFFIX = /^(PL|BT|R2|T|O|M|C|Z|W)$/i;
 
+const DEFAULT_BOOKING_BCC = 'bookings@1stopinstruction.com';
+
+/**
+ * Booking confirmation BCC address.
+ * settings.booking_bcc in DB is authoritative; env BOOKING_BCC is fallback only.
+ */
+function resolveBookingBcc(dbBookingBcc) {
+  const fromDb = String(dbBookingBcc || '').trim();
+  const fromEnv = String(process.env.BOOKING_BCC || '').trim();
+  if (fromDb) return fromDb;
+  if (fromEnv) return fromEnv;
+  return DEFAULT_BOOKING_BCC;
+}
+
+exports.resolveBookingBcc = resolveBookingBcc;
+
 // SMTP transport configuration:
 //   - SMTP_SECURE=true (port 465) → implicit TLS from the first byte.
 //   - SMTP_SECURE=false (port 587) → STARTTLS upgrade. We default
@@ -390,7 +406,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
 
   const resolvedBcc = disableBcc
     ? undefined
-    : (String(bcc || process.env.BOOKING_BCC || '').trim() || undefined);
+    : (String(bcc || '').trim() || resolveBookingBcc() || undefined);
 
   const resendExtra = String(bookingRefSuffix || '').trim().toUpperCase();
   const rawBookingType = String(booking_type || '').trim();
@@ -1048,10 +1064,7 @@ exports.sendBookingRefundEmail = async (pool, bookingId, options = {}) => {
     const [settingsData] = await connection.query(
       'SELECT booking_bcc FROM settings LIMIT 1'
     );
-    const bcc =
-      settingsData[0]?.booking_bcc ||
-      process.env.BOOKING_BCC ||
-      'bookings@1stopinstruction.com';
+    const bcc = resolveBookingBcc(settingsData[0]?.booking_bcc);
 
     const mailOptions = {
       from: getMailFrom(),
@@ -1164,10 +1177,7 @@ exports.sendBookingDeleteEmail = async (pool, bookingId, options = {}) => {
   const [settingsData] = await pool.query(
     'SELECT booking_bcc FROM settings LIMIT 1'
   );
-  const bcc =
-    settingsData[0]?.booking_bcc ||
-    process.env.BOOKING_BCC ||
-    'bookings@1stopinstruction.com';
+  const bcc = resolveBookingBcc(settingsData[0]?.booking_bcc);
 
   const mailOptions = {
     from: getMailFrom(),

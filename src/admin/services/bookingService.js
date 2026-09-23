@@ -2,6 +2,10 @@ const {
   LOCK_EXPIRE_TIME_MINUTES,
   STRIPE_PAYMENT_LINK_LOCKED_BY,
 } = require('../constants');
+const {
+  deleteReservedBookingsForLock,
+  cleanupOrphanAdminPlaceholderBookings,
+} = require('./adminBookingReserveService');
 
 /**
  * Port of Booking::removeExpirelocks() from booking.class.php
@@ -24,22 +28,19 @@ async function removeExpirelocks(pool, session) {
   const [locks] = await pool.query(
     `SELECT * FROM lock_bookings
      WHERE NOW() >= (created + INTERVAL ? MINUTE)${activeClause}
-       AND locked_by != ?
-       AND id NOT IN (
-         SELECT DISTINCT lockid FROM bookings
-         WHERE status = 0 AND lockid > 0
-       )`,
+       AND locked_by != ?`,
     params
   );
 
-  if (!locks?.length) {
-    return;
-  }
+  for (const lock of locks || []) {
+    const lockId = Number(lock.id);
+    if (!Number.isFinite(lockId) || lockId <= 0) continue;
 
-  for (const lock of locks) {
+    await deleteReservedBookingsForLock(pool, lockId);
+
     const [deleteResult] = await pool.query(
       'DELETE FROM lock_bookings WHERE id = ?',
-      [lock.id]
+      [lockId]
     );
 
     if (!deleteResult?.affectedRows) {
@@ -68,6 +69,8 @@ async function removeExpirelocks(pool, session) {
       );
     }
   }
+
+  await cleanupOrphanAdminPlaceholderBookings(pool);
 }
 
 module.exports = { removeExpirelocks };

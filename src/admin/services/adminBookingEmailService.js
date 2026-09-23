@@ -6,11 +6,9 @@ const {
   sendBookingRefundEmail,
   sendBookingDeleteEmail,
   sendBookingFeedbackEmail,
+  resolveBookingBcc,
 } = require('../../utils/emailService');
-const {
-  resolveBookingConfirmationRefSuffix,
-  normalizeTypeOfBookCode,
-} = require('../../utils/typeOfBook');
+const { resolveBookingConfirmationRefSuffix } = require('../../utils/typeOfBook');
 
 async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) {
   const id = Number(bookingId);
@@ -39,9 +37,6 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     const resendMode = Number(options.resendMode) || 0;
     const overrideEmail = String(options.overrideEmail || '').trim();
     const attendeeEmail = String(booking.email || '').trim();
-    if (!attendeeEmail && !overrideEmail && resendMode !== 2) {
-      return { sent: false, reason: 'no_attendee_email' };
-    }
 
     const [attendees] = await connection.query(
       `SELECT first_name, sur_name, email, contact1, contact2, contact3, vehicle_type
@@ -95,18 +90,7 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     const paymentType = paymentRows?.[0]?.payment_type;
 
     const isResend = resendMode > 0 || Boolean(overrideEmail);
-    let bookingTypeLabel = resolveBookingConfirmationRefSuffix({
-      typeOfBook: booking.type_of_book,
-      paymentType,
-    });
-    if (resendMode > 0 && resendMode !== 13) {
-      bookingTypeLabel +=
-        normalizeTypeOfBookCode(booking.type_of_book) === 'r' ? '2R' : 'R';
-    }
-    const adminBcc =
-      settingsData[0]?.booking_bcc ||
-      process.env.BOOKING_BCC ||
-      'bookings@1stopinstruction.com';
+    const adminBcc = resolveBookingBcc(settingsData[0]?.booking_bcc);
 
     let targetEmails = [];
     let disableBcc = false;
@@ -118,16 +102,35 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     } else if (resendMode === 2) {
       targetEmails = [adminBcc];
       disableBcc = true;
+    } else if (!attendeeEmail) {
+      targetEmails = [adminBcc];
+      disableBcc = true;
     }
+
+    const logTypeResolved =
+      options.logType ||
+      (isResend
+        ? 'Re-Sent Booking Confirmation'
+        : !attendeeEmail && !overrideEmail
+          ? 'Booking Confirmation (office copy)'
+          : 'Booking Confirmation');
+
+    const bookingRefSuffix =
+      logTypeResolved === 'Re-Sent Booking Confirmation' && resendMode !== 13
+        ? 'R'
+        : '';
 
     await sendBookingConfirmation(
       {
         course_name: courseData[0]?.course_name || 'Course',
         booking_ref: booking.booking_ref,
-        booking_type: bookingTypeLabel,
+        booking_type: resolveBookingConfirmationRefSuffix({
+          typeOfBook: booking.type_of_book,
+          paymentType,
+        }),
         type_of_book: booking.type_of_book,
         payment_type: paymentType,
-        bookingRefSuffix: '',
+        bookingRefSuffix,
         refundable: Number(booking.refundable) || 0,
         attendees,
         ...(targetEmails.length ? { targetEmails } : {}),
@@ -144,9 +147,7 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
         franchise: franchiseData[0] || {},
         bcc: adminBcc,
         ip: options.clientIp || '',
-        logType:
-          options.logType ||
-          (isResend ? 'Re-Sent Booking Confirmation' : 'Booking Confirmation'),
+        logType: logTypeResolved,
         emailBy: options.emailBy || 't',
       },
       pool
@@ -224,8 +225,23 @@ async function sendAdminBookingFeedbackEmail(pool, bookingId, options = {}) {
   }
 }
 
+/**
+ * Send a confirmation email for each booking id (multi-attendee wizard / cart).
+ */
+async function sendAdminBookingConfirmationEmails(pool, bookingIds, options = {}) {
+  const ids = [...new Set((bookingIds || []).map((id) => Number(id)).filter((n) => n > 0))];
+  const results = [];
+  for (const id of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    const result = await sendAdminBookingConfirmationEmail(pool, id, options);
+    results.push({ booking_id: id, ...result });
+  }
+  return results;
+}
+
 module.exports = {
   sendAdminBookingConfirmationEmail,
+  sendAdminBookingConfirmationEmails,
   sendAdminBookingRefundEmail,
   sendAdminBookingDeleteEmail,
   sendAdminBookingFeedbackEmail,

@@ -441,7 +441,7 @@ async function completeBookingWorldpayNotify(pool, body) {
   const orderKey = pickCallbackField(body, 'transId', 'transid', 'paymentId');
   const transactionType =
     pickCallbackField(body, 'transaction_type') || 'SALE';
-  const refs = await bookingRefsFromCartId(pool, cartId);
+  const refs = await resolveBookingRefsForWorldpayCart(pool, cartId);
   if (!refs.length) {
     const err = new Error('Missing booking reference');
     err.status = 400;
@@ -562,16 +562,19 @@ async function completeBookingWorldpayNotify(pool, body) {
     await removeLockById(pool, lastLockId, false);
   }
 
-  const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
-  for (const bookingId of mailBookingIds) {
-    await sendAdminBookingConfirmationEmail(pool, bookingId);
-  }
+  const {
+    sendAdminBookingConfirmationEmails,
+  } = require('./adminBookingEmailService');
+  await sendAdminBookingConfirmationEmails(
+    pool,
+    [...new Set(mailBookingIds)]
+  );
 
   return { success: true, cart_id: cartId, message: 'Booking payment recorded' };
 }
 
 async function resolveBookingIdsFromCartId(pool, cartId) {
-  const refs = await bookingRefsFromCartId(pool, cartId);
+  const refs = await resolveBookingRefsForWorldpayCart(pool, cartId);
   const ids = [];
   for (const ref of refs) {
     const [rows] = await pool.query(
@@ -679,6 +682,41 @@ async function bookingRefsFromCartId(pool, cartId) {
   const raw = trim(cartId);
   if (!raw) return [];
   return raw.includes('-') ? raw.split('-').map(trim).filter(Boolean) : [raw];
+}
+
+/**
+ * WorldPay cartId may only contain the first booking ref if the gateway truncates
+ * the order id. Expand to every admin booking on the same lock (multi-attendee).
+ */
+async function resolveBookingRefsForWorldpayCart(pool, cartId) {
+  const refs = await bookingRefsFromCartId(pool, cartId);
+  if (!refs.length) return refs;
+
+  const [lockRows] = await pool.query(
+    `SELECT b.lockid
+     FROM bookings b
+     INNER JOIN booking_attendees ba ON ba.booking_id = b.id
+     WHERE ba.booking_ref = ?
+     LIMIT 1`,
+    [refs[0]]
+  );
+  const lockId = Number(lockRows?.[0]?.lockid) || 0;
+  if (lockId <= 0) return refs;
+
+  const [siblingRows] = await pool.query(
+    `SELECT MIN(ba.booking_ref) AS booking_ref
+     FROM bookings b
+     INNER JOIN booking_attendees ba ON ba.booking_id = b.id
+     WHERE b.lockid = ?
+       AND b.booking_made_by = 'admin'
+     GROUP BY b.id
+     ORDER BY b.id ASC`,
+    [lockId]
+  );
+  const expanded = (siblingRows || [])
+    .map((row) => trim(row.booking_ref))
+    .filter(Boolean);
+  return expanded.length ? expanded : refs;
 }
 
 module.exports = {

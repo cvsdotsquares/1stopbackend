@@ -21,6 +21,7 @@ function createBookingsRoutes(pool) {
   router.get('/in-progress', requireAdminSession, (req, res) =>
     controller.getInProgressBookings(req, res)
   );
+  router.get('/', requireAdminSession, (req, res) => controller.list(req, res));
   router.get('/wizard', requireAdminSession, (req, res) =>
     controller.getWizard(req, res)
   );
@@ -94,8 +95,20 @@ function createBookingsRoutes(pool) {
   router.get('/:id/edit', requireAdminSession, (req, res) =>
     controller.getBookingEditForm(req, res)
   );
+  router.get('/:id/history', requireAdminSession, (req, res) =>
+    controller.getBookingHistory(req, res)
+  );
   router.get('/:id/delete/mail-template', requireAdminSession, (req, res) =>
     controller.getDeleteMailTemplate(req, res)
+  );
+  router.post('/:id/hold', requireAdminSession, (req, res) =>
+    controller.holdBooking(req, res)
+  );
+  router.get('/:id/reinstate-options', requireAdminSession, (req, res) =>
+    controller.getReinstateOptions(req, res)
+  );
+  router.post('/:id/reinstate', requireAdminSession, (req, res) =>
+    controller.reinstateBooking(req, res)
   );
   router.post('/:id/refund', requireAdminSession, (req, res) =>
     controller.refundBooking(req, res)

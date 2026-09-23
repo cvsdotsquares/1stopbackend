@@ -245,7 +245,7 @@ app.listen(PORT, () => {
   const { ensureTypeOfBookEnum } = require('./utils/typeOfBook');
   ensureTypeOfBookEnum(pool).catch((err) => {
     console.error(
-      '[BOOKINGS] Failed to extend bookings.type_of_book enum (pl, bt, c, z):',
+      '[BOOKINGS] Failed to extend bookings.type_of_book enum (pl, bt, c, z, v, gv):',
       err.message
     );
   });

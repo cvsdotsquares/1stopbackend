@@ -6,6 +6,13 @@ const {
   getTypeOfBookLabel,
   TYPE_OF_BOOK_LABELS,
 } = require('../../utils/typeOfBook');
+const { ensureReservedBookingsForLock } = require('./adminBookingReserveService');
+const {
+  canHoldBooking,
+  canReinstateBooking,
+  getLatestEventDateFromRows,
+  isEventDatePassed,
+} = require('./adminBookingHoldService');
 
 const VEHICLE_TYPE_LABELS = {
   0: 'Manual',
@@ -306,20 +313,28 @@ async function getEventBookingPage(pool, evId, session) {
     });
   }
 
+  const latestEventDate = getLatestEventDateFromRows(dateRows);
+  const eventDatePassed = isEventDatePassed(latestEventDate);
+
   const [bookingRows] = await pool.query(
     `SELECT total_amount, payment_due, refundable, booking_ref,
             first_name, sur_name, type_of_book, spaces, status,
-            bookings.created, bookings.id, booking_id, vehicle_type
+            bookings.created, bookings.id, booking_id, vehicle_type,
+            IFNULL(bookings.on_hold, 0) AS on_hold
      FROM bookings
-     LEFT JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
+     INNER JOIN booking_attendees ON booking_attendees.booking_id = bookings.id
      WHERE course_event_id = ? AND bookings.status = 1
-     ORDER BY booking_id, \`primary\` DESC`,
+     ORDER BY bookings.id ASC, booking_attendees.\`primary\` DESC, booking_attendees.id ASC`,
     [eventId]
   );
 
   const nowMs = Date.now();
   const bookings = [];
+  const seenBookingIds = new Set();
   for (const row of bookingRows || []) {
+    const bookingId = Number(row.id);
+    if (seenBookingIds.has(bookingId)) continue;
+    seenBookingIds.add(bookingId);
     if (Number(row.status) === 0) {
       const createdMs = new Date(row.created).getTime();
       if (!Number.isNaN(createdMs) && nowMs > createdMs + 2 * 3600 * 1000) {
@@ -328,6 +343,7 @@ async function getEventBookingPage(pool, evId, session) {
     }
 
     const vehicleKey = String(row.vehicle_type ?? '');
+    const onHold = Number(row.on_hold) === 1;
     bookings.push({
       id: row.id,
       booking_ref: row.booking_ref,
@@ -342,16 +358,27 @@ async function getEventBookingPage(pool, evId, session) {
       spaces: 1,
       status: Number(row.status),
       refundable: Number(row.refundable),
+      on_hold: onHold,
       display_status: deriveBookingDisplayStatus(row),
       created: row.created,
       created_label: formatBookingCreated(row.created),
       total_amount: row.total_amount,
       payment_due: row.payment_due,
+      can_show_hold:
+        Number(row.status) === 1 &&
+        Number(row.refundable) === 0 &&
+        !onHold,
+      can_hold: canHoldBooking(row, { eventDatePassed }),
+      can_reinstate: canReinstateBooking(row),
       can_edit:
-        Number(row.status) === 1 && Number(row.refundable) === 0,
-      can_refund: Number(row.refundable) === 1,
+        Number(row.status) === 1 &&
+        Number(row.refundable) === 0 &&
+        !onHold,
+      can_refund: Number(row.refundable) === 1 && !onHold,
       can_delete:
-        Number(row.status) === 1 && Number(row.refundable) === 0,
+        Number(row.status) === 1 &&
+        Number(row.refundable) === 0 &&
+        !onHold,
     });
   }
 
@@ -587,6 +614,13 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
       session.adminBooking.lock_session = lock;
     }
 
+    await ensureReservedBookingsForLock(pool, {
+      eventId,
+      lockId,
+      spaceRequired: spaces,
+      adminId: resolvedAdminId,
+    });
+
     return {
       lock_id: lockId,
       space_required: spaces,
@@ -647,6 +681,9 @@ async function removeProcessLock(pool, lockId, session) {
       [lock.space_required, edata.id]
     );
   }
+
+  const { deleteReservedBookingsForLock } = require('./adminBookingReserveService');
+  await deleteReservedBookingsForLock(pool, id);
 
   await pool.query('DELETE FROM lock_bookings WHERE id = ?', [id]);
 

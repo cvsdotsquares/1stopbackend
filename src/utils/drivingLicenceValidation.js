@@ -15,21 +15,11 @@ function isNorthernIrelandDrivingLicence(value) {
   return /^\d{8}$/.test(value);
 }
 
+/** Legacy admin parity: 16-char DVLA layout only (no DOB digit plausibility check). */
 function isValidUkPhotocardLicence(value) {
   if (value.length !== 16) return false;
   if (!/^[A-Z0-9]+$/.test(value)) return false;
-
-  if (!/^[A-Z9]{5}\d[A-Z0-9]{10}$/.test(value)) return false;
-
-  const monthRaw = parseInt(value.slice(6, 8), 10);
-  const day = parseInt(value.slice(8, 10), 10);
-  if (!Number.isFinite(monthRaw) || !Number.isFinite(day)) return false;
-
-  let month = monthRaw;
-  if (month > 50) month -= 50;
-  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
-
-  return true;
+  return /^[A-Z9]{5}\d[A-Z0-9]{10}$/.test(value);
 }
 
 /**

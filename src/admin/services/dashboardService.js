@@ -181,9 +181,18 @@ function buildSearchWhere(searchterm, dateWindow) {
  * Port of Dashboard::course_avails_dashboard($searchterm)
  * Windowed to the visible calendar so we don't hydrate ~20k historical events.
  */
+const {
+  courseEventsHasOwnVehicleFlag,
+  inferOwnVehicleEnabled,
+} = require('../../utils/ownVehicleAvailability');
+
 async function courseAvailsDashboard(pool, searchterm, query = {}) {
   const dateWindow = resolveAvailWindow(query);
   const { where, params } = buildSearchWhere(searchterm, dateWindow);
+  const hasOwnVehicleColumn = await courseEventsHasOwnVehicleFlag(pool);
+  const ownVehicleSelect = hasOwnVehicleColumn
+    ? 'course_events.vehicle_type_own,'
+    : '';
 
   const sql = `SELECT
       course_events.id AS course_event_id,
@@ -191,6 +200,14 @@ async function courseAvailsDashboard(pool, searchterm, query = {}) {
       course_events.booking_limit,
       course_events.bookings_done,
       course_events.current_locks,
+      course_events.vehicle_type_manual,
+      course_events.vehicle_type_automatic,
+      course_events.manual_lock_done,
+      course_events.automatic_lock_done,
+      ${ownVehicleSelect}
+      course_events.own_one_off_price,
+      course_events.own_deposit_price,
+      course_events.own_total_price,
       courses.course_name,
       courses.id AS course_id,
       locations.id AS location_id,
@@ -213,7 +230,7 @@ async function enrichCourseAvails(pool, rows) {
   }
 
   const eventIds = rows.map((r) => r.course_event_id);
-  const [dateRows, frozenIds] = await Promise.all([
+  const [dateRows, frozenByEventId] = await Promise.all([
     pool
       .query(
         `SELECT course_event_id, event_date, event_start_time, event_end_time
@@ -222,7 +239,7 @@ async function enrichCourseAvails(pool, rows) {
         [eventIds]
       )
       .then(([result]) => result || []),
-    getFrozenEventIds(pool, eventIds),
+    getFrozenVehicleRowsByEventId(pool, eventIds),
   ]);
 
   const dayCountByEvent = {};
@@ -261,6 +278,9 @@ async function enrichCourseAvails(pool, rows) {
       const eventDates = datesByEvent[row.course_event_id] || [];
       const primaryDate = getPrimaryEventDate(eventDates, null);
       const times = timeByEvent[row.course_event_id] || {};
+      const frozenRow = frozenByEventId.get(row.course_event_id);
+      const isFrozen = Boolean(frozenRow);
+      const vehicleSource = isFrozen ? frozenRow : row;
 
       return {
         course_event_id: row.course_event_id,
@@ -277,23 +297,35 @@ async function enrichCourseAvails(pool, rows) {
         booking_limit: Number(row.booking_limit) || 0,
         bookings_done: Number(row.bookings_done) || 0,
         current_locks: Number(row.current_locks) || 0,
+        vehicle_type_manual: Number(vehicleSource.vehicle_type_manual) || 0,
+        vehicle_type_automatic: Number(vehicleSource.vehicle_type_automatic) || 0,
+        vehicle_type_own: inferOwnVehicleEnabled(row),
+        manual_lock_done: Number(vehicleSource.manual_lock_done) || 0,
+        automatic_lock_done: Number(vehicleSource.automatic_lock_done) || 0,
         eventDates,
         eventDayCount: dayCountByEvent[row.course_event_id] || eventDates.length,
-        isFrozen: frozenIds.has(row.course_event_id),
+        isFrozen,
       };
     })
     .filter((row) => row.event_date != null);
 }
 
-async function getFrozenEventIds(pool, eventIds) {
+async function getFrozenVehicleRowsByEventId(pool, eventIds) {
+  const map = new Map();
   if (!eventIds.length) {
-    return new Set();
+    return map;
   }
   const [rows] = await pool.query(
-    'SELECT course_event_id FROM freeze WHERE course_event_id IN (?)',
+    `SELECT course_event_id, vehicle_type_manual, vehicle_type_automatic,
+            manual_lock_done, automatic_lock_done
+     FROM freeze
+     WHERE course_event_id IN (?)`,
     [eventIds]
   );
-  return new Set((rows || []).map((r) => r.course_event_id));
+  for (const row of rows || []) {
+    map.set(row.course_event_id, row);
+  }
+  return map;
 }
 
 /**

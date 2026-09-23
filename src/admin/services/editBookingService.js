@@ -3,6 +3,12 @@
  */
 const { isEventFrozen } = require('./courseEventWizardService');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
+const {
+  canHoldBooking,
+  canReinstateBooking,
+  getLatestEventDateFromRows,
+  isEventDatePassed,
+} = require('./adminBookingHoldService');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
 
 const TBC_DATE = '0000-00-00';
@@ -474,6 +480,238 @@ async function loadUpdateHistory(pool, bookingId) {
   }));
 }
 
+function holdActionLabel(action) {
+  const key = trim(action).toLowerCase();
+  if (key === 'reinstated' || key === 'reinstate') return 'Reinstated';
+  if (key === 'held' || key === 'hold') return 'Placed on hold';
+  return titleCase(key.replace(/_/g, ' ')) || 'Updated';
+}
+
+function historyTypeLabel(type) {
+  const key = trim(type).toLowerCase();
+  if (!key) return 'Updated';
+  if (key === 'held') return 'Placed on hold';
+  if (key === 'reinstated' || key === 'reinstate') return 'Reinstated';
+  return titleCase(key.replace(/_/g, ' '));
+}
+
+function historyTimestamp(value) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function findMatchingHoldEntry(updateRow, holdHistory, usedHoldIds) {
+  const updateType = trim(updateRow.type).toLowerCase();
+  if (updateType !== 'held' && updateType !== 'reinstated' && updateType !== 'reinstate') {
+    return null;
+  }
+  const updateMs = historyTimestamp(updateRow.created);
+  let best = null;
+  let bestDelta = Infinity;
+  for (const holdRow of holdHistory) {
+    if (usedHoldIds.has(holdRow.id)) continue;
+    const holdAction = trim(holdRow.action).toLowerCase();
+    const typeMatches =
+      (updateType === 'held' && (holdAction === 'held' || holdAction === 'hold')) ||
+      ((updateType === 'reinstated' || updateType === 'reinstate') &&
+        (holdAction === 'reinstated' || holdAction === 'reinstate'));
+    if (!typeMatches) continue;
+    const delta = Math.abs(historyTimestamp(holdRow.created) - updateMs);
+    if (delta <= 120000 && delta < bestDelta) {
+      best = holdRow;
+      bestDelta = delta;
+    }
+  }
+  return best;
+}
+
+async function loadHoldHistoryRows(pool, bookingId) {
+  const [rows] = await pool.query(
+    `SELECT booking_hold_history.*,
+            CONCAT(admin.admin_fristname, ' ', admin.admin_lastname) AS admin_name
+     FROM booking_hold_history
+     LEFT JOIN admin ON admin.admin_id = booking_hold_history.updated_by_admin_id
+     WHERE booking_hold_history.booking_id = ?
+     ORDER BY booking_hold_history.created DESC`,
+    [bookingId]
+  );
+  return rows || [];
+}
+
+async function loadEventHistoryLabels(pool, eventIds) {
+  const ids = [...new Set(eventIds.filter((id) => Number(id) > 0))];
+  const map = new Map();
+  if (!ids.length) return map;
+
+  const placeholders = ids.map(() => '?').join(',');
+  const [rows] = await pool.query(
+    `SELECT ce.id AS course_event_id,
+            l.location_name,
+            DATE_FORMAT(MIN(ced.event_date), '%Y-%m-%d') AS event_date,
+            MIN(ced.event_start_time) AS event_start_time
+     FROM course_events ce
+     LEFT JOIN locations l ON l.id = ce.location_id
+     LEFT JOIN course_event_dates ced
+       ON ced.course_event_id = ce.id
+      AND ced.event_date > '1900-01-01'
+      AND ced.event_date NOT IN ('0000-00-00', '1111-11-11')
+     WHERE ce.id IN (${placeholders})
+     GROUP BY ce.id, l.location_name`,
+    ids
+  );
+
+  for (const row of rows || []) {
+    const eventDate = toMysqlDateKey(row.event_date);
+    const dateLabel = eventDate ? formatLongDate(eventDate) : 'TBC';
+    const time = row.event_start_time
+      ? String(row.event_start_time).slice(0, 5)
+      : '';
+    const location = trim(row.location_name) || 'Location TBC';
+    map.set(
+      Number(row.course_event_id),
+      time ? `${dateLabel} — ${location} (${time})` : `${dateLabel} — ${location}`
+    );
+  }
+  return map;
+}
+
+function eventLabelFromMap(map, eventId) {
+  const id = Number(eventId);
+  if (!Number.isFinite(id) || id <= 0) return '';
+  return map.get(id) || `Event #${id}`;
+}
+
+function mergeBookingHistoryTimeline(updateHistory, holdHistory, eventLabels) {
+  const usedHoldIds = new Set();
+  const merged = [];
+
+  for (const updateRow of updateHistory) {
+    const holdMatch = findMatchingHoldEntry(updateRow, holdHistory, usedHoldIds);
+    if (holdMatch) {
+      usedHoldIds.add(holdMatch.id);
+      const fromId = holdMatch.from_course_event_id;
+      const toId = holdMatch.to_course_event_id;
+      merged.push({
+        id: `hold-${holdMatch.id}`,
+        created: holdMatch.created,
+        created_label: formatHistoryTimestamp(holdMatch.created),
+        action: holdActionLabel(holdMatch.action),
+        status: trim(updateRow.status) || holdActionLabel(holdMatch.action),
+        type: trim(updateRow.type) || trim(holdMatch.action),
+        from_event_label: eventLabelFromMap(eventLabels, fromId),
+        to_event_label: eventLabelFromMap(eventLabels, toId),
+        notes: trim(holdMatch.notes),
+        admin_name: trim(holdMatch.admin_name) || updateRow.admin_name || 'Admin',
+      });
+      continue;
+    }
+
+    const updateType = trim(updateRow.type).toLowerCase();
+    if (
+      updateType === 'held' ||
+      updateType === 'reinstated' ||
+      updateType === 'reinstate'
+    ) {
+      continue;
+    }
+
+    merged.push({
+      id: `update-${updateRow.id}`,
+      created: updateRow.created,
+      created_label: updateRow.created_label,
+      action: historyTypeLabel(updateRow.type),
+      status: trim(updateRow.status),
+      type: trim(updateRow.type),
+      from_event_label: '',
+      to_event_label: '',
+      notes: '',
+      admin_name: updateRow.admin_name || 'Admin',
+    });
+  }
+
+  for (const holdRow of holdHistory) {
+    if (usedHoldIds.has(holdRow.id)) continue;
+    merged.push({
+      id: `hold-${holdRow.id}`,
+      created: holdRow.created,
+      created_label: formatHistoryTimestamp(holdRow.created),
+      action: holdActionLabel(holdRow.action),
+      status: holdActionLabel(holdRow.action),
+      type: trim(holdRow.action),
+      from_event_label: eventLabelFromMap(
+        eventLabels,
+        holdRow.from_course_event_id
+      ),
+      to_event_label: eventLabelFromMap(eventLabels, holdRow.to_course_event_id),
+      notes: trim(holdRow.notes),
+      admin_name: trim(holdRow.admin_name) || 'Admin',
+    });
+  }
+
+  merged.sort(
+    (a, b) => historyTimestamp(b.created) - historyTimestamp(a.created)
+  );
+  return merged;
+}
+
+async function getBookingHistory(pool, idParam) {
+  const attendee = await resolveBookingAttendee(pool, idParam);
+  if (!attendee) {
+    const deletedId = await findDeletedBookingRedirect(pool, idParam);
+    if (deletedId) {
+      const err = new Error('Booking was deleted');
+      err.status = 404;
+      err.code = 'DELETED_BOOKING';
+      err.deleted_booking_id = deletedId;
+      throw err;
+    }
+    const err = new Error('Booking not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const booking = await loadBookingCore(pool, attendee.booking_id);
+  if (!booking) {
+    const err = new Error('Booking not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const bookingId = Number(booking.id);
+  const [updateHistory, holdHistory] = await Promise.all([
+    loadUpdateHistory(pool, bookingId),
+    loadHoldHistoryRows(pool, bookingId),
+  ]);
+
+  const eventIds = [];
+  for (const row of holdHistory) {
+    if (row.from_course_event_id) eventIds.push(row.from_course_event_id);
+    if (row.to_course_event_id) eventIds.push(row.to_course_event_id);
+  }
+  const eventLabels = await loadEventHistoryLabels(pool, eventIds);
+  const history = mergeBookingHistoryTimeline(
+    updateHistory,
+    holdHistory,
+    eventLabels
+  );
+
+  const attendeeName =
+    `${trim(booking.first_name)} ${trim(booking.sur_name)}`.trim() ||
+    'Customer';
+
+  return {
+    booking_id: bookingId,
+    booking_ref: booking.booking_ref || '',
+    attendee_name: attendeeName,
+    course_name: booking.course_name || '',
+    course_abb: booking.course_abb || '',
+    location_name: booking.location_name || '',
+    on_hold: Number(booking.on_hold) === 1,
+    history,
+  };
+}
+
 async function loadStudentResult(pool, bookingId) {
   const [rows] = await pool.query(
     `SELECT student_daily_report.*,
@@ -575,6 +813,9 @@ function buildBookingPayload(booking, dates, extras = {}) {
     status: Number(booking.status),
     refundable: Number(booking.refundable),
     can_edit: canEditBooking(booking),
+    on_hold: Boolean(extras.on_hold),
+    can_hold: Boolean(extras.can_hold),
+    can_reinstate: Boolean(extras.can_reinstate),
     type_of_book: booking.type_of_book,
     type_of_book_label: tobLabel(booking.type_of_book),
     customer_name: resolveCustomerName(booking),
@@ -663,6 +904,9 @@ async function getBookingView(pool, idParam) {
     [booking.course_event_id]
   );
   const dates = buildEventDatesMap(dateRows);
+  const latestEventDate = getLatestEventDateFromRows(dateRows);
+  const eventDatePassed = isEventDatePassed(latestEventDate);
+  const onHold = Number(booking.on_hold) === 1;
 
   const [updateHistory, studentResult, promo, bookingMadeBy] = await Promise.all([
     loadUpdateHistory(pool, booking.id),
@@ -676,6 +920,9 @@ async function getBookingView(pool, idParam) {
     student_result: studentResult,
     promo,
     booking_made_by_label: bookingMadeBy,
+    on_hold: onHold,
+    can_hold: canHoldBooking(booking, { eventDatePassed }),
+    can_reinstate: canReinstateBooking(booking),
   });
 }
 
@@ -755,9 +1002,11 @@ async function getEditBookingForm(pool, idParam, { newEventId } = {}) {
       automatic_available: autoAvail,
       licence_types: licenceTypes,
       cancel_price: Number(targetEvent.cancel_price || booking.cancel_price) || 0,
+      booking_spaces: Number(booking.spaces) || 1,
       target_event: {
         course_name: targetEvent.course_name || view.event.course_name,
         location_name: targetEvent.location_name || '',
+        location_id: Number(targetEvent.location_id) || 0,
         date_entries: dateEntries,
         is_multi_day: dateEntries.filter((d) => !d.is_tbc).length > 1,
       },
@@ -863,13 +1112,14 @@ async function saveMoveBooking(pool, book, curEventId) {
        type_of_book, spaces, payment_due, total_fees, vatrate, vat, total_amount,
        status, lockid, created, modified, admin_payment_received,
        edited_booking_id, edit_payment_type)
-     VALUES (?, ?, 0, ?, ?, ?, 1, ?, ?, ?, ?, ?, 1, 0, ?, NOW(), ?, ?, 'none')`,
+     VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, NOW(), ?, ?, 'none')`,
     [
       book.course_id,
       book.course_event_id,
       book.booking_made_by_id,
       book.booking_made_by,
       book.type_of_book,
+      Number(book.spaces) || 1,
       book.payment_due,
       book.total_fees,
       book.vatrate || 0,
@@ -881,8 +1131,9 @@ async function saveMoveBooking(pool, book, curEventId) {
     ]
   );
   const newId = insertResult.insertId;
-  await addEditBookingsDone(pool, book.course_event_id, 1);
-  await lessEditedBooking(pool, curEventId, 1);
+  const moveSpaces = Number(book.spaces) || 1;
+  await addEditBookingsDone(pool, book.course_event_id, moveSpaces);
+  await lessEditedBooking(pool, curEventId, moveSpaces);
   await pool.query('UPDATE bookings SET status = 5 WHERE id = ?', [
     book.edited_booking_id,
   ]);
@@ -1076,7 +1327,8 @@ async function updateBooking(pool, idParam, body, adminId, session) {
     const limit = Number(targetEvent.booking_limit) || 0;
     const done = Number(targetEvent.bookings_done) || 0;
     const locks = Number(targetEvent.current_locks) || 0;
-    if (limit <= done + locks) {
+    const spacesNeeded = Number(booking.spaces) || 1;
+    if (limit - done - locks < spacesNeeded) {
       const err = new Error('No space available on this moved location');
       err.status = 400;
       throw err;
@@ -1098,6 +1350,7 @@ async function updateBooking(pool, idParam, body, adminId, session) {
     const movedBook = {
       course_id: booking.course_id,
       course_event_id: newEventId,
+      spaces: Number(booking.spaces) || 1,
       booking_made_by_id: booking.booking_made_by_id,
       booking_made_by: booking.booking_made_by,
       type_of_book: booking.type_of_book,
@@ -1179,6 +1432,7 @@ async function updateBooking(pool, idParam, body, adminId, session) {
 
 module.exports = {
   getBookingView,
+  getBookingHistory,
   getEditBookingForm,
   updateBooking,
   resolveBookingAttendee,
