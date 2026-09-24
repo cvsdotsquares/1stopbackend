@@ -305,7 +305,8 @@ async function createVehicle(pool, body) {
     !data.registration ||
     !data.make_model_id ||
     !data.engine_size_id ||
-    !data.transmission_id
+    !data.transmission_id ||
+    !data.location_id
   ) {
     const err = new Error('Required fields can not be left blank');
     err.code = 'VALIDATION';
@@ -365,7 +366,8 @@ async function updateVehicle(pool, id, body) {
     !data.registration ||
     !data.make_model_id ||
     !data.engine_size_id ||
-    !data.transmission_id
+    !data.transmission_id ||
+    !data.location_id
   ) {
     const err = new Error('Required fields can not be left blank');
     err.code = 'VALIDATION';
@@ -585,30 +587,83 @@ async function deleteFleetSetting(pool, id) {
   );
 }
 
-async function getVehicleLogs(pool, vehicleId, query = {}) {
-  const vid = Number(vehicleId);
-  const params = [vid];
-  let where = ' WHERE vehicle_logs.vehicle_id = ? ';
-  if (trim(query.scr_issue_status)) {
-    where += ' AND vehicle_logs.issue_status = ?';
-    params.push(trim(query.scr_issue_status));
-  }
-  if (trim(query.scr_log)) {
-    where += ' AND vehicle_logs.log_event_id = ?';
-    params.push(Number(query.scr_log));
+async function reorderFleetSetting(pool, id, direction) {
+  const settingId = Number(id);
+  const move = trim(direction).toLowerCase();
+  if (move !== 'up' && move !== 'down') {
+    const err = new Error('Invalid reorder direction');
+    err.code = 'VALIDATION';
+    throw err;
   }
   const [rows] = await pool.query(
-    `SELECT vehicle_logs.*, le.setting_value AS log_events, ins.fname, ins.lname
-     FROM vehicle_logs
-     LEFT JOIN vehicle_fleet_settings AS le ON (
-       le.setting_type = 'log_events' AND le.setting_name = 'option_name' AND le.id = vehicle_logs.log_event_id
-     )
-     LEFT JOIN itineraries AS ins ON ins.id > 0 AND ins.id = vehicle_logs.updated_by
-     ${where}
-     ORDER BY log_date DESC`,
-    params
+    `SELECT * FROM vehicle_fleet_settings
+     WHERE id = ? AND setting_name = 'option_name' AND status = 1 LIMIT 1`,
+    [settingId]
   );
-  return rows.map((r) => ({
+  const current = rows[0];
+  if (!current) {
+    const err = new Error('Option value not found to update');
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const settingType = current.setting_type;
+  const orderNo = Number(current.order_no) || 0;
+  let neighborRows;
+  if (move === 'up') {
+    [neighborRows] = await pool.query(
+      `SELECT * FROM vehicle_fleet_settings
+       WHERE setting_type = ? AND setting_name = 'option_name' AND status = 1
+         AND order_no < ?
+       ORDER BY order_no DESC LIMIT 1`,
+      [settingType, orderNo]
+    );
+  } else {
+    [neighborRows] = await pool.query(
+      `SELECT * FROM vehicle_fleet_settings
+       WHERE setting_type = ? AND setting_name = 'option_name' AND status = 1
+         AND order_no > ?
+       ORDER BY order_no ASC LIMIT 1`,
+      [settingType, orderNo]
+    );
+  }
+  const neighbor = neighborRows[0];
+  if (!neighbor) {
+    return;
+  }
+  const neighborOrder = Number(neighbor.order_no) || 0;
+  await pool.query('UPDATE vehicle_fleet_settings SET order_no = ? WHERE id = ?', [
+    orderNo,
+    Number(neighbor.id),
+  ]);
+  await pool.query('UPDATE vehicle_fleet_settings SET order_no = ? WHERE id = ?', [
+    neighborOrder,
+    settingId,
+  ]);
+}
+
+async function patchVehicleIncludeAlert(pool, id, includeIntoAlert) {
+  const vehicleId = Number(id);
+  const existing = await getVehicleById(pool, vehicleId);
+  if (!existing) {
+    const err = new Error('Vehicle not found');
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const ts = nowMysql();
+  await pool.query(
+    'UPDATE vehicles SET include_into_alert = ?, modified_at = ? WHERE id = ?',
+    [as01(includeIntoAlert, 0), ts, vehicleId]
+  );
+  return getVehicleById(pool, vehicleId);
+}
+
+function mapVehicleLogRow(r) {
+  if (!r) return null;
+  const updatedBy =
+    String(r.updated_by) === '-1'
+      ? trim(r.updated_by_name)
+      : `${trim(r.fname)} ${trim(r.lname)}`.trim();
+  return {
     id: Number(r.id),
     vehicle_id: Number(r.vehicle_id),
     log_date: r.log_date,
@@ -617,9 +672,59 @@ async function getVehicleLogs(pool, vehicleId, query = {}) {
     log_events: r.log_events || '',
     log_notes: r.log_notes || '',
     issue_status: r.issue_status || '',
+    updated_by: r.updated_by,
     updated_by_name: r.updated_by_name || '',
     updated_by_id: Number(r.updated_by_id) || 0,
-  }));
+    updated: r.updated,
+    updated_by_display: updatedBy,
+  };
+}
+
+const VEHICLE_LOG_SELECT = `
+  SELECT vehicle_logs.*, le.setting_value AS log_events, ins.fname, ins.lname
+  FROM vehicle_logs
+  LEFT JOIN vehicle_fleet_settings AS le ON (
+    le.setting_type = 'log_events' AND le.setting_name = 'option_name' AND le.id = vehicle_logs.log_event_id
+  )
+  LEFT JOIN itineraries AS ins ON ins.id > 0 AND ins.id = vehicle_logs.updated_by
+`;
+
+async function getVehicleLogById(pool, vehicleId, logId) {
+  const [rows] = await pool.query(
+    `${VEHICLE_LOG_SELECT}
+     WHERE vehicle_logs.id = ? AND vehicle_logs.vehicle_id = ?
+     LIMIT 1`,
+    [Number(logId), Number(vehicleId)]
+  );
+  return mapVehicleLogRow(rows[0]);
+}
+
+async function getVehicleLogs(pool, vehicleId, query = {}) {
+  const vid = Number(vehicleId);
+  const params = [vid];
+  let where = ' WHERE vehicle_logs.vehicle_id = ? ';
+  if (trim(query.scr_issue_status)) {
+    where += ' AND vehicle_logs.issue_status = ?';
+    params.push(trim(query.scr_issue_status));
+  }
+  const logEventFilter =
+    trim(query.scr_log_event) || trim(query.scr_log);
+  if (logEventFilter) {
+    where += ' AND vehicle_logs.log_event_id = ?';
+    params.push(Number(logEventFilter));
+  }
+  const notesFilter = trim(query.scr_notes);
+  if (notesFilter) {
+    where += ' AND vehicle_logs.log_notes LIKE ?';
+    params.push(`%${notesFilter}%`);
+  }
+  const [rows] = await pool.query(
+    `${VEHICLE_LOG_SELECT}
+     ${where}
+     ORDER BY log_date DESC`,
+    params
+  );
+  return rows.map((r) => mapVehicleLogRow(r));
 }
 
 async function createVehicleLog(pool, vehicleId, body, session) {
@@ -628,6 +733,16 @@ async function createVehicleLog(pool, vehicleId, body, session) {
   if (!existing) {
     const err = new Error('Vehicle not found');
     err.code = 'NOT_FOUND';
+    throw err;
+  }
+  if (
+    !trim(body.add_log_date ?? body.log_date) ||
+    !trim(body.add_log_notes ?? body.log_notes) ||
+    !trim(body.log_issue_status ?? body.issue_status) ||
+    !Number(body.log_event_id)
+  ) {
+    const err = new Error('Required fields can not be left blank');
+    err.code = 'VALIDATION';
     throw err;
   }
   const admin = session?.loggedinAdmin || {};
@@ -666,6 +781,16 @@ async function updateVehicleLog(pool, logId, body, session) {
   if (!logRow) {
     const err = new Error('Vehicle log not found');
     err.code = 'NOT_FOUND';
+    throw err;
+  }
+  if (
+    !trim(body.add_log_date ?? body.log_date) ||
+    !trim(body.add_log_notes ?? body.log_notes) ||
+    !trim(body.log_issue_status ?? body.issue_status) ||
+    !Number(body.log_event_id)
+  ) {
+    const err = new Error('Required fields can not be left blank');
+    err.code = 'VALIDATION';
     throw err;
   }
   const vid = Number(logRow.vehicle_id);
@@ -838,7 +963,10 @@ module.exports = {
   createFleetSetting,
   updateFleetSetting,
   deleteFleetSetting,
+  reorderFleetSetting,
+  patchVehicleIncludeAlert,
   getVehicleLogs,
+  getVehicleLogById,
   createVehicleLog,
   updateVehicleLog,
   deleteVehicleLog,
