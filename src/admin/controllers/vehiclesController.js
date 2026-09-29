@@ -132,6 +132,41 @@ class VehiclesController {
     }
   }
 
+  async reorderSetting(req, res) {
+    try {
+      await vehiclesService.reorderFleetSetting(
+        this.pool,
+        req.params.id,
+        req.body.direction
+      );
+      return res.json({
+        success: true,
+        message: 'Order has been successfully updated',
+      });
+    } catch (err) {
+      return res.status(400).json({
+        success: false,
+        message: this.flashMessage(err, 'Unable to reorder setting'),
+      });
+    }
+  }
+
+  async patchIncludeAlert(req, res) {
+    try {
+      const vehicle = await vehiclesService.patchVehicleIncludeAlert(
+        this.pool,
+        req.params.id,
+        req.body.include_into_alert
+      );
+      return res.json({ success: true, data: { vehicle } });
+    } catch (err) {
+      return res.status(400).json({
+        success: false,
+        message: this.flashMessage(err, 'Unable to update vehicle alert'),
+      });
+    }
+  }
+
   async updateLocationAjax(req, res) {
     try {
       const data = await vehiclesService.updateVehicleLocation(
@@ -139,9 +174,18 @@ class VehiclesController {
         req.body.vid,
         req.body.selval
       );
-      return res.json(data);
+      const ok = Number(data?.status) === 1;
+      return res.json({
+        success: ok,
+        data,
+        message: ok ? '' : 'Unable to update vehicle location',
+      });
     } catch (err) {
-      return res.status(500).json({ status: 0, data: [], message: '' });
+      return res.status(500).json({
+        success: false,
+        data: { status: 0, data: [], message: '' },
+        message: 'Unable to update vehicle location',
+      });
     }
   }
 
@@ -152,9 +196,18 @@ class VehiclesController {
         req.body.lid,
         req.body.status
       );
-      return res.json(data);
+      const ok = Number(data?.status) === 1;
+      return res.json({
+        success: ok,
+        data,
+        message: ok ? '' : 'Unable to update issue status',
+      });
     } catch (err) {
-      return res.status(500).json({ status: 0, data: [], message: '' });
+      return res.status(500).json({
+        success: false,
+        data: { status: 0, data: [], message: '' },
+        message: 'Unable to update issue status',
+      });
     }
   }
 
@@ -210,14 +263,27 @@ class VehiclesController {
 
   async listLogs(req, res) {
     try {
+      const vehicleId = req.params.id;
       const items = await vehiclesService.getVehicleLogs(
         this.pool,
-        req.params.id,
+        vehicleId,
         req.query
       );
-      const vehicle = await vehiclesService.getVehicleById(this.pool, req.params.id);
+      const vehicle = await vehiclesService.getVehicleById(this.pool, vehicleId);
       const formOptions = await vehiclesService.getVehicleFormOptions(this.pool);
-      return res.json({ success: true, data: { vehicle, items, formOptions } });
+      let editLog = null;
+      const editLogId = String(req.query.lid ?? '').trim();
+      if (editLogId) {
+        editLog = await vehiclesService.getVehicleLogById(
+          this.pool,
+          vehicleId,
+          editLogId
+        );
+      }
+      return res.json({
+        success: true,
+        data: { vehicle, items, formOptions, editLog },
+      });
     } catch (err) {
       return res.status(500).json({ success: false, message: 'Unable to load vehicle logs' });
     }

@@ -43,6 +43,9 @@ function createVehiclesRoutes(pool) {
   router.delete('/settings/:id', requireAdminSession, (req, res) =>
     controller.deleteSetting(req, res)
   );
+  router.post('/settings/:id/reorder', requireAdminSession, (req, res) =>
+    controller.reorderSetting(req, res)
+  );
 
   router.patch('/logs/:logId', requireAdminSession, (req, res) =>
     controller.updateLog(req, res)
@@ -59,6 +62,9 @@ function createVehiclesRoutes(pool) {
   );
   router.post('/:id/logs', requireAdminSession, (req, res) =>
     controller.createLog(req, res)
+  );
+  router.patch('/:id/include-alert', requireAdminSession, (req, res) =>
+    controller.patchIncludeAlert(req, res)
   );
   router.get('/:id', requireAdminSession, (req, res) => controller.getOne(req, res));
   router.patch('/:id', requireAdminSession, (req, res) => controller.update(req, res));
