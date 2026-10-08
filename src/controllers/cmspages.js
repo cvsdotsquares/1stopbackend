@@ -1,4 +1,11 @@
 const { replaceTokensInObject } = require('../utils/tokenReplacer');
+const {
+  normalizeCmsPath,
+  isCmsPreviewRequest,
+  assertCmsPreviewAuthorized,
+  resolveCmsPageLookup,
+} = require('../utils/cmsPageResolver');
+const { verifyCmsPreviewToken } = require('../utils/cmsPreviewToken');
 
 class CMSPagesController {
   constructor(pool) {
@@ -10,28 +17,49 @@ class CMSPagesController {
    */
   async getPageByNestedSlug(req, res) {
     try {
-      const fullPath = req.path.slice(1);
+      const previewForced = Boolean(req.cmsPreviewForced);
+      const preview = previewForced || isCmsPreviewRequest(req);
 
-      // Get page by exact slug from menu
-      // Get page by slug
-      const [pages_menu] = await this.pool.query(`
-        SELECT
-          id, page_slug, page_link_id
-        FROM page_menus
-        WHERE page_slug = ?
-      `, [fullPath]);
+      if (preview && !req.cmsPreviewTokenVerified) {
+        const denied = assertCmsPreviewAuthorized(req, res);
+        if (denied) return denied;
+      }
 
+      let pageId = null;
+      let pages_menu = [];
 
-      // Get page by slug
+      if (req.cmsPreviewPageId != null) {
+        const forcedId = Number(req.cmsPreviewPageId);
+        if (Number.isFinite(forcedId) && forcedId > 0) {
+          pageId = forcedId;
+        }
+      } else {
+        const fullPath = normalizeCmsPath(req.path.slice(1));
+        const lookup = await resolveCmsPageLookup(this.pool, fullPath, {
+          preview,
+          pageIdHint: preview ? req.query?.page_id : null,
+        });
+        pageId = lookup.pageId;
+        pages_menu = lookup.pagesMenuRows;
+      }
+
+      if (!pageId) {
+        return res.status(404).json({
+          success: false,
+          message: 'Page not found',
+        });
+      }
+
       const [pages] = await this.pool.query(`
         SELECT
           id, page_title, slug , meta_title, meta_keyword, meta_desc,
           is_parent, parent_level, link_title, banner_type, overlay_caption, page_content, overlay_caption_text,
           weight, carousel_static_image, carousel_static_caption, featured_service, featured_icon,
-          footer_link, testimonial_display, featured_display, accreditation_display, display_counter, created, updated
+          footer_link, testimonial_display, featured_display, accreditation_display, display_counter,
+          status, created, updated
         FROM pages
         WHERE id = ?
-      `, [pages_menu.length > 0 ? pages_menu[0].page_link_id : null]);
+      `, [pageId]);
 
       if (pages.length === 0) {
         return res.status(404).json({
@@ -41,6 +69,14 @@ class CMSPagesController {
       }
 
       const page = pages[0];
+
+      const pageStatus = page.status == null ? 1 : Number(page.status);
+      if (!preview && pageStatus !== 1) {
+        return res.status(404).json({
+          success: false,
+          message: 'Page not found'
+        });
+      }
 
       // Get section ordering from page_junction table
       const [pageJunctions] = await this.pool.query(`
@@ -864,6 +900,7 @@ class CMSPagesController {
 
       res.json({
         success: true,
+        preview: preview || undefined,
         data: processedData,
         debug: {
           page_id: page.id,
@@ -895,6 +932,24 @@ class CMSPagesController {
         error: error.message
       });
     }
+  }
+
+  /** Signed preview for draft / unpublished pages (user portal /cms-preview/[id]). */
+  async getPagePreviewById(req, res) {
+    const pageId = Number(req.params.pageId);
+    if (!Number.isFinite(pageId) || pageId <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid page id' });
+    }
+    if (!verifyCmsPreviewToken(pageId, req.query?.token)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid or expired preview token',
+      });
+    }
+    req.cmsPreviewTokenVerified = true;
+    req.cmsPreviewForced = true;
+    req.cmsPreviewPageId = pageId;
+    return this.getPageByNestedSlug(req, res);
   }
 }
 

@@ -111,21 +111,8 @@ class HelperController {
         ORDER BY id ASC
       `, [groupName]);
 
-      // Build nested structure
-      const buildMenuTree = (items, parentId = null) => {
-        return items
-          .filter(item => (item.front_menu_show === 0 && (item.parent_id === parentId || (parentId === null && (item.parent_id === null || item.parent_id === 0)))))
-          .map(item => ({
-            id: item.id,
-            page_title: item.page_title,
-            page_slug: item.page_slug,
-            page_link_id: item.page_link_id,
-            sort_order: item.sort_order,
-            children: buildMenuTree(items, item.id)
-          }));
-      };
-
-      const menuStructure = buildMenuTree(menuItems);
+      const { buildFrontMenuTree } = require('../utils/frontMenuTree');
+      const menuStructure = buildFrontMenuTree(menuItems);
       const processedData = await replaceTokensInObject(this.pool, {
         group_name: groupName,
         menu_items: menuStructure
@@ -697,6 +684,8 @@ class HelperController {
     try {
       // CMS pages: the URL the frontend uses is page_menus.page_slug
       // (matched by /[...slug]/page.tsx → /api/cmspages/:slug).
+      // Unpublished / menu-less drafts: GET /api/cmspages/:slug?preview=1
+      // (see cmsPageResolver; user portal should send X-CMS-Preview-Key when CMS_PREVIEW_KEY is set).
       // Pull the most recent updated timestamp from the linked page row when available.
       const [cmsPages] = await this.pool.query(`
         SELECT
@@ -704,8 +693,9 @@ class HelperController {
           p.updated AS updated,
           p.created AS created
         FROM page_menus pm
-        LEFT JOIN pages p ON p.id = pm.page_link_id
+        INNER JOIN pages p ON p.id = pm.page_link_id
         WHERE pm.page_slug IS NOT NULL AND pm.page_slug != '' AND pm.front_menu_show = 0 AND pm.page_slug != '#'
+          AND (p.status IS NULL OR p.status = 1)
       `);
 
       // Location pages: the URL the frontend uses is /location/:slug
