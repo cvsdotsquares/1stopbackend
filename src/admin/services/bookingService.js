@@ -6,6 +6,7 @@ const {
   deleteReservedBookingsForLock,
   cleanupOrphanAdminPlaceholderBookings,
 } = require('./adminBookingReserveService');
+const { lockHasOpenStripePaymentLink } = require('./bookingStripeLinkService');
 
 /**
  * Port of Booking::removeExpirelocks() from booking.class.php
@@ -35,6 +36,11 @@ async function removeExpirelocks(pool, session) {
   for (const lock of locks || []) {
     const lockId = Number(lock.id);
     if (!Number.isFinite(lockId) || lockId <= 0) continue;
+
+    // eslint-disable-next-line no-await-in-loop
+    if (await lockHasOpenStripePaymentLink(pool, lockId)) {
+      continue;
+    }
 
     await deleteReservedBookingsForLock(pool, lockId);
 

@@ -10,6 +10,28 @@ const {
 
 const RECORDS_PER_PAGE = 10;
 
+let vehicleLast6FromVinColumnReady = false;
+
+async function ensureVehicleLast6FromVinColumn(pool) {
+  if (vehicleLast6FromVinColumnReady || !pool) return;
+  const [cols] = await pool.query(
+    "SHOW COLUMNS FROM vehicles LIKE 'last_6_from_vin'"
+  );
+  if (cols?.length) {
+    vehicleLast6FromVinColumnReady = true;
+    return;
+  }
+  await pool.query(
+    'ALTER TABLE vehicles ADD COLUMN last_6_from_vin VARCHAR(6) NULL DEFAULT NULL AFTER registration'
+  );
+  vehicleLast6FromVinColumnReady = true;
+}
+
+function normalizeLast6FromVin(value) {
+  const digits = String(value ?? '').replace(/\D/g, '').slice(0, 6);
+  return digits;
+}
+
 const VEHICLE_JOINS = `
   FROM vehicles
   LEFT JOIN vehicle_fleet_settings AS mm ON (
@@ -252,6 +274,7 @@ async function getVehicleFormOptions(pool) {
 }
 
 async function getVehicleById(pool, id) {
+  await ensureVehicleLast6FromVinColumn(pool);
   const [rows] = await pool.query(
     `${VEHICLE_SELECT} ${VEHICLE_JOINS} WHERE vehicles.id = ? LIMIT 1`,
     [Number(id)]
@@ -278,8 +301,10 @@ function normalizeVehicleBody(body) {
     roadTaxDue = '';
     sornOpt = trim(body.sorn_exempt);
   }
+  const last6FromVin = normalizeLast6FromVin(body.last_6_from_vin);
   return {
     registration,
+    last_6_from_vin: last6FromVin,
     make_model_id: Number(body.make_model_id),
     engine_size_id: Number(body.engine_size_id),
     transmission_id: Number(body.transmission_id),
@@ -300,6 +325,7 @@ function normalizeVehicleBody(body) {
 }
 
 async function createVehicle(pool, body) {
+  await ensureVehicleLast6FromVinColumn(pool);
   const data = normalizeVehicleBody(body);
   if (
     !data.registration ||
@@ -320,14 +346,15 @@ async function createVehicle(pool, body) {
   const ts = nowMysql();
   const [result] = await pool.query(
     `INSERT INTO vehicles (
-      registration, make_model_id, engine_size_id, transmission_id, location_id,
+      registration, last_6_from_vin, make_model_id, engine_size_id, transmission_id, location_id,
       mileage, last_service_date, mileage_last_service, mileage_service_interval,
       sorn_exempt_option, road_tax_due_date, mot_expiry_date,
       include_into_alert, include_into_issue, include_into_mot, include_into_roadtax, include_into_service,
       status, created_at, modified_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
     [
       data.registration,
+      data.last_6_from_vin || null,
       data.make_model_id,
       data.engine_size_id,
       data.transmission_id,
@@ -354,6 +381,7 @@ async function createVehicle(pool, body) {
 }
 
 async function updateVehicle(pool, id, body) {
+  await ensureVehicleLast6FromVinColumn(pool);
   const vehicleId = Number(id);
   const existing = await getVehicleById(pool, vehicleId);
   if (!existing) {
@@ -390,7 +418,7 @@ async function updateVehicle(pool, id, body) {
   }
   await pool.query(
     `UPDATE vehicles SET
-      registration = ?, make_model_id = ?, engine_size_id = ?, transmission_id = ?, location_id = ?,
+      registration = ?, last_6_from_vin = ?, make_model_id = ?, engine_size_id = ?, transmission_id = ?, location_id = ?,
       mileage = ?, last_service_date = ?, mileage_last_service = ?, mileage_service_interval = ?,
       sorn_exempt_option = ?, road_tax_due_date = ?, mot_expiry_date = ?,
       include_into_alert = ?, include_into_issue = ?, include_into_mot = ?, include_into_roadtax = ?, include_into_service = ?,
@@ -398,6 +426,7 @@ async function updateVehicle(pool, id, body) {
      WHERE id = ?`,
     [
       data.registration,
+      data.last_6_from_vin || null,
       data.make_model_id,
       data.engine_size_id,
       data.transmission_id,
@@ -974,4 +1003,5 @@ module.exports = {
   updateVehicleLocation,
   updateVehicleIssueStatusAjax,
   getScheduleLocationOptions,
+  ensureVehicleLast6FromVinColumn,
 };

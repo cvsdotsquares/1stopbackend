@@ -1,6 +1,9 @@
 const { removeExpirelocks } = require('./bookingService');
 const { isEventFrozen } = require('./courseEventWizardService');
-const { isStripePaymentLinkLockedBy } = require('../constants');
+const {
+  isStripePaymentLinkLockedBy,
+  STRIPE_PAYMENT_LINK_LOCKED_BY,
+} = require('../constants');
 
 const {
   getTypeOfBookLabel,
@@ -568,9 +571,17 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
     if (lockId) {
       await pool.query(
         `UPDATE lock_bookings
-         SET event_id = ?, parent = ?, space_required = ?, modified = NOW(), locked_by = ?
+         SET event_id = ?, parent = ?, space_required = ?, modified = NOW(),
+             locked_by = IF(locked_by = ?, locked_by, ?)
          WHERE id = ?`,
-        [eventId, parentId, spaces, 'terminal', lockId]
+        [
+          eventId,
+          parentId,
+          spaces,
+          STRIPE_PAYMENT_LINK_LOCKED_BY,
+          'terminal',
+          lockId,
+        ]
       );
     } else {
       const [insertResult] = await pool.query(

@@ -27,6 +27,7 @@ const CONFIRMED_PAYMENT_SQL = `
 
 const TOB_FILTER_PAYMENT_TYPES = {
   pl: ['payment_link', 'PAYMENT_LINK'],
+  mpl: ['manual_payment_link', 'MANUAL_PAYMENT_LINK'],
   bt: ['BANK_TRANSFER'],
   c: ['IN_PERSON'],
   z: ['ZERO_COST'],
@@ -45,6 +46,7 @@ const TOB_NAME_SEARCH = {
   RIDETO: 'r',
   WORLDPAY: 'w',
   'PAYMENT LINK': 'pl',
+  'MANUAL PAYMENT LINK': 'mpl',
   'BANK TRANSFER': 'bt',
   'IN PERSON': 'c',
   'ZERO COST': 'z',

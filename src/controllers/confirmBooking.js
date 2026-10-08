@@ -4,7 +4,7 @@ const nodemailer = require('nodemailer');
 const { replaceTokens } = require('../utils/tokenReplacer');
 const { getMailFrom, getMailFromAddress, getReplyTo } = require('../utils/mailFrom');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
-const { sendDeveloperAlert } = require('../utils/emailService');
+const { sendDeveloperAlert, resolveBookingBccForPool } = require('../utils/emailService');
 const { getBookingRefEmailSuffix } = require('../utils/typeOfBook');
 const { applyGroupSpaceDelta, getLinkedParentKey } = require('../utils/courseEventGroup');
 
@@ -339,7 +339,7 @@ const sendBookingEmail = async (bookingData, pool, meta = {}) => {
   const fromHeader = getMailFrom();
   const fromAddress = getMailFromAddress();
   const toAddress = (process.env.CONTACT_TO || '').trim();
-  const bccVal = process.env.BOOKING_BCC || '';
+  const bccVal = await resolveBookingBccForPool(pool);
 
   let subject = 'RestAPI booking confirmation';
   let html = '';
