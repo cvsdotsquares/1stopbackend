@@ -26,6 +26,20 @@ const createPromosRoutes = require('./routes/promos');
 const createGiftVouchersRoutes = require('./routes/giftVouchers');
 const createVehiclesRoutes = require('./routes/vehicles');
 const createDlReturnsRoutes = require('./routes/dlReturns');
+const createPagesRoutes = require('./routes/pages');
+const createPageMenusRoutes = require('./routes/pageMenus');
+const createLocationCoursePagesRoutes = require('./routes/locationCoursePages');
+const createFaqsRoutes = require('./routes/faqs');
+const createTestimonialsRoutes = require('./routes/testimonials');
+const createFeaturedServicesRoutes = require('./routes/featuredServices');
+const createAccreditationsRoutes = require('./routes/accreditations');
+const createCarouselsRoutes = require('./routes/carousels');
+const createContactsRoutes = require('./routes/contacts');
+const createFooterManagerRoutes = require('./routes/footerManager');
+const createTrainingDataRoutes = require('./routes/trainingData');
+const createFooterImagesRoutes = require('./routes/footerImages');
+const createExternalCssRoutes = require('./routes/externalCss');
+const createFileManagerRoutes = require('./routes/fileManager');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -61,6 +75,20 @@ function createAdminRoutes(pool) {
   router.use('/gift-vouchers', createGiftVouchersRoutes(pool));
   router.use('/vehicles', createVehiclesRoutes(pool));
   router.use('/dl-returns', createDlReturnsRoutes(pool));
+  router.use('/pages', createPagesRoutes(pool));
+  router.use('/page-menus', createPageMenusRoutes(pool));
+  router.use('/location-course-pages', createLocationCoursePagesRoutes(pool));
+  router.use('/faqs', createFaqsRoutes(pool));
+  router.use('/testimonials', createTestimonialsRoutes(pool));
+  router.use('/featured-services', createFeaturedServicesRoutes(pool));
+  router.use('/accreditations', createAccreditationsRoutes(pool));
+  router.use('/carousel', createCarouselsRoutes(pool));
+  router.use('/contacts', createContactsRoutes(pool));
+  router.use('/footer', createFooterManagerRoutes(pool));
+  router.use('/training-data', createTrainingDataRoutes(pool));
+  router.use('/footer-images', createFooterImagesRoutes(pool));
+  router.use('/external-css', createExternalCssRoutes());
+  router.use('/files', createFileManagerRoutes());
 
   return router;
 }

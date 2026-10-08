@@ -39,6 +39,7 @@ const StripeLinkExpiryCron = require('./cron/cleanupExpiredStripeLinks');
 const StripePaymentLinkLockExpiryCron = require('./cron/cleanupExpiredStripePaymentLinkLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
+const { registerPublicStaticAssets } = require('./utils/publicStaticAssets');
 const app = express();
 app.set('trust proxy', getTrustProxySetting());
 console.log('[SECURITY] trust proxy', process.env.TRUST_PROXY || 'loopback/private/Cloudflare only');
@@ -115,7 +116,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.header(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-CMS-Preview-Key'
   );
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -123,6 +124,9 @@ app.use((req, res, next) => {
     next();
   }
 });
+
+// User portal + CMS media (NEXT_PUBLIC_FILES_URL → /uploads/…)
+registerPublicStaticAssets(app);
 
 // Health check
 app.get('/health', (req, res) => {
