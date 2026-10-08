@@ -22,7 +22,7 @@ const { createCmsPreviewToken } = require('../../utils/cmsPreviewToken');
 
 function resolveFrontSiteUrl() {
   for (const key of [
-    'NEXT_PUBLIC_FRONT_SITE_URL',
+    'SITE_URL',
   ]) {
     const value = process.env[key];
     if (value && String(value).trim()) {
