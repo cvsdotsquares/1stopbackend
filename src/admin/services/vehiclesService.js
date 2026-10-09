@@ -756,6 +756,25 @@ async function getVehicleLogs(pool, vehicleId, query = {}) {
   return rows.map((r) => mapVehicleLogRow(r));
 }
 
+/**
+ * When a log entry records mileage above the vehicle's current odometer,
+ * promote it to vehicles.mileage (same rules as bulk mileage update).
+ */
+async function maybeUpdateVehicleMileageFromLog(pool, vehicleRow, logMileage) {
+  const mileage = Number(logMileage);
+  if (!mileage || Number.isNaN(mileage)) return;
+  const vehicleId = Number(vehicleRow?.id);
+  if (!vehicleId) return;
+  const current = Number(vehicleRow.mileage) || 0;
+  if (mileage <= current) return;
+  const ts = nowMysql();
+  const serviceColor = computeServiceColor({ ...vehicleRow, mileage });
+  await pool.query(
+    'UPDATE vehicles SET mileage = ?, service_color = ?, mileage_updated_at = ? WHERE id = ?',
+    [mileage, serviceColor, ts, vehicleId]
+  );
+}
+
 async function createVehicleLog(pool, vehicleId, body, session) {
   const vid = Number(vehicleId);
   const existing = await getVehicleById(pool, vid);
@@ -797,6 +816,8 @@ async function createVehicleLog(pool, vehicleId, body, session) {
       ts,
     ]
   );
+  const logMileage = Number(body.add_log_mileage ?? body.mileage) || 0;
+  await maybeUpdateVehicleMileageFromLog(pool, existing, logMileage);
   await updateVehicleIssueStatus(pool, vid);
 }
 
@@ -843,6 +864,15 @@ async function updateVehicleLog(pool, logId, body, session) {
       lid,
     ]
   );
+  const [vehicleRows] = await pool.query(
+    `${VEHICLE_SELECT} ${VEHICLE_JOINS} WHERE vehicles.id = ? LIMIT 1`,
+    [vid]
+  );
+  const vehicleRow = mapVehicleRow(vehicleRows[0]);
+  const logMileage = Number(body.add_log_mileage ?? body.mileage) || 0;
+  if (vehicleRow) {
+    await maybeUpdateVehicleMileageFromLog(pool, vehicleRow, logMileage);
+  }
   await updateVehicleIssueStatus(pool, vid);
 }
 
