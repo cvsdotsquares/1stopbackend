@@ -5,10 +5,10 @@ const { getMailFrom, getMailFromAddress, getReplyTo } = require('./mailFrom');
 const {
   getBookingRefEmailSuffix,
   isKnownTypeOfBookCode,
-  resolveBookingConfirmationRefSuffix,
+  formatBookingConfirmationRefLabel,
 } = require('./typeOfBook');
 
-const DISPLAY_REF_SUFFIX = /^(PL|BT|R2|T|O|M|C|Z|W)$/i;
+const DISPLAY_REF_SUFFIX = /^(PL|MPL|BT|R2|T|O|M|C|Z|W|V|GV)$/i;
 
 const DEFAULT_BOOKING_BCC = 'bookings@1stopinstruction.com';
 
@@ -24,7 +24,30 @@ function resolveBookingBcc(dbBookingBcc) {
   return DEFAULT_BOOKING_BCC;
 }
 
+/** Load `settings.booking_bcc` then apply DB → env → default priority. */
+async function resolveBookingBccForPool(pool) {
+  if (!pool) {
+    return resolveBookingBcc(null);
+  }
+  try {
+    const [rows] = await pool.query('SELECT booking_bcc FROM settings LIMIT 1');
+    return resolveBookingBcc(rows[0]?.booking_bcc);
+  } catch (error) {
+    console.error('Error loading settings.booking_bcc:', error);
+    return resolveBookingBcc(null);
+  }
+}
+
 exports.resolveBookingBcc = resolveBookingBcc;
+exports.resolveBookingBccForPool = resolveBookingBccForPool;
+
+/** Legacy PHPMailer `AddBCC(email, "Booking Administrator")` log format. */
+function formatBookingAdministratorBccLog(address) {
+  const email = String(address || '').trim();
+  if (!email || email === 'true') return '';
+  if (/booking administrator/i.test(email)) return email;
+  return `${email} - Booking Administrator`;
+}
 
 // SMTP transport configuration:
 //   - SMTP_SECURE=true (port 465) → implicit TLS from the first byte.
@@ -297,6 +320,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   type_of_book,
   payment_type,
   bookingRefSuffix = '',
+  resendMode = 0,
    refundable = 0,
    attendees = [],
     targetEmails = [],
@@ -310,20 +334,32 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    bcc,
    ip,
     logType,
-    emailBy
+    emailBy,
+    logRecipientAsBcc = false,
   } = bookingData;
+
+  const explicitBcc = String(bcc || '').trim();
+  const settingsResolvedBcc = explicitBcc || (await resolveBookingBccForPool(pool));
 
   const normalizedTargetEmails = Array.isArray(targetEmails)
     ? targetEmails.map((email) => String(email || '').trim()).filter(Boolean)
     : [];
 
-  const attendeeEmailList = Array.from(new Set(
+  let attendeeEmailList = Array.from(new Set(
     (normalizedTargetEmails.length > 0
       ? normalizedTargetEmails
       : attendees.map(a => String(a?.email || '').trim()))
       .filter(Boolean)
   ));
-  if (attendeeEmailList.length === 0) {
+
+  const officeCopyBccAddress = logRecipientAsBcc ? settingsResolvedBcc : '';
+
+  if (logRecipientAsBcc) {
+    if (!officeCopyBccAddress) {
+      throw new Error('No booking BCC configured for office copy email');
+    }
+    attendeeEmailList = [officeCopyBccAddress];
+  } else if (attendeeEmailList.length === 0) {
     throw new Error('No attendee email found for booking confirmation');
   }
   const vehicleTypeMap = {
@@ -404,28 +440,57 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
    ? `${siteUrl}maps/${location.direction_map}`
    : `${siteUrl}images/no-map.jpg`;
 
-  const resolvedBcc = disableBcc
-    ? undefined
-    : (String(bcc || '').trim() || resolveBookingBcc() || undefined);
+  // Legacy resend: 1 = customer only (no BCC), 2 = BCC admin only, 3/13 = customer + BCC.
+  const legacyResendMode = Number(resendMode) || 0;
+  const legacyResendCustomerOnly = legacyResendMode === 1;
+  const legacyResendIncludesAdminCopy =
+    legacyResendMode === 2 ||
+    legacyResendMode === 3 ||
+    legacyResendMode === 13;
+  const adminCopyBcc = settingsResolvedBcc || undefined;
+  const suppressAdminCopy =
+    disableBcc ||
+    legacyResendCustomerOnly ||
+    (logType === 'Re-Sent Booking Confirmation' &&
+      legacyResendMode > 0 &&
+      !legacyResendIncludesAdminCopy);
+  const resolvedBcc = suppressAdminCopy ? undefined : adminCopyBcc;
 
-  const resendExtra = String(bookingRefSuffix || '').trim().toUpperCase();
+  const effectiveBccForSend = logRecipientAsBcc
+    ? officeCopyBccAddress || adminCopyBcc
+    : resolvedBcc;
+
   const rawBookingType = String(booking_type || '').trim();
   let bookingTypeLabel;
   if (type_of_book != null || payment_type != null) {
-    bookingTypeLabel = resolveBookingConfirmationRefSuffix({
+    bookingTypeLabel = formatBookingConfirmationRefLabel({
       typeOfBook: type_of_book,
       paymentType: payment_type,
+      logType,
+      bookingRefSuffix,
+      resendMode,
     });
   } else if (DISPLAY_REF_SUFFIX.test(rawBookingType)) {
-    bookingTypeLabel = rawBookingType.toUpperCase();
+    bookingTypeLabel = formatBookingConfirmationRefLabel({
+      typeOfBook: rawBookingType,
+      logType,
+      bookingRefSuffix,
+      resendMode,
+    });
   } else if (isKnownTypeOfBookCode(booking_type)) {
-    bookingTypeLabel = getBookingRefEmailSuffix(booking_type);
+    bookingTypeLabel = formatBookingConfirmationRefLabel({
+      typeOfBook: booking_type,
+      logType,
+      bookingRefSuffix,
+      resendMode,
+    });
   } else if (rawBookingType.length > 1) {
-    bookingTypeLabel = rawBookingType;
+    const resendExtra = String(bookingRefSuffix || '').trim().toUpperCase();
+    bookingTypeLabel = `${rawBookingType}${resendExtra}`;
   } else {
-    bookingTypeLabel = `${rawBookingType.charAt(0).toUpperCase() || 'O'}`;
+    const resendExtra = String(bookingRefSuffix || '').trim().toUpperCase();
+    bookingTypeLabel = `${rawBookingType.charAt(0).toUpperCase() || 'O'}${resendExtra}`;
   }
-  bookingTypeLabel = `${bookingTypeLabel}${resendExtra}`;
 
   const createBookingEmailHtml = (recipientAttendee) => {
    const recipientFirstName = recipientAttendee.first_name || 'Customer';
@@ -646,8 +711,6 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
   const mailOptions = {
    from: getMailFrom(),
    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
-   to: attendeeEmailList[0],
-   bcc: resolvedBcc,
    subject: `${course_name} Booking Confirmation`
   };
 
@@ -682,12 +745,14 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
       try {
         const sentInfo = await transporter.sendMail({
           ...mailOptions,
-          to: recipientEmail,
+          ...(logRecipientAsBcc ? {} : { to: recipientEmail }),
+          ...(effectiveBccForSend ? { bcc: effectiveBccForSend } : {}),
           html: recipientEmailHtml
         });
 
         const recipientDeliveryMeta = {
-          to: recipientEmail,
+          to: logRecipientAsBcc ? '' : recipientEmail,
+          bcc: logRecipientAsBcc ? recipientEmail : (effectiveBccForSend || ''),
           messageId: sentInfo?.messageId || null,
           accepted: sentInfo?.accepted || [],
           rejected: sentInfo?.rejected || [],
@@ -699,7 +764,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
       } catch (recipientError) {
         failedRecipients.push(recipientEmail);
         const recipientErrorMeta = {
-          to: recipientEmail,
+          to: logRecipientAsBcc ? '' : recipientEmail,
+          bcc: logRecipientAsBcc ? recipientEmail : (effectiveBccForSend || ''),
           error: recipientError?.message || 'Unknown email send error'
         };
         deliveryMeta.push(recipientErrorMeta);
@@ -722,10 +788,23 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
     if (pool) {
       for (const recipientEmail of attendeeEmailList) {
         const recipientMeta = deliveryMetaByRecipient.get(recipientEmail) || {
-          to: recipientEmail,
+          to: logRecipientAsBcc ? '' : recipientEmail,
+          bcc: logRecipientAsBcc ? recipientEmail : (effectiveBccForSend || ''),
           error: 'No delivery metadata captured'
         };
         const recipientStatus = failedRecipients.includes(recipientEmail) ? 0 : 1;
+        const logToAddress = logRecipientAsBcc ? '' : recipientEmail;
+        let logBccRaw = logRecipientAsBcc
+          ? recipientEmail
+          : String(recipientMeta?.bcc || effectiveBccForSend || '').trim();
+        if (
+          !logBccRaw &&
+          logType === 'Re-Sent Booking Confirmation' &&
+          legacyResendIncludesAdminCopy
+        ) {
+          logBccRaw = String(settingsResolvedBcc || '').trim();
+        }
+        const logBccAddress = formatBookingAdministratorBccLog(logBccRaw);
 
         try {
           const recipientEmailHtml = emailHtmlByRecipient.get(recipientEmail)
@@ -735,8 +814,8 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
             INSERT INTO email_logs (\`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, type, book_ref, ip, created)
             VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
           `, [
-            recipientEmail,
-            resolvedBcc || '',
+            logToAddress,
+            logBccAddress,
             getMailFromAddress(),
             mailOptions.subject,
             `${recipientEmailHtml}\n\n<!-- delivery_meta: ${escapeHtml(JSON.stringify(recipientMeta || {}))} -->`,
@@ -848,6 +927,8 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
     }
   }
 
+  const giftVoucherBcc = await resolveBookingBccForPool(pool);
+
   const createGiftVoucherEmailHtml = () => `<!DOCTYPE html>
 <html>
 <head>
@@ -914,7 +995,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
     from: getMailFrom(),
     ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
     to: resolvedRecipientEmail,
-    bcc: process.env.BOOKING_BCC,
+    bcc: giftVoucherBcc || undefined,
     subject: `1 Stop Instruction Gift Voucher - Ref: ${voucher_ref}`,
     html: createGiftVoucherEmailHtml()
   };
@@ -944,7 +1025,7 @@ exports.sendGiftVoucherEmail = async (voucherData, pool) => {
           VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           resolvedRecipientEmail,
-          'bookings.testds@yopmail.com',
+          giftVoucherBcc || '',
           getMailFromAddress(),
           mailOptions.subject,
           mailOptions.html,

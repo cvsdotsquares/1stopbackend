@@ -1,8 +1,10 @@
 /**
  * Admin add-booking Stripe payment link.
  *
- * One-time Checkout Session. The link and the space hold both last 20 minutes
- * from when the link is created. The lock is retagged as Stripe_Payment_link
+ * One-time Checkout Session. After Proceed succeeds, the link and space hold
+ * last getPaymentLinkExpireMinutes() (default 20) from that moment. Stripe
+ * Checkout `expires_at` uses a longer API minimum; we expire the session in
+ * cron when the 20-minute window ends. The lock is retagged as Stripe_Payment_link
  * so Home navigation and generic lock expiry leave it in place until then.
  */
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -13,7 +15,11 @@ const {
 } = require('../../utils/emailService');
 const { getAdminFrontendBase } = require('./motoPaymentService');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
-const { LOCK_EXPIRE_TIME_MINUTES, STRIPE_PAYMENT_LINK_LOCKED_BY } = require('../constants');
+const {
+  LOCK_EXPIRE_TIME_MINUTES,
+  STRIPE_CHECKOUT_MIN_EXPIRE_MINUTES,
+  STRIPE_PAYMENT_LINK_LOCKED_BY,
+} = require('../constants');
 
 const METADATA_TYPE = 'admin_payment_link';
 const PENDING_PAYMENT_TYPE = 'STRIPE_LINK';
@@ -205,18 +211,35 @@ function nowMysql() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function getExpireMinutes() {
+/** Customer-facing link validity and lock extension after Proceed (default 20). */
+function getPaymentLinkExpireMinutes() {
   const parsed = Number(
     process.env.STRIPE_PAYMENT_LINK_EXPIRE_MINUTES || LOCK_EXPIRE_TIME_MINUTES
   );
   return Number.isFinite(parsed) && parsed > 0 ? parsed : LOCK_EXPIRE_TIME_MINUTES;
 }
 
-/** Extra time after quoted expiry before deleting seats (in-flight card payments). */
+/** Stripe Checkout Session API minimum (may exceed quoted link validity). */
+function getStripeCheckoutExpireMinutes() {
+  return Math.max(
+    getPaymentLinkExpireMinutes(),
+    STRIPE_CHECKOUT_MIN_EXPIRE_MINUTES
+  );
+}
+
+/** @deprecated alias — use getPaymentLinkExpireMinutes */
+function getExpireMinutes() {
+  return getPaymentLinkExpireMinutes();
+}
+
+/**
+ * Optional extra ms after quoted expiry before cron cleanup (default 0 = strict 20 min).
+ * Set STRIPE_PAYMENT_LINK_EXPIRE_GRACE_MS only if ops need a short buffer.
+ */
 function getExpireGraceMs() {
   const parsed = Number(process.env.STRIPE_PAYMENT_LINK_EXPIRE_GRACE_MS);
   if (Number.isFinite(parsed) && parsed >= 0) return parsed;
-  return 3 * 60 * 1000;
+  return 0;
 }
 
 const IN_FLIGHT_PI_STATUSES = new Set([
@@ -266,10 +289,13 @@ async function retrieveAdminCheckoutPaymentState(sessionId) {
 }
 
 function computePaymentLinkExpiry() {
-  const quotedMinutes = getExpireMinutes();
+  const quotedMinutes = getPaymentLinkExpireMinutes();
+  const stripeCheckoutMinutes = getStripeCheckoutExpireMinutes();
   return {
     expiresAt: new Date(Date.now() + quotedMinutes * 60 * 1000),
+    stripeExpiresAt: new Date(Date.now() + stripeCheckoutMinutes * 60 * 1000),
     quotedMinutes,
+    stripeCheckoutMinutes,
   };
 }
 
@@ -331,6 +357,7 @@ async function convertLockToStripePaymentLink(pool, session, lockId) {
   const id = Number(lockId);
   if (!Number.isFinite(id) || id <= 0) return null;
   await ensureStripePaymentLinkLockedByColumn(pool);
+  // Fresh 20-minute hold from successful payment-link creation (Proceed), not page entry.
   await pool.query(
     `UPDATE lock_bookings
      SET locked_by = ?, created = NOW(), modified = NOW()
@@ -380,6 +407,117 @@ function parseBookingIds(metadata) {
 
 function isAdminPaymentLink(metadata) {
   return trim(metadata?.type) === METADATA_TYPE;
+}
+
+function businessExpireMsFromPaymentResponse(responseRaw) {
+  if (!responseRaw) return null;
+  try {
+    const parsed =
+      typeof responseRaw === 'string' ? JSON.parse(responseRaw) : responseRaw;
+    if (parsed?.expires_at) {
+      const ms = Date.parse(parsed.expires_at);
+      if (Number.isFinite(ms)) return ms;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+async function resolveBusinessExpireMs(pool, { metadata, checkoutSessionId }) {
+  const fromMetaSec = Number(metadata?.expire_at);
+  if (Number.isFinite(fromMetaSec) && fromMetaSec > 0) {
+    return fromMetaSec * 1000;
+  }
+  if (!pool || !checkoutSessionId) return null;
+  const [rows] = await pool.query(
+    `SELECT response FROM booking_payments
+     WHERE transation_id = ? AND payment_type = ? AND isDelete = 0
+     LIMIT 1`,
+    [checkoutSessionId, PENDING_PAYMENT_TYPE]
+  );
+  return businessExpireMsFromPaymentResponse(rows?.[0]?.response);
+}
+
+function isPastBusinessPaymentLinkExpiry(businessExpireMs) {
+  if (!Number.isFinite(businessExpireMs)) return false;
+  return Date.now() >= businessExpireMs;
+}
+
+/** Unpaid booking still inside the 20-minute payment-link window (protect from orphan cleanup). */
+async function bookingHasOpenStripePaymentLink(pool, bookingId) {
+  const id = Number(bookingId);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  const [rows] = await pool.query(
+    `SELECT response FROM booking_payments
+     WHERE booking_id = ? AND payment_type = ? AND isDelete = 0
+     LIMIT 1`,
+    [id, PENDING_PAYMENT_TYPE]
+  );
+  if (!rows?.length) return false;
+  const ms = businessExpireMsFromPaymentResponse(rows[0].response);
+  if (!Number.isFinite(ms)) return true;
+  return Date.now() < ms;
+}
+
+async function lockHasOpenStripePaymentLink(pool, lockId) {
+  const id = Number(lockId);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  const [rows] = await pool.query(
+    `SELECT id FROM bookings WHERE lockid = ? AND status = 0 AND booking_made_by = 'admin'`,
+    [id]
+  );
+  for (const row of rows || []) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await bookingHasOpenStripePaymentLink(pool, row.id)) return true;
+  }
+  return false;
+}
+
+async function resolveAdminStripePaymentIntentId(source) {
+  if (source?.payment_intent && typeof source.payment_intent === 'object') {
+    return trim(source.payment_intent.id);
+  }
+  let piId =
+    trim(source?.payment_intent) ||
+    (typeof source?.id === 'string' && source.id.startsWith('pi_') ? source.id : '') ||
+    trim(source?.payment_intent_id);
+  if (piId) return piId;
+
+  const sessionId =
+    typeof source?.id === 'string' && source.id.startsWith('cs_')
+      ? source.id
+      : trim(source?.checkout_session_id);
+  if (!sessionId) return '';
+
+  try {
+    const live = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ['payment_intent'],
+    });
+    if (live.payment_intent && typeof live.payment_intent === 'object') {
+      return trim(live.payment_intent.id);
+    }
+    return trim(live.payment_intent);
+  } catch (err) {
+    console.error('[ADMIN][STRIPE_LINK] Could not resolve PaymentIntent for refund', err.message);
+    return '';
+  }
+}
+
+async function refundAdminStripePaymentIfPossible(source, reason) {
+  const piId = await resolveAdminStripePaymentIntentId(source);
+  if (!piId) {
+    console.error('[ADMIN][STRIPE_LINK] Refund skipped — no PaymentIntent', reason);
+    return { refunded: false, reason: 'no_payment_intent' };
+  }
+  try {
+    await stripe.refunds.create({ payment_intent: piId });
+    console.warn(`[ADMIN][STRIPE_LINK] Refunded PaymentIntent ${piId} (${reason})`);
+    return { refunded: true, payment_intent: piId };
+  } catch (err) {
+    console.error('[ADMIN][STRIPE_LINK] Refund failed', piId, reason, err.message);
+    return { refunded: false, reason: err.message || 'refund_failed', payment_intent: piId };
+  }
 }
 
 async function removeLockById(pool, lockId, revertVehicleCounts = true) {
@@ -466,7 +604,7 @@ async function createAdminStripePaymentLink(pool, session, {
   const primaryName =
     `${titleCase(primary.first_name)} ${titleCase(primary.sur_name)}`.trim();
   const cartId = (bookingRefs || []).join('-');
-  const { expiresAt, quotedMinutes } = computePaymentLinkExpiry();
+  const { expiresAt, stripeExpiresAt, quotedMinutes } = computePaymentLinkExpiry();
   const adminBase = getAdminFrontendBase();
   const eventId = Number(event?.id) || Number(session?.adminBooking?.eventId) || 0;
   let lockId = Number(session?.adminBooking?.lock_session?.id) || 0;
@@ -518,7 +656,7 @@ async function createAdminStripePaymentLink(pool, session, {
         ? { customer_email: trim(primary.email) }
         : {}),
     client_reference_id: cartId.slice(0, 200),
-    expires_at: Math.floor(expiresAt.getTime() / 1000),
+    expires_at: Math.floor(stripeExpiresAt.getTime() / 1000),
     success_url: `${adminBase}/pay/complete?status=success`,
     cancel_url: `${adminBase}/pay/complete?status=cancelled`,
     after_expiration: { recovery: { enabled: false } },
@@ -668,6 +806,29 @@ async function getAdminStripePaymentLink(pool, session) {
   const expiredByTime =
     stored.expires_at && new Date(stored.expires_at).getTime() <= Date.now();
 
+  if (expiredByTime && !paid && paymentStatus !== 'paid' && !missing) {
+    try {
+      await expireAdminStripePaymentLink(
+        pool,
+        {
+          id: stored.checkout_session_id,
+          checkout_session_id: stored.checkout_session_id,
+          metadata: {
+            type: METADATA_TYPE,
+            booking_ids: (stored.booking_ids || []).join(','),
+            expire_at: String(
+              Math.floor(Date.parse(stored.expires_at) / 1000)
+            ),
+          },
+        },
+        session
+      );
+      stripeStatus = 'expired';
+    } catch (syncErr) {
+      console.error('[ADMIN][STRIPE_LINK] sync expire on poll failed', syncErr.message);
+    }
+  }
+
   let status = 'open';
   if (paid || paymentStatus === 'paid') status = 'paid';
   else if (missing || stripeStatus === 'expired' || expiredByTime) status = 'expired';
@@ -694,6 +855,16 @@ async function confirmAdminStripePaymentLink(pool, source) {
   if (!bookingIds.length) {
     console.warn('[ADMIN][STRIPE_LINK] confirm with no booking ids', metadata);
     return { skipped: true };
+  }
+
+  const businessExpireMs = Number(metadata.expire_at) * 1000;
+  if (isPastBusinessPaymentLinkExpiry(businessExpireMs)) {
+    const refund = await refundAdminStripePaymentIfPossible(source, 'past_business_expiry');
+    console.warn(
+      '[ADMIN][STRIPE_LINK] Payment received after link expiry — booking not confirmed',
+      { bookingIds, refunded: refund.refunded }
+    );
+    return { skipped: true, reason: 'expired', refund };
   }
 
   const paymentIntentId =
@@ -815,13 +986,25 @@ async function confirmAdminStripePaymentLink(pool, source) {
   }
 
   if (missingBookingIds.length) {
+    const refund = await refundAdminStripePaymentIfPossible(
+      source,
+      'booking_rows_missing'
+    );
     console.error(
-      '[ADMIN][STRIPE_LINK] Payment confirmed in Stripe but booking row(s) missing — ' +
-        'likely expired/deleted before webhook. ids=',
+      '[ADMIN][STRIPE_LINK] Payment in Stripe but booking row(s) missing — refunded when possible. ids=',
       missingBookingIds.join(','),
       'metadata booking_ids=',
-      metadata.booking_ids || metadata.booking_id
+      metadata.booking_ids || metadata.booking_id,
+      'refunded=',
+      refund.refunded
     );
+    return {
+      success: false,
+      reason: 'booking_missing',
+      missing_booking_ids: missingBookingIds,
+      refund,
+      confirmed: mailBookingIds.length,
+    };
   }
 
   if (lastLockId) {
@@ -847,15 +1030,16 @@ async function confirmAdminStripePaymentLink(pool, source) {
   };
 }
 
-async function expireAdminStripeCheckoutSession(sessionId) {
+async function expireAdminStripeCheckoutSession(sessionId, options = {}) {
   const id = trim(sessionId);
+  const forceAfterBusinessExpiry = options.forceAfterBusinessExpiry === true;
   if (!id) return { expired: false };
   try {
     const check = await retrieveAdminCheckoutPaymentState(id);
     if (check.state === 'paid') {
       return { expired: false, paid: true, session: check.session };
     }
-    if (check.state === 'in_flight') {
+    if (check.state === 'in_flight' && !forceAfterBusinessExpiry) {
       return { expired: false, inFlight: true, session: check.session };
     }
     if (check.state === 'expired' || check.state === 'complete') {
@@ -890,18 +1074,32 @@ async function expireAdminStripePaymentLink(pool, source, session) {
     trim(source?.checkout_session_id) ||
     trim(session?.stripePaymentLink?.checkout_session_id);
 
+  const businessExpireMs = await resolveBusinessExpireMs(pool, {
+    metadata,
+    checkoutSessionId,
+  });
+  const pastBusinessExpiry = isPastBusinessPaymentLinkExpiry(businessExpireMs);
+
   if (checkoutSessionId) {
-    const result = await expireAdminStripeCheckoutSession(checkoutSessionId);
+    const result = await expireAdminStripeCheckoutSession(checkoutSessionId, {
+      forceAfterBusinessExpiry: pastBusinessExpiry,
+    });
     if (result.paid && result.session) {
       await confirmAdminStripePaymentLink(pool, result.session);
       return { expired: false, paid: true };
     }
-    if (result.inFlight) {
+    if (result.inFlight && !pastBusinessExpiry) {
       console.log(
-        '[ADMIN][STRIPE_LINK] Deferring expiry — payment still in progress for',
+        '[ADMIN][STRIPE_LINK] Deferring expiry — payment in progress (within 20 min window)',
         checkoutSessionId
       );
       return { expired: false, deferred: true };
+    }
+    if (result.inFlight && pastBusinessExpiry) {
+      console.warn(
+        '[ADMIN][STRIPE_LINK] 20-minute window ended; closing unpaid link despite in-flight Stripe state',
+        checkoutSessionId
+      );
     }
   }
 
@@ -956,11 +1154,24 @@ async function expireDueAdminStripePaymentLinks(pool) {
       .split(',')
       .map((id) => Number.parseInt(id, 10))
       .filter(Boolean);
+    let expireAtMeta = '';
+    try {
+      const parsed =
+        typeof row.response === 'string' ? JSON.parse(row.response) : row.response;
+      const ms = parsed?.expires_at ? Date.parse(parsed.expires_at) : NaN;
+      if (Number.isFinite(ms)) {
+        expireAtMeta = String(Math.floor(ms / 1000));
+      }
+    } catch {
+      expireAtMeta = '';
+    }
     const result = await expireAdminStripePaymentLink(pool, {
       id: row.checkout_session_id,
+      checkout_session_id: row.checkout_session_id,
       metadata: {
         type: METADATA_TYPE,
         booking_ids: bookingIds.join(','),
+        ...(expireAtMeta ? { expire_at: expireAtMeta } : {}),
       },
     });
     if (result?.paid) continue;
@@ -1011,7 +1222,7 @@ async function expireDueStripePaymentLinkLocks(pool) {
         [...bookingIds, PENDING_PAYMENT_TYPE]
       );
       const checkoutSessionId = trim(paymentRows?.[0]?.transation_id);
-      const result = await expireAdminStripePaymentLink(pool, {
+      await expireAdminStripePaymentLink(pool, {
         id: checkoutSessionId,
         checkout_session_id: checkoutSessionId,
         metadata: {
@@ -1019,13 +1230,6 @@ async function expireDueStripePaymentLinkLocks(pool) {
           booking_ids: bookingIds.join(','),
         },
       });
-      if (result?.paid || result?.deferred) {
-        continue;
-      }
-      if (result?.cancelled || result?.expired) {
-        deleted += 1;
-        continue;
-      }
     }
 
     const [paidRows] = await pool.query(
@@ -1047,6 +1251,8 @@ module.exports = {
   PENDING_PAYMENT_TYPE,
   isAdminPaymentLink,
   getExpireMinutes,
+  getPaymentLinkExpireMinutes,
+  getStripeCheckoutExpireMinutes,
   getExpireGraceMs,
   retrieveAdminCheckoutPaymentState,
   createAdminStripePaymentLink,
@@ -1057,4 +1263,6 @@ module.exports = {
   expireDueStripePaymentLinkLocks,
   cancelUnpaidAdminStripeBookings,
   ensureStripePaymentLinkLockedByColumn,
+  bookingHasOpenStripePaymentLink,
+  lockHasOpenStripePaymentLink,
 };

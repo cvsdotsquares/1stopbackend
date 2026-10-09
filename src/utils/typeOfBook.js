@@ -9,6 +9,7 @@ const TYPE_OF_BOOK_LABELS = {
   r: 'RideTo',
   w: 'Worldpay',
   pl: 'Payment Link',
+  mpl: 'Manual Payment Link',
   bt: 'Bank Transfer',
   c: 'In Person',
   z: 'Zero Cost',
@@ -24,6 +25,7 @@ const BOOKING_REF_EMAIL_SUFFIX = {
   r: 'R2',
   w: 'W',
   pl: 'PL',
+  mpl: 'MPL',
   bt: 'BT',
   c: 'C',
   z: 'Z',
@@ -40,13 +42,14 @@ const ADMIN_COMPLETION_PAYMENT_TYPE = {
   v: 'VARIOUS',
   gv: 'GIFT_VOUCHER',
   pl: 'payment_link',
+  mpl: 'manual_payment_link',
   r: 'RIDETO',
 };
 
-const ADMIN_WIZARD_PAYMENT_TYPE_VALUES = new Set(['t', 'bt', 'c', 'z', 'r', 'v', 'gv']);
+const ADMIN_WIZARD_PAYMENT_TYPE_VALUES = new Set(['t', 'bt', 'c', 'z', 'r', 'v', 'gv', 'mpl']);
 
 /** Values added beyond legacy enum('o','m','t','w','r'). */
-const EXTENDED_TYPE_OF_BOOK_ENUM = ['pl', 'bt', 'c', 'z', 'v', 'gv'];
+const EXTENDED_TYPE_OF_BOOK_ENUM = ['pl', 'mpl', 'bt', 'c', 'z', 'v', 'gv'];
 
 let typeOfBookEnumReady = false;
 
@@ -110,6 +113,7 @@ function getBookingRefSuffixFromPaymentType(paymentType) {
     gift_voucher: 'GV',
     payment_link: 'PL',
     stripe_link: 'PL',
+    manual_payment_link: 'MPL',
     moto: 'M',
     online: 'O',
     sale: null,
@@ -131,6 +135,35 @@ function resolveBookingConfirmationRefSuffix({ typeOfBook, paymentType } = {}) {
   }
   if (stored === 'p') return 'PL';
   return getBookingRefEmailSuffix('t');
+}
+
+/** Whether to append "R" on re-sent booking confirmations (e.g. MPL → MPLR). */
+function shouldAppendBookingRefResend({
+  logType,
+  bookingRefSuffix,
+  resendMode = 0,
+  typeOfBook,
+  paymentType,
+} = {}) {
+  if (String(bookingRefSuffix || '').trim().toUpperCase() === 'R') {
+    return true;
+  }
+  if (logType !== 'Re-Sent Booking Confirmation') {
+    return false;
+  }
+  const base = resolveBookingConfirmationRefSuffix({ typeOfBook, paymentType });
+  // Legacy: resend mode 13 is Stripe payment-link resend (PL stays PL); manual link still gets R.
+  if (Number(resendMode) === 13 && base !== 'MPL') {
+    return false;
+  }
+  return true;
+}
+
+/** Full suffix in confirmation email: "MPL", "MPLR", "PLR", etc. */
+function formatBookingConfirmationRefLabel(options = {}) {
+  const base = resolveBookingConfirmationRefSuffix(options);
+  const append = shouldAppendBookingRefResend(options);
+  return append ? `${base}R` : base;
 }
 
 function normalizeTypeOfBookCode(value) {
@@ -181,6 +214,7 @@ function getTransactionTypeFilterOptions() {
     { value: 'm', label: 'MOTO' },
     { value: 'r', label: 'RideTo' },
     { value: 'pl', label: 'Payment Link' },
+    { value: 'mpl', label: 'Manual Payment Link' },
     { value: 'bt', label: 'Bank Transfer' },
     { value: 'c', label: 'In Person' },
     { value: 'z', label: 'Zero Cost' },
@@ -198,6 +232,7 @@ function getAdminWizardPaymentTypeOptions() {
     { value: 'v', label: 'Various' },
     { value: 'gv', label: 'Gift Voucher' },
     { value: 'r', label: 'RideTo' },
+    { value: 'mpl', label: 'Manual Payment Link' },
   ];
 }
 
@@ -223,6 +258,7 @@ function getTransactionTypeLabel({ typeOfBook, paymentType, transactionType } = 
   const paymentLabelByType = {
     payment_link: 'Payment Link',
     stripe_link: 'Payment Link',
+    manual_payment_link: 'Manual Payment Link',
     terminal: 'Terminal',
     cash: 'Terminal',
     bank_transfer: 'Bank Transfer',
@@ -252,6 +288,8 @@ module.exports = {
   getBookingRefEmailSuffix,
   getBookingRefSuffixFromPaymentType,
   resolveBookingConfirmationRefSuffix,
+  shouldAppendBookingRefResend,
+  formatBookingConfirmationRefLabel,
   isKnownTypeOfBookCode,
   isExtendedTypeOfBookCode,
   resolveAdminWizardTypeOfBook,

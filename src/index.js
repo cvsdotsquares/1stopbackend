@@ -230,11 +230,11 @@ app.listen(PORT, () => {
   const expiredLockCleanupCron = new ExpiredLockCleanupCron(pool);
   expiredLockCleanupCron.start();
 
-  // Expire unpaid admin Stripe payment links after 20 minutes
+  // Expire unpaid admin Stripe payment links after configured minutes (min 30 for Stripe)
   const stripeLinkExpiryCron = new StripeLinkExpiryCron(pool);
   stripeLinkExpiryCron.start();
 
-  // Delete Stripe payment-link lock_bookings rows 20 minutes after link creation
+  // Delete Stripe payment-link lock_bookings rows after link expiry (+ grace)
   const stripePaymentLinkLockExpiryCron = new StripePaymentLinkLockExpiryCron(pool);
   stripePaymentLinkLockExpiryCron.start();
   const {
@@ -249,7 +249,14 @@ app.listen(PORT, () => {
   const { ensureTypeOfBookEnum } = require('./utils/typeOfBook');
   ensureTypeOfBookEnum(pool).catch((err) => {
     console.error(
-      '[BOOKINGS] Failed to extend bookings.type_of_book enum (pl, bt, c, z, v, gv):',
+      '[BOOKINGS] Failed to extend bookings.type_of_book enum (pl, mpl, bt, c, z, v, gv):',
+      err.message
+    );
+  });
+  const { ensureVehicleLast6FromVinColumn } = require('./admin/services/vehiclesService');
+  ensureVehicleLast6FromVinColumn(pool).catch((err) => {
+    console.error(
+      '[VEHICLES] Failed to add vehicles.last_6_from_vin column:',
       err.message
     );
   });

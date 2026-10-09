@@ -16,20 +16,35 @@ function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
+/** YYYY-MM-DD calendar key (local), same rules as eventBookingService.toDateKey. */
+function toEventDateKey(value) {
+  if (value == null || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    const key = `${y}-${m}-${d}`;
+    return key === '0000-00-00' || y < 1900 ? 'TBC' : key;
+  }
+  const raw = String(value).trim();
+  if (!raw || raw === 'TBC') return raw === 'TBC' ? 'TBC' : '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const key = raw.slice(0, 10);
+    return key === '0000-00-00' ? 'TBC' : key;
+  }
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return toEventDateKey(parsed);
+  }
+  return raw;
+}
+
 function formatEventDateLabel(evDate) {
-  if (!evDate || evDate === '0000-00-00') return 'TBC';
-  if (evDate instanceof Date && !Number.isNaN(evDate.getTime())) {
-    return `${pad2(evDate.getUTCDate())}-${pad2(evDate.getUTCMonth() + 1)}-${evDate.getUTCFullYear()}`;
-  }
-  const raw = String(evDate).trim();
-  const iso = raw.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (iso) {
-    const d = new Date(`${iso[1]}T12:00:00`);
-    if (!Number.isNaN(d.getTime())) {
-      return `${pad2(d.getUTCDate())}-${pad2(d.getUTCMonth() + 1)}-${d.getUTCFullYear()}`;
-    }
-  }
-  return raw || 'TBC';
+  const key = toEventDateKey(evDate);
+  if (!key || key === 'TBC') return 'TBC';
+  const [y, m, d] = key.split('-');
+  if (!y || !m || !d) return key;
+  return `${pad2(Number(d))}-${pad2(Number(m))}-${y}`;
 }
 
 function lockExpiryMinutes(lockedBy, userId) {

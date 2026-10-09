@@ -3,6 +3,7 @@
  * Same refs are finalized when the wizard is submitted.
  */
 const { LOCK_EXPIRE_TIME_MINUTES } = require('../constants');
+const { bookingHasOpenStripePaymentLink } = require('./bookingStripeLinkService');
 
 async function loadEventForReserve(pool, eventId) {
   const id = Number(eventId);
@@ -64,17 +65,25 @@ async function deleteReservedBookingsForLock(pool, lockId) {
   const bookingIds = (rows || []).map((r) => Number(r.id)).filter((n) => n > 0);
   if (!bookingIds.length) return;
 
+  const deletable = [];
+  for (const bookingId of bookingIds) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await bookingHasOpenStripePaymentLink(pool, bookingId)) continue;
+    deletable.push(bookingId);
+  }
+  if (!deletable.length) return;
+
   await pool.query(
-    `DELETE FROM booking_attendees WHERE booking_id IN (${bookingIds.map(() => '?').join(',')})`,
-    bookingIds
+    `DELETE FROM booking_attendees WHERE booking_id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
   );
   await pool.query(
-    `DELETE FROM booking_payments WHERE booking_id IN (${bookingIds.map(() => '?').join(',')})`,
-    bookingIds
+    `DELETE FROM booking_payments WHERE booking_id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
   );
   await pool.query(
-    `DELETE FROM bookings WHERE id IN (${bookingIds.map(() => '?').join(',')})`,
-    bookingIds
+    `DELETE FROM bookings WHERE id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
   );
 }
 
@@ -200,19 +209,27 @@ async function cleanupOrphanAdminPlaceholderBookings(pool) {
   const bookingIds = (rows || []).map((r) => Number(r.id)).filter((n) => n > 0);
   if (!bookingIds.length) return 0;
 
+  const deletable = [];
+  for (const bookingId of bookingIds) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await bookingHasOpenStripePaymentLink(pool, bookingId)) continue;
+    deletable.push(bookingId);
+  }
+  if (!deletable.length) return 0;
+
   await pool.query(
-    `DELETE FROM booking_attendees WHERE booking_id IN (${bookingIds.map(() => '?').join(',')})`,
-    bookingIds
+    `DELETE FROM booking_attendees WHERE booking_id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
   );
   await pool.query(
-    `DELETE FROM booking_payments WHERE booking_id IN (${bookingIds.map(() => '?').join(',')})`,
-    bookingIds
+    `DELETE FROM booking_payments WHERE booking_id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
   );
   await pool.query(
-    `DELETE FROM bookings WHERE id IN (${bookingIds.map(() => '?').join(',')})`,
-    bookingIds
+    `DELETE FROM bookings WHERE id IN (${deletable.map(() => '?').join(',')})`,
+    deletable
   );
-  return bookingIds.length;
+  return deletable.length;
 }
 
 module.exports = {

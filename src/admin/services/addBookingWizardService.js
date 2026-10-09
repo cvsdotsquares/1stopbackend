@@ -8,6 +8,7 @@ const {
   sanitizePhoneInput,
 } = require('../../utils/ukDateValidation');
 const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../constants');
+const { getExpireMinutes } = require('./bookingStripeLinkService');
 const { phpSerialize } = require('../../utils/phpSerialize');
 const {
   checkAdminBookingPromoCode,
@@ -328,16 +329,24 @@ function parseMysqlDateTime(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function lockExpireMinutesForSession(lockSession) {
+  if (isStripePaymentLinkLockedBy(lockSession?.locked_by)) {
+    return getExpireMinutes();
+  }
+  return LOCK_EXPIRE_TIME_MINUTES;
+}
+
 function getLockExpiryIso(lockSession, lockCountdown) {
+  const minutes = lockExpireMinutesForSession(lockSession);
   if (lockCountdown) {
     return new Date(
-      (Number(lockCountdown) + LOCK_EXPIRE_TIME_MINUTES * 60) * 1000
+      (Number(lockCountdown) + minutes * 60) * 1000
     ).toISOString();
   }
   const created = parseMysqlDateTime(lockSession?.created);
   if (created) {
     return new Date(
-      created.getTime() + LOCK_EXPIRE_TIME_MINUTES * 60 * 1000
+      created.getTime() + minutes * 60 * 1000
     ).toISOString();
   }
   return null;
@@ -1268,7 +1277,7 @@ async function getAddBookingWizard(pool, session) {
     event_id: eventId,
     space_required: spaceRequired,
     lock_expires_at: getLockExpiryIso(lockSession, adminBooking.lock_countdown),
-    lock_expire_minutes: LOCK_EXPIRE_TIME_MINUTES,
+    lock_expire_minutes: lockExpireMinutesForSession(lockSession),
     event: {
       id: event.id,
       course_id: event.course_id,

@@ -10,6 +10,40 @@ const {
 } = require('../../utils/emailService');
 const { resolveBookingConfirmationRefSuffix } = require('../../utils/typeOfBook');
 
+/** Legacy `Booking::sendBookingMail` recipient / BCC rules (edit_booking resendConf). */
+function resolveLegacyResendMailOptions({
+  resendMode = 0,
+  overrideEmail = '',
+  attendeeEmail = '',
+} = {}) {
+  const mode = Number(resendMode) || 0;
+  const forward = String(overrideEmail || '').trim();
+
+  if (forward) {
+    return {
+      targetEmails: [forward],
+      disableBcc: true,
+      logRecipientAsBcc: false,
+    };
+  }
+
+  switch (mode) {
+    case 1:
+      return { disableBcc: true, logRecipientAsBcc: false };
+    case 2:
+      return { disableBcc: false, logRecipientAsBcc: true };
+    case 3:
+      return { disableBcc: false, logRecipientAsBcc: false };
+    case 13:
+      return { disableBcc: false, logRecipientAsBcc: false };
+    default:
+      if (!String(attendeeEmail || '').trim()) {
+        return { disableBcc: false, logRecipientAsBcc: true };
+      }
+      return { disableBcc: false, logRecipientAsBcc: false };
+  }
+}
+
 async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) {
   const id = Number(bookingId);
   if (!Number.isFinite(id) || id <= 0) return { sent: false, reason: 'invalid_id' };
@@ -92,33 +126,24 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
     const isResend = resendMode > 0 || Boolean(overrideEmail);
     const adminBcc = resolveBookingBcc(settingsData[0]?.booking_bcc);
 
-    let targetEmails = [];
-    let disableBcc = false;
-    if (overrideEmail) {
-      targetEmails = [overrideEmail];
-      disableBcc = true;
-    } else if (resendMode === 1) {
-      disableBcc = true;
-    } else if (resendMode === 2) {
-      targetEmails = [adminBcc];
-      disableBcc = true;
-    } else if (!attendeeEmail) {
-      targetEmails = [adminBcc];
-      disableBcc = true;
-    }
+    const legacyMail = resolveLegacyResendMailOptions({
+      resendMode,
+      overrideEmail,
+      attendeeEmail,
+    });
+    const targetEmails = legacyMail.targetEmails || [];
+    const disableBcc = legacyMail.disableBcc;
+    const logRecipientAsBcc = legacyMail.logRecipientAsBcc;
 
     const logTypeResolved =
       options.logType ||
-      (isResend
-        ? 'Re-Sent Booking Confirmation'
-        : !attendeeEmail && !overrideEmail
-          ? 'Booking Confirmation (office copy)'
-          : 'Booking Confirmation');
-
-    const bookingRefSuffix =
-      logTypeResolved === 'Re-Sent Booking Confirmation' && resendMode !== 13
-        ? 'R'
-        : '';
+      (resendMode === 13
+        ? 'Booking Confirmation'
+        : isResend
+          ? 'Re-Sent Booking Confirmation'
+          : !attendeeEmail && !overrideEmail
+            ? 'Booking Confirmation (office copy)'
+            : 'Booking Confirmation');
 
     await sendBookingConfirmation(
       {
@@ -130,11 +155,12 @@ async function sendAdminBookingConfirmationEmail(pool, bookingId, options = {}) 
         }),
         type_of_book: booking.type_of_book,
         payment_type: paymentType,
-        bookingRefSuffix,
+        resendMode,
         refundable: Number(booking.refundable) || 0,
         attendees,
         ...(targetEmails.length ? { targetEmails } : {}),
         disableBcc,
+        logRecipientAsBcc,
         location: locationData[0] || {},
         event_dates: eventDates,
         booking: {
