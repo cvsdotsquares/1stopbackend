@@ -2,6 +2,8 @@ const express = require('express');
 const ItineraryController = require('../controllers/itineraryController');
 const { requireAdminSession } = require('../middleware/adminAuth');
 
+const createStudentResultsRoutes = require('./studentResults');
+
 function createItineraryRoutes(pool) {
   const router = express.Router();
   const controller = new ItineraryController(pool);
@@ -15,6 +17,7 @@ function createItineraryRoutes(pool) {
   router.post('/student-results', requireAdminSession, (req, res) =>
     controller.saveStudentResults(req, res)
   );
+  router.use('/result-options', createStudentResultsRoutes(pool));
 
   return router;
 }
