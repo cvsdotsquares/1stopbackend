@@ -210,9 +210,15 @@ async function replaceTokensInObject(pool, obj) {
   return obj;
 }
 
+function clearTokensCache() {
+  tokensCache = null;
+  tokensCacheTime = 0;
+}
+
 module.exports = {
   replaceTokens,
   replaceTokensInObject,
+  clearTokensCache,
   normalizeCkeditorImageSrcs,
   rewriteLegacyHostInLinks,
   urlPathHasFileExtension,

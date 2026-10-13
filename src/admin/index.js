@@ -45,6 +45,8 @@ const createAdminUsersRoutes = require('./routes/adminUsers');
 const createAutomatedEmailsRoutes = require('./routes/automatedEmails');
 const createStudentResultsRoutes = require('./routes/studentResults');
 const createInstructorsRoutes = require('./routes/instructors');
+const createTokensRoutes = require('./routes/tokens');
+const createIpLogsRoutes = require('./routes/ipLogs');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -101,6 +103,8 @@ function createAdminRoutes(pool) {
   router.use('/student-results', createStudentResultsRoutes(pool));
   router.use('/instructors', createInstructorsRoutes(pool));
   router.use('/itinerary/instructors', createInstructorsRoutes(pool));
+  router.use('/tokens', createTokensRoutes(pool));
+  router.use('/ip-logs', createIpLogsRoutes(pool));
 
   return router;
 }

@@ -11,6 +11,7 @@ function createFileManagerRoutes() {
   router.get('/', requireAdminSession, (req, res) => c.list(req, res));
   router.post('/', requireAdminSession, upload.any(), (req, res) => c.upload(req, res));
   router.post('/upload', requireAdminSession, upload.any(), (req, res) => c.upload(req, res));
+  router.post('/ckeditor-upload', requireAdminSession, upload.any(), (req, res) => c.ckeditorUpload(req, res));
   router.delete('/:filename', requireAdminSession, (req, res) => c.remove(req, res));
   router.delete('/', requireAdminSession, (req, res) => c.remove(req, res));
   return router;

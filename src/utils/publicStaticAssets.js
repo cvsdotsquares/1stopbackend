@@ -30,8 +30,21 @@ function registerPublicStaticAssets(app) {
     })
   );
 
+  const primaryCmImagesDir = path.join(process.cwd(), 'cmImages');
+  if (fs.existsSync(primaryCmImagesDir)) {
+    app.use(
+      '/cmImages',
+      express.static(primaryCmImagesDir, {
+        index: false,
+        fallthrough: true,
+        maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+      })
+    );
+    console.log('[STATIC] GET /cmImages/* ->', primaryCmImagesDir);
+  }
+
   const cmImagesDir = path.join(getFrontAssetsBaseDir(), 'cmImages');
-  if (fs.existsSync(cmImagesDir)) {
+  if (fs.existsSync(cmImagesDir) && cmImagesDir !== primaryCmImagesDir) {
     app.use(
       '/cmImages',
       express.static(cmImagesDir, {
@@ -40,10 +53,6 @@ function registerPublicStaticAssets(app) {
         maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
       })
     );
-  }
-
-  console.log('[STATIC] GET /uploads/* ->', uploadsDir);
-  if (fs.existsSync(cmImagesDir)) {
     console.log('[STATIC] GET /cmImages/* ->', cmImagesDir);
   }
 }
