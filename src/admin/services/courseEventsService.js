@@ -1,4 +1,5 @@
 const RECORDS_PER_PAGE = 40;
+const { deleteRideToCourse } = require('./rideToApiService');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -454,7 +455,7 @@ async function deleteCourseEvent(pool, id, adminId) {
   }
 
   const [[eventRow]] = await pool.query(
-    'SELECT id, current_locks, parent FROM course_events WHERE id = ? LIMIT 1',
+    'SELECT id, current_locks, parent, rideto_course_id FROM course_events WHERE id = ? LIMIT 1',
     [eventId]
   );
   if (!eventRow) {
@@ -524,6 +525,14 @@ async function deleteCourseEvent(pool, id, adminId) {
     ]);
 
     await connection.commit();
+
+    if (eventRow && eventRow.rideto_course_id) {
+      try {
+        await deleteRideToCourse(eventId, eventRow.rideto_course_id, pool);
+      } catch (err) {
+        console.error(`[RideTo] Failed to delete course event ${eventId} on RideTo:`, err.message);
+      }
+    }
   } catch (err) {
     await connection.rollback();
     throw err;

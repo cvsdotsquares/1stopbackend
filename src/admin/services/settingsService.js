@@ -166,13 +166,6 @@ async function updateAdminSettings(pool, body, files = [], req = null) {
     }
   }
 
-  // Side-effect: RideTo API global toggle
-  const currentR2 = Number(current.is_r2api_setting) === 1 ? 1 : 0;
-  if (currentR2 !== newIsR2Api) {
-    const newStatus = newIsR2Api === 1 ? 'on' : 'off';
-    await pool.query('UPDATE course_events SET rideto_api_status = ?', [newStatus]);
-  }
-
   // Update DB row id = 1
   await pool.query(
     `UPDATE settings SET
