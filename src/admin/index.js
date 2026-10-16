@@ -40,6 +40,13 @@ const createTrainingDataRoutes = require('./routes/trainingData');
 const createFooterImagesRoutes = require('./routes/footerImages');
 const createExternalCssRoutes = require('./routes/externalCss');
 const createFileManagerRoutes = require('./routes/fileManager');
+const createSettingsRoutes = require('./routes/settings');
+const createAdminUsersRoutes = require('./routes/adminUsers');
+const createAutomatedEmailsRoutes = require('./routes/automatedEmails');
+const createStudentResultsRoutes = require('./routes/studentResults');
+const createInstructorsRoutes = require('./routes/instructors');
+const createTokensRoutes = require('./routes/tokens');
+const createIpLogsRoutes = require('./routes/ipLogs');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -89,6 +96,15 @@ function createAdminRoutes(pool) {
   router.use('/footer-images', createFooterImagesRoutes(pool));
   router.use('/external-css', createExternalCssRoutes());
   router.use('/files', createFileManagerRoutes());
+  router.use('/settings', createSettingsRoutes(pool));
+  router.use('/admin-users', createAdminUsersRoutes(pool));
+  router.use('/users', createAdminUsersRoutes(pool));
+  router.use('/automated-emails', createAutomatedEmailsRoutes(pool));
+  router.use('/student-results', createStudentResultsRoutes(pool));
+  router.use('/instructors', createInstructorsRoutes(pool));
+  router.use('/itinerary/instructors', createInstructorsRoutes(pool));
+  router.use('/tokens', createTokensRoutes(pool));
+  router.use('/ip-logs', createIpLogsRoutes(pool));
 
   return router;
 }

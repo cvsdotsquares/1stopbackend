@@ -2,6 +2,11 @@ const {
   TBC_EVENT_DATE,
   normalizeSqlDateRaw,
 } = require('./courseEventsService');
+const {
+  isRideToEligible,
+  createRideToCourse,
+  updateRideToCourse,
+} = require('./rideToApiService');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -662,6 +667,8 @@ async function saveWizard(pool, session, payload) {
     await connection.beginTransaction();
     let parentId = 0;
     let inserted = 0;
+    const createdRideToEvents = [];
+    const updatedRideToEvents = [];
     // ENUM('0','1'): numeric 1 means index 1 → '0'; use string '1' for active.
     const activeStatus = '1';
 
@@ -705,6 +712,9 @@ async function saveWizard(pool, session, payload) {
           );
           inserted = 1;
           lastId = state.id;
+          if (isRideToEligible(link.course, payload.location_id)) {
+            updatedRideToEvents.push(state.id);
+          }
         } else {
           const [result] = await connection.query(
             `INSERT INTO course_events
@@ -738,6 +748,14 @@ async function saveWizard(pool, session, payload) {
           lastId = result.insertId;
           inserted = 1;
           if (!parentId) parentId = lastId;
+          if (isRideToEligible(link.course, payload.location_id)) {
+            createdRideToEvents.push({
+              eventId: lastId,
+              courseId: link.course,
+              locationId: payload.location_id,
+              spaces: payload.booking_limit,
+            });
+          }
         }
 
         await insertEventDates(connection, lastId, eventsDates);
@@ -806,6 +824,9 @@ async function saveWizard(pool, session, payload) {
               );
             }
             inserted = 1;
+            if (isRideToEligible(link.course, payload.location_id)) {
+              updatedRideToEvents.push(state.id);
+            }
             break;
           }
 
@@ -864,6 +885,17 @@ async function saveWizard(pool, session, payload) {
             );
           }
           inserted = 1;
+          if (isRideToEligible(link.course, payload.location_id)) {
+            createdRideToEvents.push({
+              eventId: newId,
+              courseId: link.course,
+              locationId: payload.location_id,
+              spaces: payload.booking_limit,
+              date: storageDateKeyToEventDate(dateKey),
+              startTime: times.s,
+              endTime: times.e,
+            });
+          }
         }
         break;
       }
@@ -884,6 +916,28 @@ async function saveWizard(pool, session, payload) {
 
     await connection.commit();
     clearWizardState(session);
+
+    // Sync with RideTo API (matches legacy bookingapi.class.php)
+    if (createdRideToEvents.length > 0) {
+      for (const ev of createdRideToEvents) {
+        try {
+          await createRideToCourse(ev.eventId, ev, pool);
+        } catch (err) {
+          console.error(`[RideTo] Failed to create course event ${ev.eventId} on RideTo:`, err.message);
+        }
+      }
+    }
+
+    if (updatedRideToEvents.length > 0) {
+      for (const evId of updatedRideToEvents) {
+        try {
+          await updateRideToCourse(evId, pool);
+        } catch (err) {
+          console.error(`[RideTo] Failed to update course event ${evId} on RideTo:`, err.message);
+        }
+      }
+    }
+
     return { message: 'Course event saved successfully' };
   } catch (err) {
     await connection.rollback();

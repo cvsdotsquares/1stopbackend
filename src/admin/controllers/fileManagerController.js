@@ -1,6 +1,13 @@
 const { listFiles, uploadFile, deleteFile } = require('../services/fileManagerService');
 
 function mapFiles(req) {
+  if (req.file) {
+    return [{
+      fieldname: req.file.fieldname,
+      buffer: req.file.buffer,
+      originalname: req.file.originalname,
+    }];
+  }
   return (req.files || []).map((f) => ({
     fieldname: f.fieldname,
     buffer: f.buffer,
@@ -53,6 +60,55 @@ class FileManagerController {
     } catch (err) {
       console.error('[ADMIN][FILES][UPLOAD]', err.message);
       return res.status(500).json({ success: false, message: 'Error uploading file' });
+    }
+  }
+
+  async ckeditorUpload(req, res) {
+    try {
+      const files = mapFiles(req);
+      const funcNum = req.query.CKEditorFuncNum;
+      if (!files.length) {
+        if (funcNum) {
+          return res.send(
+            `<script type="text/javascript">window.parent.CKEDITOR.tools.callFunction(${funcNum}, "", "No file uploaded.");</script>`
+          );
+        }
+        return res.json({ uploaded: 0, error: { message: 'No file uploaded' } });
+      }
+
+      const file = files[0];
+      const result = uploadFile(file);
+      if (!result.ok) {
+        if (funcNum) {
+          return res.send(
+            `<script type="text/javascript">window.parent.CKEDITOR.tools.callFunction(${funcNum}, "", "${result.message}");</script>`
+          );
+        }
+        return res.json({ uploaded: 0, error: { message: result.message } });
+      }
+
+      const fileUrl = `/cmImages/images/${result.filename}`;
+
+      if (funcNum) {
+        return res.send(
+          `<script type="text/javascript">window.parent.CKEDITOR.tools.callFunction(${funcNum}, "${fileUrl}", "");</script>`
+        );
+      }
+
+      return res.json({
+        uploaded: 1,
+        fileName: result.filename,
+        url: fileUrl,
+      });
+    } catch (err) {
+      console.error('[ADMIN][FILES][CKEDITOR_UPLOAD]', err.message);
+      const funcNum = req.query.CKEditorFuncNum;
+      if (funcNum) {
+        return res.send(
+          `<script type="text/javascript">window.parent.CKEDITOR.tools.callFunction(${funcNum}, "", "Upload failed");</script>`
+        );
+      }
+      return res.status(500).json({ uploaded: 0, error: { message: 'Upload failed' } });
     }
   }
 

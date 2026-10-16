@@ -57,12 +57,16 @@ function uploadFile(file) {
     return { ok: false, message: 'File type not allowed' };
   }
   const dir = getFileManagerDir();
-  const target = path.join(dir, safe);
+  let finalName = safe;
+  let target = path.join(dir, finalName);
   if (fs.existsSync(target)) {
-    return { ok: false, message: 'File already exists' };
+    const ext = path.extname(safe);
+    const stem = path.basename(safe, ext);
+    finalName = `${stem}_${Date.now()}${ext}`;
+    target = path.join(dir, finalName);
   }
   fs.writeFileSync(target, file.buffer);
-  return { ok: true, message: 'File uploaded successfully', filename: safe };
+  return { ok: true, message: 'File uploaded successfully', filename: finalName };
 }
 
 function deleteFile(filename) {

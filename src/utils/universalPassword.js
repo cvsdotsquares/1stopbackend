@@ -87,7 +87,7 @@ function mc_encrypt(value, keyHex) {
     throw new Error('UNIVERSAL_PASSWORD_KEY must decode to a 32-byte key');
   }
 
-  const serialized = JSON.stringify(value);
+  const serialized = phpSerializeString(value);
   const mac = crypto.createHmac('sha256', deriveMacKey(key)).update(serialized).digest('hex');
   const payload = serialized + mac;
 

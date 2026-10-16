@@ -207,6 +207,15 @@ app.use('/api/admin', createAdminRoutes(pool));
     bookingWorldpayController.notifyWizardWorldpay(req, res);
   app.post('/bookings/booking-payment-complete.php', legacyBookingPaymentComplete);
   app.get('/bookings/booking-payment-complete.php', legacyBookingPaymentComplete);
+
+  // Legacy release_ip.php endpoint
+  const IpLogsController = require('./admin/controllers/ipLogsController');
+  const ipLogsController = new IpLogsController(pool);
+  const legacyReleaseIp = (req, res) => ipLogsController.unblock(req, res);
+  app.post('/release_ip.php', legacyReleaseIp);
+  app.get('/release_ip.php', legacyReleaseIp);
+  app.post('/admin/release_ip.php', legacyReleaseIp);
+  app.get('/admin/release_ip.php', legacyReleaseIp);
 }
 
 const PORT = process.env.PORT || 3000;
