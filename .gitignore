@@ -142,6 +142,7 @@ dist
 uploads/
 public/uploads/
 temp/
+cmImages/
 
 # Session files
 sessions/
