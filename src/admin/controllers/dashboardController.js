@@ -1,5 +1,3 @@
-const { removeExpirelocks } = require('../services/bookingService');
-const { cancelAddBookingWizard } = require('../services/addBookingWizardService');
 const {
   courseAvailsDashboard,
   selectFutureCourses,
@@ -71,25 +69,11 @@ class DashboardController {
 
   async getDashboard(req, res) {
     try {
-      await Promise.all([
-        expirePromos(this.pool),
-        removeExpirelocks(this.pool, req.session),
-      ]);
-
-      if (req.session.ProcessBookings) {
-        delete req.session.ProcessBookings;
-      }
+      // Only expire outdated promos on dashboard load.
+      // Do NOT delete ongoing locks or cancel active booking wizards on home/dashboard navigation.
+      await expirePromos(this.pool);
 
       syncCalendarSession(req);
-
-      // Leaving booking flow / opening Home: clear this admin's terminal locks.
-      const adminId = this.getAdminId(req);
-      if (
-        req.session?.adminBooking?.lock_session?.id ||
-        Number(adminId) > 0
-      ) {
-        await cancelAddBookingWizard(this.pool, req.session, false, adminId);
-      }
 
       const searchterm = parseSearchTerm(req.query);
       const hasDateParam =
