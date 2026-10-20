@@ -47,6 +47,7 @@ const createStudentResultsRoutes = require('./routes/studentResults');
 const createInstructorsRoutes = require('./routes/instructors');
 const createTokensRoutes = require('./routes/tokens');
 const createIpLogsRoutes = require('./routes/ipLogs');
+const createSearchRoutes = require('./routes/search');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -105,6 +106,7 @@ function createAdminRoutes(pool) {
   router.use('/itinerary/instructors', createInstructorsRoutes(pool));
   router.use('/tokens', createTokensRoutes(pool));
   router.use('/ip-logs', createIpLogsRoutes(pool));
+  router.use('/search', createSearchRoutes(pool));
 
   return router;
 }

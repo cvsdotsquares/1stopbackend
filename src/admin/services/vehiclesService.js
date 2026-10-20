@@ -192,6 +192,7 @@ async function getVehicleSchedule(pool, query = {}) {
 
 async function listVehicles(pool, query = {}) {
   const page = Math.max(1, Number(query.page) || 1);
+  const perPage = Math.max(1, Number(query.limit) || RECORDS_PER_PAGE);
   const nameScr = trim(query.name_scr);
   const params = [];
   let where = '';
@@ -203,10 +204,10 @@ async function listVehicles(pool, query = {}) {
   }
   const order =
     ' ORDER BY engine_size ASC, mm.setting_value ASC, tran.setting_value ASC, vehicles.registration ASC';
-  const offset = (page - 1) * RECORDS_PER_PAGE;
+  const offset = (page - 1) * perPage;
   const [items] = await pool.query(
     `${VEHICLE_SELECT}, vehicles.registration, vehicles.include_into_alert ${VEHICLE_JOINS} ${where} ${order} LIMIT ? OFFSET ?`,
-    [...params, RECORDS_PER_PAGE, offset]
+    [...params, perPage, offset]
   );
   const [countRows] = await pool.query(
     `SELECT COUNT(*) AS total ${VEHICLE_JOINS} ${where}`,
@@ -227,9 +228,9 @@ async function listVehicles(pool, query = {}) {
     })),
     pagination: {
       page,
-      perPage: RECORDS_PER_PAGE,
+      perPage,
       total,
-      totalPages: Math.max(1, Math.ceil(total / RECORDS_PER_PAGE)),
+      totalPages: Math.max(1, Math.ceil(total / perPage)),
     },
     filters: { name_scr: nameScr },
   };

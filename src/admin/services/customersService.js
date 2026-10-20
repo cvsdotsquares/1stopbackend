@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { phpUnserialize } = require('../../utils/phpSerialize');
+const { TYPE_OF_BOOK_LABELS } = require('../../utils/typeOfBook');
 
 const RECORDS_PER_PAGE = 10;
 const MEMBERS_PER_PAGE = 1000;
@@ -172,10 +173,11 @@ function buildContactSearchWhere(searchterm, { blacklistedOnly = false } = {}) {
   return { where, params };
 }
 
-async function listContactCards(pool, { page = 1, searchterm = {} } = {}) {
+async function listContactCards(pool, { page = 1, limit = RECORDS_PER_PAGE, searchterm = {} } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
+  const perPage = Math.max(1, Number(limit) || RECORDS_PER_PAGE);
   const { where, params } = buildContactSearchWhere(searchterm);
-  const offset = (pageNum - 1) * RECORDS_PER_PAGE;
+  const offset = (pageNum - 1) * perPage;
   const licenceTypes = await getLicenceTypes(pool);
 
   const [countRows] = await pool.query(
@@ -188,12 +190,12 @@ async function listContactCards(pool, { page = 1, searchterm = {} } = {}) {
     `SELECT * FROM booking_attendees_dropdown ${where}
      ORDER BY booking_attendees_dropdown.id DESC
      LIMIT ?, ?`,
-    [...params, offset, RECORDS_PER_PAGE]
+    [...params, offset, perPage]
   );
 
   return {
     items: (rows || []).map((row) => mapContactCard(row, licenceTypes)),
-    pagination: paginationMeta(pageNum, RECORDS_PER_PAGE, total),
+    pagination: paginationMeta(pageNum, perPage, total),
     filters: { name_scr: trim(searchterm?.name_scr) },
     options: {
       vehicle_types: Object.entries(VEHICLE_TYPE_LABELS).map(([value, label]) => ({
@@ -664,8 +666,9 @@ async function purgeDeletedBooking(pool, id) {
   }
 }
 
-async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) {
+async function listAttendingCustomers(pool, { page = 1, limit = RECORDS_PER_PAGE, searchterm = {} } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
+  const perPage = Math.max(1, Number(limit) || RECORDS_PER_PAGE);
   const nameScr = trim(searchterm?.name_scr);
   let where = ` WHERE bookings.status IN (1, 2) `;
   const params = [];
@@ -690,6 +693,8 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
     FROM booking_attendees
     INNER JOIN bookings ON bookings.id = booking_attendees.booking_id
     LEFT JOIN courses ON courses.id = bookings.course_id
+    LEFT JOIN course_events ON course_events.id = bookings.course_event_id
+    LEFT JOIN locations ON locations.id = course_events.location_id
     LEFT JOIN (
       SELECT course_event_id, MIN(event_date) AS event_date
       FROM course_event_dates
@@ -703,7 +708,7 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
     params
   );
   const total = Number(countRows?.[0]?.total) || 0;
-  const offset = (pageNum - 1) * RECORDS_PER_PAGE;
+  const offset = (pageNum - 1) * perPage;
 
   const [rows] = await pool.query(
     `SELECT
@@ -718,13 +723,21 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
         booking_attendees.contact3,
         booking_attendees.license_number,
         courses.course_abb,
+        courses.course_name,
+        locations.location_name,
+        locations.loc_abb,
+        bookings.type_of_book,
+        bookings.total_amount,
+        bookings.total_fees,
+        bookings.admin_payment_received,
+        bookings.payment_due,
         course_event_dates.event_date AS course_date,
         IFNULL(bookings.on_hold, 0) AS on_hold
      ${fromJoin}
      ${where}
      ORDER BY booking_attendees.id DESC
      LIMIT ?, ?`,
-    [...params, offset, RECORDS_PER_PAGE]
+    [...params, offset, perPage]
   );
 
   const items = [];
@@ -748,12 +761,29 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
       // optional tables may be missing in some envs
     }
 
+    const courseFee = Number(row.total_amount ?? row.total_fees ?? 0);
+    const amountPaid = Number(row.admin_payment_received ?? 0);
+    const amountDue =
+      row.payment_due != null && row.payment_due !== ''
+        ? Number(row.payment_due)
+        : Math.max(0, courseFee - amountPaid);
+    const bookingSource =
+      TYPE_OF_BOOK_LABELS[row.type_of_book] || row.type_of_book || 'Online';
+    const locationDisplay = row.location_name || row.loc_abb || '';
+
     items.push({
       attendee_id: Number(row.attendee_id),
       booking_id: Number(row.booking_id),
       booking_ref: row.booking_ref || '',
       attendee_name: `${trim(row.first_name)} ${trim(row.sur_name)}`.trim(),
       course_abb: row.course_abb || '',
+      course_name: row.course_name || '',
+      location_name: locationDisplay,
+      booking_source: bookingSource,
+      type_of_book: row.type_of_book || '',
+      course_fee: courseFee.toFixed(2),
+      amount_paid: amountPaid.toFixed(2),
+      amount_outstanding: amountDue.toFixed(2),
       course_date: formatUkDate(row.course_date),
       on_hold: Number(row.on_hold) === 1,
       result: resultLabel,
@@ -767,7 +797,7 @@ async function listAttendingCustomers(pool, { page = 1, searchterm = {} } = {}) 
 
   return {
     items,
-    pagination: paginationMeta(pageNum, RECORDS_PER_PAGE, total),
+    pagination: paginationMeta(pageNum, perPage, total),
     filters: { name_scr: nameScr },
   };
 }
