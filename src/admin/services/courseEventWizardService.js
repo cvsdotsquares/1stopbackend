@@ -387,55 +387,90 @@ async function isEventFrozen(pool, eventId) {
   return (rows || []).length > 0;
 }
 
-async function applyFrozenState(pool, eventId, eventsDates, freezeAllDates) {
-  if (!freezeAllDates) return;
-
-  const [[event]] = await pool.query(
-    'SELECT * FROM course_events WHERE id = ? LIMIT 1',
+async function applyFrozenState(
+  pool,
+  eventId,
+  eventsDates,
+  freezeAllDates,
+  link = {},
+  bookingLimit = null
+) {
+  const [existingRows] = await pool.query(
+    'SELECT * FROM freeze WHERE course_event_id = ? LIMIT 1',
     [eventId]
   );
-  if (!event) return;
+  const isCurrentlyFrozen = (existingRows || []).length > 0;
+  const freezeData = existingRows?.[0];
 
-  const [existing] = await pool.query(
-    'SELECT id FROM freeze WHERE course_event_id = ? LIMIT 1',
-    [eventId]
-  );
-  if ((existing || []).length) return;
+  if (freezeAllDates) {
+    const totalBookings =
+      Number(link.vehicle_type_manual || 0) +
+      Number(link.vehicle_type_automatic || 0);
 
-  await pool.query(
-    `INSERT INTO freeze
-      (parent, course_event_id, bookings_done, vehicle_type_manual,
-       vehicle_type_automatic, booking_limit, manual_lock_done, automatic_lock_done)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      event.parent,
-      eventId,
-      event.bookings_done,
-      event.vehicle_type_manual,
-      event.vehicle_type_automatic,
-      event.booking_limit,
-      event.manual_lock_done,
-      event.automatic_lock_done,
-    ]
-  );
+    if (isCurrentlyFrozen) {
+      await pool.query(
+        `UPDATE freeze
+         SET booking_limit = ?,
+             vehicle_type_manual = ?,
+             vehicle_type_automatic = ?
+         WHERE course_event_id = ?`,
+        [
+          bookingLimit ?? freezeData.booking_limit,
+          link.vehicle_type_manual ?? freezeData.vehicle_type_manual,
+          link.vehicle_type_automatic ?? freezeData.vehicle_type_automatic,
+          eventId,
+        ]
+      );
+      await pool.query('UPDATE course_events SET bookings_done = ? WHERE id = ?', [
+        totalBookings,
+        eventId,
+      ]);
+    } else {
+      const [[event]] = await pool.query(
+        'SELECT * FROM course_events WHERE id = ? LIMIT 1',
+        [eventId]
+      );
+      if (!event) return;
 
-  const totalBookings =
-    Number(event.vehicle_type_manual || 0) +
-    Number(event.vehicle_type_automatic || 0);
-  await pool.query('UPDATE course_events SET bookings_done = ? WHERE id = ?', [
-    totalBookings,
-    eventId,
-  ]);
+      await pool.query(
+        `INSERT INTO freeze
+          (parent, course_event_id, bookings_done, vehicle_type_manual,
+           vehicle_type_automatic, booking_limit, manual_lock_done, automatic_lock_done)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          event.parent,
+          eventId,
+          event.bookings_done,
+          link.vehicle_type_manual ?? event.vehicle_type_manual,
+          link.vehicle_type_automatic ?? event.vehicle_type_automatic,
+          bookingLimit ?? event.booking_limit,
+          event.manual_lock_done,
+          event.automatic_lock_done,
+        ]
+      );
 
-  for (const [dateKey, times] of Object.entries(eventsDates || {})) {
-    const eventDate = storageDateKeyToEventDate(dateKey);
+      await pool.query('UPDATE course_events SET bookings_done = ? WHERE id = ?', [
+        totalBookings,
+        eventId,
+      ]);
+    }
+
     await pool.query(
-      `UPDATE course_event_dates
-       SET freeze = 1
-       WHERE course_event_id = ? AND event_date = ?
-         AND event_start_time = ? AND event_end_time = ?`,
-      [eventId, eventDate, times.s || '', times.e || '']
+      'UPDATE course_event_dates SET freeze = 1 WHERE course_event_id = ?',
+      [eventId]
     );
+  } else {
+    if (isCurrentlyFrozen) {
+      await pool.query(
+        'UPDATE course_events SET bookings_done = ? WHERE id = ?',
+        [Number(freezeData.bookings_done || 0), eventId]
+      );
+      await pool.query('DELETE FROM freeze WHERE course_event_id = ?', [eventId]);
+      await pool.query(
+        'UPDATE course_event_dates SET freeze = 2 WHERE course_event_id = ?',
+        [eventId]
+      );
+    }
   }
 }
 
@@ -511,8 +546,18 @@ async function assertBookingLimit(pool, eventId, bookingLimit) {
     [eventId]
   );
   if (!event) return;
+
+  const [freezeRows] = await pool.query(
+    'SELECT bookings_done FROM freeze WHERE course_event_id = ? LIMIT 1',
+    [eventId]
+  );
+  const bookingsDone =
+    freezeRows && freezeRows.length > 0
+      ? Number(freezeRows[0].bookings_done || 0)
+      : Number(event.bookings_done || 0);
+
   const minRequired =
-    Number(event.current_locks || 0) + Number(event.bookings_done || 0);
+    Number(event.current_locks || 0) + bookingsDone;
   if (Number(bookingLimit) < minRequired) {
     const err = new Error('Booking Limit can not be less then current bookings');
     err.status = 400;
@@ -535,9 +580,12 @@ async function insertEventDates(pool, eventId, eventsDates) {
 
 async function saveBulkEditWizard(pool, session, payload, { previousLocationId } = {}) {
   const state = getWizardState(session);
+  const bulkDates = Array.isArray(payload.bulkDates) ? payload.bulkDates : [];
   const eventIds = state.bulkEventIds?.length
     ? state.bulkEventIds
-    : session.eventIds || [];
+    : (session.eventIds?.length
+      ? session.eventIds
+      : [...new Set(bulkDates.map((r) => Number(r.eid)).filter(Boolean))]);
   if (!eventIds.length) {
     const err = new Error('No events selected for bulk edit');
     err.status = 400;
@@ -551,8 +599,8 @@ async function saveBulkEditWizard(pool, session, payload, { previousLocationId }
   const link = payload.multi[0];
   const freezeAllDates = Boolean(payload.frozenAllDates);
   const isDeposit = payload.is_deposit ? 1 : 0;
-  const bulkDates = Array.isArray(payload.bulkDates) ? payload.bulkDates : [];
   const updatedEvents = new Set();
+  const updatedRideToEvents = [];
 
   const connection = await pool.getConnection();
   try {
@@ -606,6 +654,9 @@ async function saveBulkEditWizard(pool, session, payload, { previousLocationId }
           ]
         );
         updatedEvents.add(eventId);
+        if (isRideToEligible(link.course, payload.location_id)) {
+          updatedRideToEvents.push(eventId);
+        }
       }
 
       if (dateKey !== TBC_EVENT_DATE) {
@@ -616,19 +667,32 @@ async function saveBulkEditWizard(pool, session, payload, { previousLocationId }
           [row.s || '', row.e || '', dateRowId]
         );
       }
+    }
 
-      if (freezeAllDates) {
-        await applyFrozenState(
-          connection,
-          eventId,
-          { [dateKey]: { s: row.s, e: row.e } },
-          true
-        );
-      }
+    for (const eventId of updatedEvents) {
+      await applyFrozenState(
+        connection,
+        eventId,
+        {},
+        freezeAllDates,
+        link,
+        payload.booking_limit
+      );
     }
 
     await connection.commit();
     clearWizardState(session);
+
+    if (updatedRideToEvents.length > 0) {
+      for (const evId of updatedRideToEvents) {
+        try {
+          await updateRideToCourse(evId, pool);
+        } catch (err) {
+          console.error(`[RideTo] Failed to update course event ${evId} on RideTo:`, err.message);
+        }
+      }
+    }
+
     return { message: 'Course event saved successfully' };
   } catch (err) {
     await connection.rollback();
@@ -759,9 +823,14 @@ async function saveWizard(pool, session, payload) {
         }
 
         await insertEventDates(connection, lastId, eventsDates);
-        if (freezeAllDates) {
-          await applyFrozenState(connection, lastId, eventsDates, true);
-        }
+        await applyFrozenState(
+          connection,
+          lastId,
+          eventsDates,
+          freezeAllDates,
+          link,
+          payload.booking_limit
+        );
       } else if (state.event_type === 'single') {
         for (const dateKey of sortEventDateKeys(eventsDates)) {
           const times = eventsDates[dateKey];
@@ -815,14 +884,14 @@ async function saveWizard(pool, session, payload) {
                 times.e || '',
               ]
             );
-            if (freezeAllDates) {
-              await applyFrozenState(
-                connection,
-                state.id,
-                { [dateKey]: times },
-                true
-              );
-            }
+            await applyFrozenState(
+              connection,
+              state.id,
+              { [dateKey]: times },
+              freezeAllDates,
+              link,
+              payload.booking_limit
+            );
             inserted = 1;
             if (isRideToEligible(link.course, payload.location_id)) {
               updatedRideToEvents.push(state.id);
@@ -881,7 +950,9 @@ async function saveWizard(pool, session, payload) {
               connection,
               newId,
               { [dateKey]: times },
-              true
+              true,
+              link,
+              payload.booking_limit
             );
           }
           inserted = 1;

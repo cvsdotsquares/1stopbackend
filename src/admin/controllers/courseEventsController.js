@@ -161,9 +161,12 @@ class CourseEventsController {
               : req.session?.eventIds || []
           )
         : [];
-      const isFrozen = state.id
-        ? await isEventFrozen(this.pool, state.id)
-        : false;
+      let isFrozen = false;
+      if (state.id) {
+        isFrozen = await isEventFrozen(this.pool, state.id);
+      } else if (state.isBulkEdit && state.bulkEventIds?.length) {
+        isFrozen = await isEventFrozen(this.pool, state.bulkEventIds[0]);
+      }
       return res.json({
         success: true,
         data: { state, bulkDates, isFrozen },
@@ -231,7 +234,10 @@ class CourseEventsController {
         this.pool,
         { primaryEventId: editId, eventIds }
       );
-      return res.json({ success: true, data: { state, bulkDates } });
+      const isFrozen = state.bulkEventIds?.length
+        ? await isEventFrozen(this.pool, state.bulkEventIds[0])
+        : false;
+      return res.json({ success: true, data: { state, bulkDates, isFrozen } });
     } catch (err) {
       console.error('[ADMIN][COURSE_EVENTS][WIZARD_PREPARE_BULK]', err.message);
       return res.status(err.status || 500).json({

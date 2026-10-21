@@ -277,7 +277,7 @@ async function updateRideToCourse(eventId, db) {
     }
 
     if (response.ok) {
-      await db.query("UPDATE course_events SET rideto_api_status = 'on' WHERE id = ?", [eventId]).catch(() => {});
+      await db.query("UPDATE course_events SET rideto_api_status = 'on' WHERE id = ?", [eventId]).catch(() => { });
     }
 
     return {
@@ -329,7 +329,7 @@ async function deleteRideToCourse(eventId, explicitRidetoCourseId = null, db = n
     });
 
     if (response.ok && actualDb) {
-      await actualDb.query("UPDATE course_events SET rideto_api_status = 'off' WHERE id = ?", [eventId]).catch(() => {});
+      await actualDb.query("UPDATE course_events SET rideto_api_status = 'off' WHERE id = ?", [eventId]).catch(() => { });
     }
 
     return { success: response.ok };
@@ -383,7 +383,7 @@ async function freezeRideToCourse(eventId, action = 'freeze', db) {
 
     if (response.ok) {
       const newStatus = action === 'unfreeze' ? 'on' : 'off';
-      await db.query("UPDATE course_events SET rideto_api_status = ? WHERE id = ?", [newStatus, eventId]).catch(() => {});
+      await db.query("UPDATE course_events SET rideto_api_status = ? WHERE id = ?", [newStatus, eventId]).catch(() => { });
     }
 
     return { success: response.ok };
