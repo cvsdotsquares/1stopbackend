@@ -225,7 +225,7 @@ async function listDlReturns(pool, query = {}) {
       dl.is_locked, dl.exported_on, locations.location_name
      ${baseFrom} ${where}
      GROUP BY dl.book_no
-     ORDER BY ABS(dl.book_no) DESC
+     ORDER BY ${query.sort === 'book_asc' ? 'ABS(dl.book_no) ASC' : 'ABS(dl.book_no) DESC'}
      LIMIT ? OFFSET ?`,
     [...params, RECORDS_PER_PAGE, offset]
   );
@@ -309,6 +309,7 @@ async function getDlReturnBook(pool, id) {
       course_event_id: Number(c.course_event_id) || 0,
       instructor_id: Number(c.instructor_id) || 0,
       instructor_certificate: c.instructor_certificate || '',
+      instructor_name: c.instructor_name || '',
       instructor_display:
         c.instructor_certificate && Number(c.instructor_id) > 0
           ? `${c.instructor_name || 'NA'}\n${c.instructor_certificate}`
@@ -766,6 +767,12 @@ async function getCertificateEditContext(pool, certificateId) {
     [row.location_id]
   );
   const instructors = await getInstructorsForDl(pool);
+  const attendeeBundle = await fetchAttendeesForLocationCourseDate(
+    pool,
+    row.location_id,
+    row.course_id,
+    row.completion_date
+  );
   return {
     certificate: {
       ...row,
@@ -783,6 +790,10 @@ async function getCertificateEditContext(pool, certificateId) {
       certificate_no: c.certificate_no,
     })),
     instructors,
+    attendees: attendeeBundle.attendees,
+    course_events: attendeeBundle.course_events,
+    course_event_id: attendeeBundle.course_event_id,
+    course_start_time: attendeeBundle.course_start_time,
     vehicle_types: Object.entries(VEHICLE_TYPE_LABELS).map(([value, label]) => ({
       value: String(value),
       label,
@@ -1145,8 +1156,12 @@ async function updateDlCertificate(pool, id, body, session) {
   }
 
   const ts = nowMysql();
-  const updatedByName = `${session?.admin_fristname || ''} ${session?.admin_lastname || ''}`.trim();
-  const updatedById = Number(session?.loggedinAdmin?.admin_id) || 0;
+  const updatedByName =
+    `${session?.admin_fristname || ''} ${session?.admin_lastname || ''}`.trim() ||
+    `${session?.fname || ''} ${session?.lname || ''}`.trim() ||
+    'Instructor';
+  const updatedById =
+    Number(session?.loggedinAdmin?.admin_id) || Number(session?.instructor_id) || 0;
 
   let attendeeName = trim(body.attendee_name ?? body.driver);
   if (attendeeName.includes('_0')) {
