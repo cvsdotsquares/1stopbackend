@@ -48,6 +48,10 @@ const VEHICLE_JOINS = `
 
 const VEHICLE_SELECT = `
   SELECT vehicles.*,
+    DATE_FORMAT(vehicles.last_service_date, '%Y-%m-%d') AS last_service_date,
+    DATE_FORMAT(vehicles.road_tax_due_date, '%Y-%m-%d') AS road_tax_due_date,
+    DATE_FORMAT(vehicles.mot_expiry_date, '%Y-%m-%d') AS mot_expiry_date,
+    DATE_FORMAT(vehicles.mileage_updated_at, '%Y-%m-%d %H:%i:%s') AS mileage_updated_at,
     mm.setting_value AS make_model,
     (en.setting_value * 1) AS engine_size,
     tran.setting_value AS transmission,
@@ -711,7 +715,11 @@ function mapVehicleLogRow(r) {
 }
 
 const VEHICLE_LOG_SELECT = `
-  SELECT vehicle_logs.*, le.setting_value AS log_events, ins.fname, ins.lname
+  SELECT vehicle_logs.*,
+    DATE_FORMAT(vehicle_logs.log_date, '%Y-%m-%d') AS log_date,
+    DATE_FORMAT(vehicle_logs.created, '%Y-%m-%d %H:%i:%s') AS created,
+    DATE_FORMAT(vehicle_logs.updated, '%Y-%m-%d %H:%i:%s') AS updated,
+    le.setting_value AS log_events, ins.fname, ins.lname
   FROM vehicle_logs
   LEFT JOIN vehicle_fleet_settings AS le ON (
     le.setting_type = 'log_events' AND le.setting_name = 'option_name' AND le.id = vehicle_logs.log_event_id
@@ -795,8 +803,12 @@ async function createVehicleLog(pool, vehicleId, body, session) {
     throw err;
   }
   const admin = session?.loggedinAdmin || {};
-  const updatedByName = `${session?.admin_fristname || ''} ${session?.admin_lastname || ''}`.trim();
-  const updatedById = Number(admin.admin_id) || 0;
+  const updatedByName =
+    `${session?.admin_fristname || ''} ${session?.admin_lastname || ''}`.trim() ||
+    `${session?.fname || ''} ${session?.lname || ''}`.trim() ||
+    'Instructor';
+  const updatedById = Number(admin.admin_id) || Number(session?.instructor_id) || 0;
+  const updatedBy = session?.instructor_id ? Number(session.instructor_id) : -1;
   const ts = nowMysql();
   await pool.query(
     `INSERT INTO vehicle_logs (
@@ -810,7 +822,7 @@ async function createVehicleLog(pool, vehicleId, body, session) {
       Number(body.log_event_id) || 0,
       trim(body.add_log_notes ?? body.log_notes),
       trim(body.log_issue_status ?? body.issue_status),
-      -1,
+      updatedBy,
       updatedByName,
       updatedById,
       ts,
@@ -846,8 +858,12 @@ async function updateVehicleLog(pool, logId, body, session) {
   }
   const vid = Number(logRow.vehicle_id);
   const admin = session?.loggedinAdmin || {};
-  const updatedByName = `${session?.admin_fristname || ''} ${session?.admin_lastname || ''}`.trim();
-  const updatedById = Number(admin.admin_id) || 0;
+  const updatedByName =
+    `${session?.admin_fristname || ''} ${session?.admin_lastname || ''}`.trim() ||
+    `${session?.fname || ''} ${session?.lname || ''}`.trim() ||
+    'Instructor';
+  const updatedById = Number(admin.admin_id) || Number(session?.instructor_id) || 0;
+  const updatedBy = session?.instructor_id ? Number(session.instructor_id) : -1;
   const ts = nowMysql();
   await pool.query(
     `UPDATE vehicle_logs SET log_date = ?, mileage = ?, log_event_id = ?, log_notes = ?, issue_status = ?,
@@ -858,7 +874,7 @@ async function updateVehicleLog(pool, logId, body, session) {
       Number(body.log_event_id) || 0,
       trim(body.add_log_notes ?? body.log_notes),
       trim(body.log_issue_status ?? body.issue_status),
-      -1,
+      updatedBy,
       updatedByName,
       updatedById,
       ts,

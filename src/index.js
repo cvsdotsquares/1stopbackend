@@ -39,6 +39,7 @@ const StripeLinkExpiryCron = require('./cron/cleanupExpiredStripeLinks');
 const StripePaymentLinkLockExpiryCron = require('./cron/cleanupExpiredStripePaymentLinkLocks');
 const GoogleContactsSyncCron = require('./cron/googleContactsSync');
 const createAdminRoutes = require('./admin');
+const createInstructorRoutes = require('./instructor');
 const { registerPublicStaticAssets } = require('./utils/publicStaticAssets');
 const app = express();
 app.set('trust proxy', getTrustProxySetting());
@@ -191,6 +192,7 @@ app.use('/restapi/booking', createHoldSpaceRoutes(pool));
 app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
 app.use('/api/faq', createFAQRoutes(pool));
 app.use('/api/admin', createAdminRoutes(pool));
+app.use('/api/instructor', createInstructorRoutes(pool));
 
 // Legacy WorldPay Payment Response URL (configured in WorldPay MAI for old admin)
 // Same handler as POST /api/admin/payments/moto/notify
