@@ -4,6 +4,7 @@ const { sendGiftVoucherEmail } = require('../utils/emailService');
 const { formatDateToDDMMYYYY, getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const {
   applyGroupSpaceDelta,
+  canConfirmSpacesOnCohort,
   isCourseEventFrozen,
   lockSiblingEventsForUpdate,
 } = require('../utils/courseEventGroup');
@@ -204,7 +205,34 @@ class StripeWebhookController {
           `is frozen; refunding and removing bookings ${allBookingIds.join(', ')}`
         );
         await this.refundOrphanedPaymentIntent(session);
-        await this.removeBookingsForFrozenCourse(allBookingIds);
+        await this.archivePendingBookingsAfterRefund(allBookingIds, {
+          reason: 'Course frozen by admin before payment completed; payment refunded',
+          cancelledVia: 'stripe-webhook-frozen-course',
+          logLabel: 'course frozen',
+        });
+        return;
+      }
+
+      await lockSiblingEventsForUpdate(connection, courseEventId);
+      const capacityCheck = await canConfirmSpacesOnCohort(
+        connection,
+        courseEventId,
+        bookingSpaces
+      );
+      if (!capacityCheck.allowed) {
+        await connection.rollback();
+        const snap = capacityCheck.groupAvail;
+        console.error(
+          `[stripeWebhook] Payment ${session.id} succeeded but course event ${courseEventId} ` +
+          `has no capacity (limit=${snap?.booking_limit ?? '?'}, done=${snap?.bookings_done ?? '?'}, ` +
+          `need=${bookingSpaces}); refunding bookings ${allBookingIds.join(', ')}`
+        );
+        await this.refundOrphanedPaymentIntent(session);
+        await this.archivePendingBookingsAfterRefund(allBookingIds, {
+          reason: 'Payment refunded: course was full before payment completed',
+          cancelledVia: 'stripe-webhook-capacity-exceeded',
+          logLabel: 'capacity exceeded',
+        });
         return;
       }
 
@@ -252,7 +280,6 @@ class StripeWebhookController {
       }
 
       // Move held spaces to bookings_done on all linked course_events (root + children)
-      await lockSiblingEventsForUpdate(connection, courseEventId);
       await applyGroupSpaceDelta(connection, courseEventId, {
         lockDelta: -bookingSpaces,
         bookingsDoneDelta: bookingSpaces,
@@ -374,11 +401,10 @@ class StripeWebhookController {
   }
 
   /**
-   * Remove bookings whose course was frozen mid-payment, using the same
-   * archive + seat-release path as the cleanup cron. Payment is refunded by
-   * the caller before this runs.
+   * Remove pending bookings after a refund (frozen course, capacity, etc.).
+   * Payment is refunded by the caller before this runs.
    */
-  async removeBookingsForFrozenCourse(bookingIds) {
+  async archivePendingBookingsAfterRefund(bookingIds, { reason, cancelledVia, logLabel }) {
     const connection = await this.pool.getConnection();
     try {
       await connection.beginTransaction();
@@ -392,17 +418,19 @@ class StripeWebhookController {
         if (rows.length === 0) continue;
 
         await archiveAndDeleteBooking(connection, rows[0], {
-          reason: 'Course frozen by admin before payment completed; payment refunded',
-          cancelledVia: 'stripe-webhook-frozen-course',
+          reason,
+          cancelledVia,
           at,
         });
-        console.log(`[stripeWebhook] Removed booking ${bookingId} (course frozen); seat released`);
+        console.log(
+          `[stripeWebhook] Removed booking ${bookingId} (${logLabel}); seat released`
+        );
       }
 
       await connection.commit();
     } catch (error) {
       await connection.rollback();
-      console.error('[stripeWebhook] Failed to remove bookings for frozen course:', error);
+      console.error('[stripeWebhook] Failed to archive pending bookings after refund:', error);
     } finally {
       connection.release();
     }
