@@ -17,8 +17,8 @@
 // anywhere in this code base.
 const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { phpSerialize } = require('../utils/phpSerialize');
-const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+const { isCourseEventFrozen } = require('../utils/courseEventGroup');
+const { archiveAndDeleteBooking } = require('../utils/archiveBooking');
 const StripeWebhookController = require('../controllers/stripeWebhook');
 const { getCurrentMysqlDateTime } = require('../utils/dateFormat');
 
@@ -114,7 +114,7 @@ class BookingCleanupCron {
    * On any Stripe error we return 'defer' — the cron must NEVER delete a
    * booking just because Stripe is briefly unreachable.
    */
-  async _stripeSafetyCheck(booking) {
+  async _stripeSafetyCheck(booking, { frozen = false } = {}) {
     try {
       const search = await stripe.paymentIntents.search({
         query: `metadata['booking_id']:'${booking.id}'`,
@@ -135,13 +135,17 @@ class BookingCleanupCron {
 
       // Card 3DS (and similar) stays deferred. Pay by Bank / unknown
       // requires_action is cancelled below so the QR cannot outlive the seat.
-      for (const pi of intents) {
-        if (pi.status !== 'requires_action' && pi.status !== 'requires_confirmation') {
-          continue;
-        }
-        const methodType = await resolveChosenPaymentMethodType(pi);
-        if (methodType && !isPayByBankIntent(pi, methodType)) {
-          return { action: 'defer', paymentIntent: pi };
+      // A frozen course cancels everything: the course is not running, so no
+      // payment method should be left able to complete.
+      if (!frozen) {
+        for (const pi of intents) {
+          if (pi.status !== 'requires_action' && pi.status !== 'requires_confirmation') {
+            continue;
+          }
+          const methodType = await resolveChosenPaymentMethodType(pi);
+          if (methodType && !isPayByBankIntent(pi, methodType)) {
+            return { action: 'defer', paymentIntent: pi };
+          }
         }
       }
 
@@ -208,14 +212,41 @@ class BookingCleanupCron {
         ORDER BY b.id ASC
       `, [cleanupAt, timeoutMinutes]);
 
-      if (unpaidBookings.length === 0) {
+      // Frozen courses are swept regardless of age: the admin has stopped the
+      // course running, so an in-flight Pay by Bank QR must die now rather
+      // than at the end of its normal hold.
+      const [frozenBookings] = await connection.query(`
+        SELECT DISTINCT b.*
+        FROM bookings b
+        LEFT JOIN freeze f ON f.course_event_id = b.course_event_id
+        LEFT JOIN course_event_dates ced
+          ON ced.course_event_id = b.course_event_id AND ced.freeze = 1
+        WHERE b.status = 0
+          AND b.admin_payment_received = 0
+          AND (f.id IS NOT NULL OR ced.id IS NOT NULL)
+        ORDER BY b.id ASC
+      `);
+
+      const candidates = [...unpaidBookings];
+      const seenIds = new Set(unpaidBookings.map((b) => Number(b.id)));
+      for (const booking of frozenBookings) {
+        if (!seenIds.has(Number(booking.id))) {
+          seenIds.add(Number(booking.id));
+          candidates.push(booking);
+        }
+      }
+
+      if (candidates.length === 0) {
         console.log('[CLEANUP CRON] No unpaid bookings to clean up');
         return;
       }
 
-      console.log(`[CLEANUP CRON] Found ${unpaidBookings.length} unpaid bookings to clean up`);
+      console.log(
+        `[CLEANUP CRON] Found ${candidates.length} unpaid bookings to clean up ` +
+        `(${frozenBookings.length} on frozen courses)`
+      );
 
-      for (const candidate of unpaidBookings) {
+      for (const candidate of candidates) {
         // Freshness re-read. A previous iteration's webhook replay may have
         // already flipped this row (multi-attendee submissions share one
         // PaymentIntent, so the primary's replay updates every sibling).
@@ -229,12 +260,22 @@ class BookingCleanupCron {
           continue;
         }
         const booking = freshRows[0];
+        const frozen = booking.course_event_id
+          ? await isCourseEventFrozen(this.pool, booking.course_event_id)
+          : false;
+
+        if (frozen) {
+          console.log(
+            `[CLEANUP CRON] Booking ${booking.id} is on frozen course event ` +
+            `${booking.course_event_id}; cancelling any open payment and releasing the seat`
+          );
+        }
 
         // Stripe safety net — only for the regular booking flow.
         // gift_voucher rows use different metadata (`bid`, `type`) and are
         // intentionally left on the legacy delete path for this minimal fix.
         if (booking.booking_made_by !== 'gift_voucher') {
-          const check = await this._stripeSafetyCheck(booking);
+          const check = await this._stripeSafetyCheck(booking, { frozen });
 
           if (check.action === 'recover') {
             console.log(
@@ -284,81 +325,14 @@ class BookingCleanupCron {
             continue;
           }
 
-          if (booking.course_event_id && booking.spaces) {
-            await applyGroupSpaceDelta(connection, booking.course_event_id, {
-              lockDelta: -booking.spaces,
-            });
-          }
-
-          const [primaryAttendeeRows] = await connection.query(
-            `SELECT *
-             FROM booking_attendees
-             WHERE booking_id = ?
-             ORDER BY \`primary\` DESC, id ASC
-             LIMIT 1`,
-            [booking.id]
-          );
-          const primaryAttendee = primaryAttendeeRows[0] || {};
-          primaryAttendee.full_name = `${(primaryAttendee.first_name || '').trim()} ${(primaryAttendee.sur_name || '').trim()}`.trim();
-
-          const [courseRows] = await connection.query(
-            `SELECT course_abb FROM courses WHERE id = ? LIMIT 1`,
-            [booking.course_id]
-          );
-          const [eventLocationRows] = await connection.query(
-            `SELECT ce.location_id, l.location_name
-             FROM course_events ce
-             LEFT JOIN locations l ON ce.location_id = l.id
-             WHERE ce.id = ?
-             LIMIT 1`,
-            [booking.course_event_id]
-          );
-          const [firstDateRows] = await connection.query(
-            `SELECT event_date
-             FROM course_event_dates
-             WHERE course_event_id = ?
-               AND event_date > '1900-01-01'
-               AND event_date NOT IN ('1111-11-11', '0000-00-00')
-             ORDER BY event_date ASC
-             LIMIT 1`,
-            [booking.course_event_id]
-          );
-
-          const courseInfo = {};
-          if (courseRows[0]) courseInfo.course_abb = courseRows[0].course_abb;
-          if (eventLocationRows[0]) courseInfo.location = eventLocationRows[0].location_name;
-          if (firstDateRows[0]) courseInfo.event_date = firstDateRows[0].event_date;
-
-          await connection.query(
-            `UPDATE booking_payments SET isDelete = 1 WHERE booking_id = ?`,
-            [booking.id]
-          );
-
-          const bookingRefValue = primaryAttendee.booking_ref || `1SRC${booking.id}`;
-          const snapshot = phpSerialize({
-            booking,
-            attendee: primaryAttendee,
-            course_info: courseInfo,
-            cancelled_via: 'node-cleanup-cron',
-            timeout_minutes: Number(timeoutMinutes),
+          await archiveAndDeleteBooking(connection, booking, {
+            reason: frozen
+              ? 'Auto-cleanup: course frozen by admin before payment completed'
+              : `Auto-cleanup: unpaid timeout after ${timeoutMinutes} minutes`,
+            cancelledVia: 'node-cleanup-cron',
+            at: cleanupAt,
+            timeoutMinutes,
           });
-
-          await connection.query(
-            `INSERT INTO deleted_bookings (booking_id, booking_ref, booking_data)
-             VALUES (?, ?, ?)`,
-            [booking.id, bookingRefValue, snapshot]
-          );
-
-          await connection.query(
-            `INSERT INTO booking_update_history
-               (booking_id, updated_by_admin_id, type, status, created, modified)
-             VALUES (?, 0, 'deleted', ?, ?, ?)`,
-            [booking.id, `Auto-cleanup: unpaid timeout after ${timeoutMinutes} minutes`, cleanupAt, cleanupAt]
-          );
-
-          await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [booking.id]);
-          await connection.query(`DELETE FROM booking_attendees_dropdown WHERE booking_id = ?`, [booking.id]);
-          await connection.query(`DELETE FROM bookings WHERE id = ?`, [booking.id]);
 
           await connection.commit();
           console.log(`[CLEANUP CRON] Archived + deleted booking ID: ${booking.id}`);

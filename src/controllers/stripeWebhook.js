@@ -4,8 +4,10 @@ const { sendGiftVoucherEmail } = require('../utils/emailService');
 const { formatDateToDDMMYYYY, getCurrentMysqlDateTime } = require('../utils/dateFormat');
 const {
   applyGroupSpaceDelta,
+  isCourseEventFrozen,
   lockSiblingEventsForUpdate,
 } = require('../utils/courseEventGroup');
+const { archiveAndDeleteBooking } = require('../utils/archiveBooking');
 
 class StripeWebhookController {
   constructor(pool) {
@@ -157,6 +159,20 @@ class StripeWebhookController {
         return;
       }
 
+      // Admin froze the course while the customer was authorising (Pay by Bank
+      // can take minutes). The course is not running, so the booking must not
+      // be confirmed: refund and remove it, same as an expired hold.
+      if (await isCourseEventFrozen(connection, courseEventId)) {
+        await connection.rollback();
+        console.error(
+          `[stripeWebhook] Payment ${session.id} succeeded but course event ${courseEventId} ` +
+          `is frozen; refunding and removing bookings ${allBookingIds.join(', ')}`
+        );
+        await this.refundOrphanedPaymentIntent(session);
+        await this.removeBookingsForFrozenCourse(allBookingIds);
+        return;
+      }
+
       const bookingAmounts = allBookingIds.map((bid) => {
         const b = bookingRows.find((row) => Number(row.id) === Number(bid));
         if (!b) return paidAmount / allBookingIds.length;
@@ -274,6 +290,41 @@ class StripeWebhookController {
         `[stripeWebhook] FAILED to refund orphaned PaymentIntent ${piId}:`,
         error.message
       );
+    }
+  }
+
+  /**
+   * Remove bookings whose course was frozen mid-payment, using the same
+   * archive + seat-release path as the cleanup cron. Payment is refunded by
+   * the caller before this runs.
+   */
+  async removeBookingsForFrozenCourse(bookingIds) {
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const at = getCurrentMysqlDateTime();
+
+      for (const bookingId of bookingIds) {
+        const [rows] = await connection.query(
+          `SELECT * FROM bookings WHERE id = ? AND status = 0`,
+          [bookingId]
+        );
+        if (rows.length === 0) continue;
+
+        await archiveAndDeleteBooking(connection, rows[0], {
+          reason: 'Course frozen by admin before payment completed; payment refunded',
+          cancelledVia: 'stripe-webhook-frozen-course',
+          at,
+        });
+        console.log(`[stripeWebhook] Removed booking ${bookingId} (course frozen); seat released`);
+      }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      console.error('[stripeWebhook] Failed to remove bookings for frozen course:', error);
+    } finally {
+      connection.release();
     }
   }
 

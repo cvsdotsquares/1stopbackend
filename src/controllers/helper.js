@@ -111,21 +111,8 @@ class HelperController {
         ORDER BY id ASC
       `, [groupName]);
 
-      // Build nested structure
-      const buildMenuTree = (items, parentId = null) => {
-        return items
-          .filter(item => (item.front_menu_show === 0 && (item.parent_id === parentId || (parentId === null && (item.parent_id === null || item.parent_id === 0)))))
-          .map(item => ({
-            id: item.id,
-            page_title: item.page_title,
-            page_slug: item.page_slug,
-            page_link_id: item.page_link_id,
-            sort_order: item.sort_order,
-            children: buildMenuTree(items, item.id)
-          }));
-      };
-
-      const menuStructure = buildMenuTree(menuItems);
+      const { buildFrontMenuTree } = require('../utils/frontMenuTree');
+      const menuStructure = buildFrontMenuTree(menuItems);
       const processedData = await replaceTokensInObject(this.pool, {
         group_name: groupName,
         menu_items: menuStructure
