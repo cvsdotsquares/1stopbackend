@@ -585,6 +585,38 @@ async function getGroupAvailability(db, courseEventId) {
 }
 
 /**
+ * Whether converting a pending hold into `bookings_done` would exceed cohort
+ * capacity. Pay by Bank (and 3DS) can finish minutes after checkout; capacity
+ * must be re-checked here, not only in bookingFlow.js.
+ *
+ * Call after `lockSiblingEventsForUpdate` inside the webhook transaction.
+ *
+ * @returns {Promise<{ allowed: boolean, groupAvail?: object, reason?: string }>}
+ */
+async function canConfirmSpacesOnCohort(db, courseEventId, spacesToConfirm) {
+  const spaces = Number(spacesToConfirm) || 0;
+  if (spaces <= 0) {
+    return { allowed: false, reason: 'invalid_spaces' };
+  }
+
+  const groupAvail = await getGroupAvailability(db, courseEventId);
+  if (!groupAvail) {
+    return { allowed: false, reason: 'no_event' };
+  }
+
+  const { booking_limit, bookings_done } = groupAvail;
+  if (bookings_done + spaces > booking_limit) {
+    return {
+      allowed: false,
+      reason: 'capacity_exceeded',
+      groupAvail,
+    };
+  }
+
+  return { allowed: true, groupAvail };
+}
+
+/**
  * Row-lock all siblings in a linked group (call inside a transaction before reads/updates).
  * @param {import('mysql2/promise').PoolConnection} connection
  * @param {number} courseEventId
@@ -756,6 +788,7 @@ module.exports = {
   isGroupFirstDayPassed,
   getNearestDateSiblingEventId,
   getGroupAvailability,
+  canConfirmSpacesOnCohort,
   isCourseEventFrozen,
   lockSiblingEventsForUpdate,
   applyGroupSpaceDelta,
