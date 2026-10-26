@@ -609,6 +609,34 @@ async function lockSiblingEventsForUpdate(connection, courseEventId) {
 }
 
 /**
+ * Admin freeze, matching the read-side checks used by availability: a row in
+ * `freeze`, or `course_event_dates.freeze = 1`. Checked across the cohort
+ * because linked days are one course — freezing any day stops all of them.
+ *
+ * Freeze rows are written by the PHP admin, never by this backend.
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
+ * @param {number} courseEventId
+ * @returns {Promise<boolean>}
+ */
+async function isCourseEventFrozen(db, courseEventId) {
+  const cohortIds = await getCohortMemberIds(db, courseEventId);
+  const ids = cohortIds.length ? cohortIds : [Number(courseEventId)];
+  const placeholders = ids.map(() => '?').join(',');
+
+  const [rows] = await db.query(
+    `SELECT
+       EXISTS (SELECT 1 FROM freeze WHERE course_event_id IN (${placeholders})) AS freeze_rows,
+       EXISTS (
+         SELECT 1 FROM course_event_dates
+         WHERE course_event_id IN (${placeholders}) AND freeze = 1
+       ) AS frozen_dates`,
+    [...ids, ...ids]
+  );
+
+  return Boolean(Number(rows[0]?.freeze_rows) || Number(rows[0]?.frozen_dates));
+}
+
+/**
  * Apply lock / unlock / bookings_done delta to every sibling in the group.
  * @param {import('mysql2/promise').PoolConnection} connection
  * @param {number} courseEventId
@@ -728,6 +756,7 @@ module.exports = {
   isGroupFirstDayPassed,
   getNearestDateSiblingEventId,
   getGroupAvailability,
+  isCourseEventFrozen,
   lockSiblingEventsForUpdate,
   applyGroupSpaceDelta,
   getEventPricingRow,
