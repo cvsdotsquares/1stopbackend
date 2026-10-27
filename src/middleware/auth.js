@@ -5,7 +5,14 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 /**
- * Middleware to verify JWT token and authenticate user
+ * Middleware to verify JWT token and authenticate user.
+ *
+ * Status code contract (read by the frontend response interceptor):
+ *   401 NO_TOKEN        -> no Authorization header / no Bearer token
+ *   401 TOKEN_EXPIRED   -> JWT was valid but its `exp` has passed
+ *   401 INVALID_TOKEN   -> JWT failed signature / decoding
+ *   403                 -> reserved for "authenticated but not allowed"
+ *                          (e.g. requireAdmin, inactive account, etc.)
  */
 const authenticateToken = (req, res, next) => {
   // Get token from header
@@ -15,6 +22,7 @@ const authenticateToken = (req, res, next) => {
   if (!token) {
     return res.status(401).json({
       success: false,
+      code: 'NO_TOKEN',
       message: 'Access token is required'
     });
   }
@@ -22,9 +30,11 @@ const authenticateToken = (req, res, next) => {
   // Verify token
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
-      return res.status(403).json({
+      const isExpired = err.name === 'TokenExpiredError';
+      return res.status(401).json({
         success: false,
-        message: 'Invalid or expired token'
+        code: isExpired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN',
+        message: isExpired ? 'Session expired, please log in again' : 'Invalid token'
       });
     }
 

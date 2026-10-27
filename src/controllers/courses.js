@@ -2,7 +2,7 @@
 /**
  * Course Controller - handles course-related operations
  */
-
+const { formatMySQLDateToDDMMYYYY } = require('../utils/dateFormat');
 class CourseController {
   constructor(pool) {
     this.pool = pool;

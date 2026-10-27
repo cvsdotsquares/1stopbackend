@@ -1,5 +1,6 @@
 // src/controllers/cms.js
 const { validationResult } = require('express-validator');
+const { replaceTokensInObject } = require('../utils/tokenReplacer');
 
 class CMSController {
   constructor(pool) {
@@ -44,7 +45,7 @@ class CMSController {
 
       // Get pages
       const [pages] = await this.pool.query(`
-        SELECT 
+        SELECT
           id,
           page_title,
           slug,
@@ -85,9 +86,11 @@ class CMSController {
       const total = countResult[0].total;
       const totalPages = Math.ceil(total / limit);
 
+      const processedPages = await replaceTokensInObject(this.pool, pages);
+
       res.json({
         success: true,
-        data: pages,
+        data: processedPages,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -109,18 +112,45 @@ class CMSController {
   }
 
   /**
-   * Get single page by ID or slug
+   * Get single page by ID or slug with complete content
    */
   async getPage(req, res) {
     try {
       const { identifier } = req.params;
-      
+
       // Check if identifier is numeric (ID) or string (slug)
       const isNumeric = /^\d+$/.test(identifier);
       const field = isNumeric ? 'id' : 'slug';
-      
+
       const [pages] = await this.pool.query(`
-        SELECT * FROM pages WHERE ${field} = ?
+        SELECT
+          id,
+          page_title,
+          slug,
+          page_content,
+          meta_title,
+          meta_keyword,
+          meta_desc,
+          is_parent,
+          parent_level,
+          link_title,
+          page_ex_rhs,
+          banner_type,
+          overlay_caption,
+          overlay_caption_text,
+          weight,
+          carousel_static_image,
+          carousel_static_caption,
+          featured_service,
+          featured_icon,
+          footer_link,
+          testimonial_display,
+          featured_display,
+          accreditation_display,
+          created,
+          updated
+        FROM pages
+        WHERE ${field} = ?
       `, [identifier]);
 
       if (pages.length === 0) {
@@ -130,9 +160,70 @@ class CMSController {
         });
       }
 
+      const page = pages[0];
+
+      // Get child pages if this is a parent page
+      let childPages = [];
+      if (page.is_parent === 1) {
+        const [children] = await this.pool.query(`
+          SELECT
+            id,
+            page_title,
+            slug,
+            link_title,
+            SUBSTRING(page_content, 1, 200) as content_preview,
+            featured_icon,
+            weight
+          FROM pages
+          WHERE parent_level = ?
+          ORDER BY weight ASC, page_title ASC
+        `, [page.id]);
+        childPages = children;
+      }
+
+      // Get parent page if this is a child page
+      let parentPage = null;
+      if (page.parent_level > 0) {
+        const [parent] = await this.pool.query(`
+          SELECT id, page_title, slug, link_title
+          FROM pages
+          WHERE id = ?
+        `, [page.parent_level]);
+        parentPage = parent[0] || null;
+      }
+
+      // Get breadcrumb trail
+      const breadcrumbs = [];
+      if (parentPage) {
+        breadcrumbs.push({
+          title: parentPage.link_title || parentPage.page_title,
+          slug: parentPage.slug,
+          url: `/${parentPage.slug}`
+        });
+      }
+      breadcrumbs.push({
+        title: page.link_title || page.page_title,
+        slug: page.slug,
+        url: `/${page.slug}`,
+        current: true
+      });
+
+      const processedData = await replaceTokensInObject(this.pool, {
+        ...page,
+        childPages,
+        parentPage,
+        breadcrumbs,
+        seo: {
+          title: page.meta_title || page.page_title,
+          description: page.meta_desc,
+          keywords: page.meta_keyword,
+          canonical: `/${page.slug}`
+        }
+      });
+
       res.json({
         success: true,
-        data: pages[0]
+        data: processedData
       });
 
     } catch (error) {
@@ -140,6 +231,275 @@ class CMSController {
       res.status(500).json({
         success: false,
         message: 'Failed to fetch page',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Get homepage data with featured content
+   */
+  async getHomepage(req, res) {
+    try {
+      // Get homepage content
+      const homepageQuery = `
+        SELECT
+          id,
+          page_title,
+          page_content,
+          slug,
+          meta_title,
+          meta_description,
+          meta_keywords,
+          banner_image,
+          banner_title,
+          banner_subtitle,
+          created_at,
+          updated_at
+        FROM pages
+        WHERE slug IN ('home', 'homepage', '') OR id = 1
+        ORDER BY
+          CASE
+            WHEN slug = 'home' THEN 1
+            WHEN slug = 'homepage' THEN 2
+            WHEN slug = '' THEN 3
+            ELSE 4
+          END
+        LIMIT 1
+      `;
+
+      const [homepageRows] = await this.pool.execute(homepageQuery);
+
+      // If no homepage found, create default content
+      let homepage = homepageRows[0];
+      if (!homepage) {
+        homepage = {
+          id: 1,
+          page_title: '1Stop Instruction - Professional Motorcycle Training',
+          meta_title: '1Stop Instruction - CBT, DAS & Motorcycle Training London',
+          meta_description: 'Professional motorcycle training in London. CBT courses, DAS training, Module 1 & 2 tests. Experienced DVSA approved instructors.',
+          meta_keywords: 'motorcycle training London, CBT course, DAS training, Module 1, Module 2, DVSA approved',
+          banner_title: 'Professional Motorcycle Training',
+          banner_subtitle: 'Expert instruction, modern facilities, high pass rates',
+          slug: 'home'
+        };
+      }
+
+      // Get featured courses (with fallback if table doesn't exist)
+      let featuredCourses = [
+        {
+          id: 1,
+          course_name: 'CBT Training',
+          course_description: 'Compulsory Basic Training - Your first step to motorcycle riding',
+          price: 120,
+          duration: '6-8 hours',
+          features: ['Theory session', 'Practical training', 'On-road riding', 'CBT certificate']
+        },
+        {
+          id: 2,
+          course_name: 'DAS Course',
+          course_description: 'Direct Access Scheme - Full motorcycle license training',
+          price: 899,
+          duration: '5 days',
+          features: ['Theory test training', 'Module 1 & 2 preparation', 'Test fees included']
+        },
+        {
+          id: 3,
+          course_name: 'Module 1 Training',
+          course_description: 'Off-road maneuvers and vehicle safety checks',
+          price: 299,
+          duration: '2 days',
+          features: ['Off-road maneuvers', 'Test preparation', 'Practice sessions']
+        }
+      ];
+
+      // Get testimonials (with fallback)
+      let testimonials = [
+        {
+          id: 1,
+          student_name: 'Sarah Johnson',
+          course_name: 'CBT Training',
+          rating: 5,
+          comment: 'Excellent training! The instructors were patient and professional.',
+          date_created: new Date()
+        },
+        {
+          id: 2,
+          student_name: 'Mike Chen',
+          course_name: 'DAS Course',
+          rating: 5,
+          comment: 'Passed both tests first time thanks to the excellent preparation.',
+          date_created: new Date()
+        },
+        {
+          id: 3,
+          student_name: 'Emma Wilson',
+          course_name: 'Module 1',
+          rating: 5,
+          comment: 'Great instructors and facilities. Felt confident on test day.',
+          date_created: new Date()
+        }
+      ];
+
+      // Get locations (with fallback)
+      let locations = [
+        {
+          id: 1,
+          location_name: 'East London Training Center',
+          address: '123 Training Road, Stratford, London E15 4AA',
+          phone: '020 8123 4567',
+          email: 'eastlondon@1stopinstruction.co.uk'
+        },
+        {
+          id: 2,
+          location_name: 'North London Training Center',
+          address: '456 Rider Street, Tottenham, London N17 8BB',
+          phone: '020 8765 4321',
+          email: 'northlondon@1stopinstruction.co.uk'
+        },
+        {
+          id: 3,
+          location_name: 'Ilford Training Center',
+          address: '789 Motorcycle Way, Ilford, Essex IG1 2CC',
+          phone: '020 8111 2233',
+          email: 'ilford@1stopinstruction.co.uk'
+        }
+      ];
+
+      res.json({
+        success: true,
+        data: {
+          homepage,
+          featuredCourses,
+          testimonials,
+          locations,
+          stats: {
+            studentsTrained: 15000,
+            passRate: 95,
+            experienceYears: 15,
+            instructors: 50
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('Homepage fetch error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch homepage data',
+        error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+      });
+    }
+  }
+
+  /**
+   * Get page content by slug specifically (SEO-friendly endpoint)
+   */
+  async getPageBySlug(req, res) {
+    try {
+      const { slug } = req.params;
+
+      const [pages] = await this.pool.query(`
+        SELECT
+          id,
+          page_title,
+          slug,
+          page_content,
+          meta_title,
+          meta_keyword,
+          meta_desc,
+          is_parent,
+          parent_level,
+          link_title,
+          banner_type,
+          overlay_caption,
+          overlay_caption_text,
+          carousel_static_image,
+          carousel_static_caption,
+          featured_service,
+          featured_icon,
+          created,
+          updated
+        FROM pages
+        WHERE slug = ?
+      `, [slug]);
+
+      if (pages.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: `Page with slug '${slug}' not found`
+        });
+      }
+
+      const page = pages[0];
+
+      // Get related pages (same parent or siblings)
+      let relatedPages = [];
+      if (page.parent_level > 0) {
+        const [related] = await this.pool.query(`
+          SELECT
+            id,
+            page_title,
+            slug,
+            link_title,
+            SUBSTRING(page_content, 1, 150) as content_preview,
+            featured_icon
+          FROM pages
+          WHERE parent_level = ? AND id != ?
+          ORDER BY weight ASC
+          LIMIT 5
+        `, [page.parent_level, page.id]);
+        relatedPages = related;
+      }
+
+      // Get navigation context (previous/next pages in the same category)
+      let navigation = { prev: null, next: null };
+      if (page.parent_level > 0) {
+        // Get previous page
+        const [prevPage] = await this.pool.query(`
+          SELECT id, page_title, slug, link_title
+          FROM pages
+          WHERE parent_level = ? AND weight < ?
+          ORDER BY weight DESC
+          LIMIT 1
+        `, [page.parent_level, page.weight]);
+
+        // Get next page
+        const [nextPage] = await this.pool.query(`
+          SELECT id, page_title, slug, link_title
+          FROM pages
+          WHERE parent_level = ? AND weight > ?
+          ORDER BY weight ASC
+          LIMIT 1
+        `, [page.parent_level, page.weight]);
+
+        navigation.prev = prevPage[0] || null;
+        navigation.next = nextPage[0] || null;
+      }
+
+      res.json({
+        success: true,
+        data: {
+          ...page,
+          relatedPages,
+          navigation,
+          meta: {
+            title: page.meta_title || page.page_title,
+            description: page.meta_desc || page.page_content.substring(0, 160),
+            keywords: page.meta_keyword,
+            canonical: `/${page.slug}`,
+            ogTitle: page.meta_title || page.page_title,
+            ogDescription: page.meta_desc || page.page_content.substring(0, 200),
+            ogImage: page.carousel_static_image || page.featured_icon
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching page by slug:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch page content',
         error: error.message
       });
     }
@@ -248,7 +608,7 @@ class CMSController {
       values.push(id);
 
       const [result] = await this.pool.query(`
-        UPDATE pages 
+        UPDATE pages
         SET ${setClause}, updated = NOW()
         WHERE id = ?
       `, values);
@@ -308,6 +668,74 @@ class CMSController {
     }
   }
 
+  /**
+   * Get accreditations
+   */
+  async getAccreditations(req, res) {
+    try {
+
+      const [accreditations] = await this.pool.query(`
+        SELECT id, image, weight, created, modified
+        FROM accreditations
+        ${whereClause}
+        ORDER BY weight
+      `, [...queryParams, parseInt(limit), offset]);
+
+      res.json({
+        success: true,
+        data: accreditations,
+      });
+
+    } catch (error) {
+      console.error('Error fetching accreditations:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch accreditations',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Create testimonial
+   */
+  async createTestimonial(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation errors',
+          errors: errors.array()
+        });
+      }
+
+      const { review, review_name, status = 0 } = req.body;
+
+      const [result] = await this.pool.query(`
+        INSERT INTO testimonials (review, review_name, status, created)
+        VALUES (?, ?, ?, NOW())
+      `, [review, review_name, status]);
+
+      res.status(201).json({
+        success: true,
+        message: 'Testimonial created successfully',
+        data: { id: result.insertId }
+      });
+
+    } catch (error) {
+      console.error('Error creating testimonial:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create testimonial',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   *
+   */
   /**
    * Get testimonials with pagination
    */
@@ -369,43 +797,6 @@ class CMSController {
   }
 
   /**
-   * Create testimonial
-   */
-  async createTestimonial(req, res) {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation errors',
-          errors: errors.array()
-        });
-      }
-
-      const { review, review_name, status = 0 } = req.body;
-
-      const [result] = await this.pool.query(`
-        INSERT INTO testimonials (review, review_name, status, created)
-        VALUES (?, ?, ?, NOW())
-      `, [review, review_name, status]);
-
-      res.status(201).json({
-        success: true,
-        message: 'Testimonial created successfully',
-        data: { id: result.insertId }
-      });
-
-    } catch (error) {
-      console.error('Error creating testimonial:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to create testimonial',
-        error: error.message
-      });
-    }
-  }
-
-  /**
    * Get FAQs with categories
    */
   async getFAQs(req, res) {
@@ -420,7 +811,7 @@ class CMSController {
       }
 
       const [faqs] = await this.pool.query(`
-        SELECT 
+        SELECT
           f.id,
           f.faq_title,
           f.content,
@@ -491,7 +882,7 @@ class CMSController {
   async getSettings(req, res) {
     try {
       const [settings] = await this.pool.query(`
-        SELECT 
+        SELECT
           site_contact,
           site_email,
           facebook_link,
@@ -535,7 +926,7 @@ class CMSController {
   async getPageHierarchy(req, res) {
     try {
       const [pages] = await this.pool.query(`
-        SELECT 
+        SELECT
           id,
           page_title,
           slug,

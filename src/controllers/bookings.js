@@ -1,9 +1,117 @@
 // src/controllers/bookings.js
 const { validationResult } = require('express-validator');
-
+const { formatMySQLDateToDDMMYYYY, formatDateToDDMMYYYY } = require('../utils/dateFormat');
+const { sendBookingConfirmation } = require('../utils/emailService');
+const { phpSerialize } = require('../utils/phpSerialize');
+const BookingStatusManager = require('../middleware/bookingStatusManager');
 class BookingController {
   constructor(pool) {
     this.pool = pool;
+  }
+
+  async getBookingConfirmationPayload(connection, bookingId, userId, userEmail) {
+    const [bookings] = await connection.query(`
+      SELECT
+        b.id,
+        b.course_id,
+        b.course_event_id,
+        b.total_amount,
+        b.payment_due,
+        b.vat,
+        b.total_fees,
+        b.refundable,
+        b.type_of_book,
+        (
+          SELECT ba2.booking_ref
+          FROM booking_attendees ba2
+          WHERE ba2.booking_id = b.id
+          ORDER BY ba2.primary DESC, ba2.id ASC
+          LIMIT 1
+        ) AS booking_ref
+      FROM bookings b
+      WHERE b.id = ?
+        AND (
+          b.user_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM booking_attendees ba
+            WHERE ba.booking_id = b.id AND ba.email = ?
+          )
+        )
+      LIMIT 1
+    `, [bookingId, userId, userEmail]);
+
+    if (bookings.length === 0) {
+      return null;
+    }
+
+    const booking = bookings[0];
+
+    const [attendees] = await connection.query(`
+      SELECT first_name, sur_name, email, contact1, contact2, contact3, vehicle_type
+      FROM booking_attendees
+      WHERE booking_id = ?
+      ORDER BY \`primary\` DESC, id ASC
+    `, [bookingId]);
+
+    const [courseData] = await connection.query(`
+      SELECT email_content, course_name
+      FROM courses
+      WHERE id = ?
+      LIMIT 1
+    `, [booking.course_id]);
+
+    const [locationData] = await connection.query(`
+      SELECT location_name, address1, address2, address3, address4,
+             postcode, direction_map, direction_content
+      FROM locations
+      WHERE id = (SELECT location_id FROM course_events WHERE id = ?)
+      LIMIT 1
+    `, [booking.course_event_id]);
+
+    const [eventDates] = await connection.query(`
+      SELECT event_date, event_start_time, event_end_time
+      FROM course_event_dates
+      WHERE course_event_id = ?
+      ORDER BY event_date ASC, event_start_time ASC
+    `, [booking.course_event_id]);
+
+    const [franchiseData] = await connection.query(`
+      SELECT f.email_header, f.email_footer, f.email_logo, f.website,
+             f.telephone, f.freephone, f.franchise_email
+      FROM franchise f
+      JOIN course_events ce ON ce.franchise_id = f.id
+      WHERE ce.id = ?
+      LIMIT 1
+    `, [booking.course_event_id]);
+
+    const [settingsData] = await connection.query(`
+      SELECT booking_bcc
+      FROM settings
+      LIMIT 1
+    `);
+
+    const computedBookingRef = booking.booking_ref || `1SRC${booking.id}`;
+
+    return {
+      course_name: courseData[0]?.course_name || 'Course',
+      booking_ref: computedBookingRef,
+      booking_type: booking.type_of_book || 'o',
+      refundable: Number(booking.refundable || 0),
+      attendees,
+      location: locationData[0] || {},
+      event_dates: eventDates,
+      booking: {
+        total_amount: booking.total_amount,
+        payment_due: Math.max(0, Number(booking.payment_due || 0)),
+        vat: booking.vat,
+        total_fees: booking.total_fees
+      },
+      course_email_content: courseData[0]?.email_content || '',
+      franchise: franchiseData[0] || {},
+      bcc: settingsData[0]?.booking_bcc || process.env.BOOKING_BCC || '',
+      ip: 'dashboard'
+    };
   }
 
   /**
@@ -25,7 +133,6 @@ class BookingController {
         course_id,
         course_event_id,
         spaces = 1,
-        customer_notes = '',
         emergency_contact_name = '',
         emergency_contact_phone = '',
         special_requirements = ''
@@ -53,7 +160,7 @@ class BookingController {
 
         // 2. Verify event exists and has availability
         const [eventCheck] = await connection.query(`
-          SELECT 
+          SELECT
             ce.id,
             ce.event_date,
             ce.booking_limit,
@@ -92,7 +199,7 @@ class BookingController {
 
         // 5. Calculate total amount
         const base_amount = course.dsa_fees * spaces;
-        const booking_fee = Math.round(base_amount * 0.025); // 2.5% booking fee
+        const booking_fee = Math.round(((base_amount * 0.0125) + 0.2) * 100) / 100; // 1.25% + £0.20
         const total_amount = base_amount + booking_fee;
 
         // 6. Create booking
@@ -102,11 +209,11 @@ class BookingController {
             course_id,
             course_event_id,
             spaces,
-            base_amount,
-            booking_fee,
+            payment_due,
             total_amount,
+            admin_payment_received,
+            total_fees,
             status,
-            customer_notes,
             emergency_contact_name,
             emergency_contact_phone,
             special_requirements,
@@ -121,34 +228,28 @@ class BookingController {
           base_amount,
           booking_fee,
           total_amount,
-          customer_notes,
           emergency_contact_name,
           emergency_contact_phone,
           special_requirements
         ]);
 
         const booking_id = bookingResult.insertId;
+        console.log(`[BOOKING STATUS] INSERT bookings status=0 (PENDING_PAYMENT) | source=controllers/bookings.js::createBooking | booking_id=${booking_id} | user_id=${user_id} | course_event_id=${course_event_id}`);
 
-        // 7. Update event locks (temporary hold)
-        await connection.query(`
-          UPDATE course_events 
-          SET current_locks = current_locks + ?, modified = NOW()
-          WHERE id = ?
-        `, [spaces, course_event_id]);
+        // 7. Reserve spaces on all linked course_events (multi-day cohort)
+        const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+        await applyGroupSpaceDelta(connection, course_event_id, { lockDelta: spaces });
 
         // 8. Get complete booking data
         const [newBooking] = await connection.query(`
-          SELECT 
+          SELECT
             b.id,
             b.user_id,
             b.course_id,
             b.course_event_id,
             b.spaces,
-            b.base_amount,
-            b.booking_fee,
             b.total_amount,
             b.status,
-            b.customer_notes,
             b.emergency_contact_name,
             b.emergency_contact_phone,
             b.special_requirements,
@@ -159,12 +260,11 @@ class BookingController {
             ce.event_date,
             l.location_name,
             l.address as location_address,
-            CASE 
+            CASE
               WHEN b.status = 0 THEN 'Pending Payment'
               WHEN b.status = 1 THEN 'Confirmed'
-              WHEN b.status = 2 THEN 'Completed'
-              WHEN b.status = 3 THEN 'Cancelled'
-              WHEN b.status = 4 THEN 'No Show'
+              WHEN b.status = 2 THEN 'Refunded'
+              WHEN b.status = 5 THEN 'Moved'
               ELSE 'Unknown'
             END as status_text
           FROM bookings b
@@ -200,8 +300,180 @@ class BookingController {
   }
 
   /**
-   * Get user's bookings
+   * Get course availability for booking calendar
    */
+  async getCourseAvailability(req, res) {
+    try {
+      const { course_id, location_id, start_date, weeks = 6 } = req.query;
+
+      if (!course_id || !location_id) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Course ID and Location ID are required',
+            details: {
+              course_id: !course_id ? ['Course ID is required'] : [],
+              location_id: !location_id ? ['Location ID is required'] : []
+            }
+          }
+        });
+      }
+
+      const startDate = start_date || new Date().toISOString().split('T')[0];
+      const endDate = new Date(startDate);
+      endDate.setDate(endDate.getDate() + (weeks * 7));
+
+      // Get course events with availability
+      const [availability] = await this.pool.query(`
+        SELECT
+          ced.event_date as date,
+          ced.event_start_time,
+          ced.event_end_time,
+          ced.freeze,
+          ce.id as course_event_id,
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          (ce.booking_limit - ce.bookings_done - ce.current_locks) as available_spaces
+        FROM course_events ce
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id
+        WHERE ce.course_id = ?
+          AND ce.location_id = ?
+          AND ce.status = '1'
+          AND ced.event_date >= ?
+          AND ced.event_date <= ?
+          AND ced.event_date != '1111-11-11'
+          AND ced.freeze != 1
+        ORDER BY ced.event_date ASC
+      `, [course_id, location_id, startDate, endDate.toISOString().split('T')[0]]);
+
+      const formattedAvailability = availability.map(item => ({
+        date: item.date,
+        available: item.available_spaces > 0,
+        available_spaces: item.available_spaces,
+        booking_limit: item.booking_limit,
+        bookings_done: item.bookings_done,
+        current_locks: item.current_locks,
+        event_start_time: item.event_start_time,
+        event_end_time: item.event_end_time,
+        course_event_id: item.course_event_id,
+        freeze: item.freeze
+      }));
+
+      res.json({
+        success: true,
+        data: {
+          course_id: parseInt(course_id),
+          location_id: parseInt(location_id),
+          availability: formattedAvailability
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching course availability:', error);
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'SERVER_ERROR',
+          message: 'Failed to fetch course availability',
+          details: error.message
+        }
+      });
+    }
+  }
+
+  /**
+   * Create booking lock (temporary hold)
+   */
+  async createBookingLock(req, res) {
+    try {
+      const { course_event_id, spaces_required = 1, user_session } = req.body;
+
+      if (!course_event_id) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Course event ID is required'
+          }
+        });
+      }
+
+      // Check if event has availability
+      const [eventCheck] = await this.pool.query(`
+        SELECT
+          ce.booking_limit,
+          ce.bookings_done,
+          ce.current_locks,
+          (ce.booking_limit - ce.bookings_done - ce.current_locks) as available_spaces
+        FROM course_events ce
+        WHERE ce.id = ? AND ce.status = '1'
+      `, [course_event_id]);
+
+      if (eventCheck.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Course event not found'
+          }
+        });
+      }
+
+      const event = eventCheck[0];
+      if (event.available_spaces < spaces_required) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_SPACES',
+            message: `Only ${event.available_spaces} spaces available`
+          }
+        });
+      }
+
+      // Create lock (expires in 15 minutes)
+      const expiresAt = new Date();
+      expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+
+      const [lockResult] = await this.pool.query(`
+        INSERT INTO lock_bookings (
+          event_id, space_required, user_id, ip_address,
+          created, modified
+        ) VALUES (?, ?, ?, ?, NOW(), NOW())
+      `, [
+        course_event_id,
+        spaces_required,
+        req.user?.id || 0,
+        req.clientIp || req.ip
+      ]);
+
+      // Update current locks
+      await this.pool.query(`
+        UPDATE course_events
+        SET current_locks = current_locks + ?
+        WHERE id = ?
+      `, [spaces_required, course_event_id]);
+
+      res.json({
+        success: true,
+        data: {
+          lock_id: lockResult.insertId,
+          expires_at: expiresAt.toISOString()
+        }
+      });
+
+    } catch (error) {
+      console.error('Error creating booking lock:', error);
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'SERVER_ERROR',
+          message: 'Failed to create booking lock'
+        }
+      });
+    }
+  }
   async getUserBookings(req, res) {
     try {
       const user_id = req.user.id;
@@ -214,7 +486,7 @@ class BookingController {
       } = req.query;
 
       const offset = (page - 1) * limit;
-      
+
       // Build query conditions
       let whereClause = 'WHERE b.user_id = ?';
       let queryParams = [user_id];
@@ -231,16 +503,13 @@ class BookingController {
 
       // Get bookings with pagination
       const [bookings] = await this.pool.query(`
-        SELECT 
+        SELECT DISTINCT
           b.id,
           b.course_id,
           b.course_event_id,
           b.spaces,
-          b.base_amount,
-          b.booking_fee,
           b.total_amount,
           b.status,
-          b.customer_notes,
           b.emergency_contact_name,
           b.emergency_contact_phone,
           b.special_requirements,
@@ -255,16 +524,14 @@ class BookingController {
           l.location_name,
           l.address as location_address,
           l.post_code,
-          l.phone as location_phone,
-          CASE 
+          CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
-            WHEN b.status = 2 THEN 'Completed'
-            WHEN b.status = 3 THEN 'Cancelled'
-            WHEN b.status = 4 THEN 'No Show'
+            WHEN b.status = 2 THEN 'Refunded'
+            WHEN b.status = 5 THEN 'Moved'
             ELSE 'Unknown'
           END as status_text,
-          CASE 
+          CASE
             WHEN ce.event_date > CURDATE() THEN 'upcoming'
             WHEN ce.event_date = CURDATE() THEN 'today'
             ELSE 'past'
@@ -273,24 +540,34 @@ class BookingController {
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
         JOIN locations l ON ce.location_id = l.id
-        ${whereClause}
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        ${whereClause} AND (b.user_id = ? OR ba.email = ?)
         ORDER BY ${sortField === 'event_date' ? 'ce.event_date' : 'b.' + sortField} ${sortOrder}
         LIMIT ? OFFSET ?
-      `, [...queryParams, parseInt(limit), offset]);
+      `, [...queryParams, user_id, req.user.email, parseInt(limit), offset]);
 
       // Get total count for pagination
       const [countResult] = await this.pool.query(`
-        SELECT COUNT(*) as total
+        SELECT COUNT(DISTINCT b.id) as total
         FROM bookings b
-        ${whereClause}
-      `, queryParams);
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        ${whereClause} AND (b.user_id = ? OR ba.email = ?)
+      `, [...queryParams, user_id, req.user.email]);
 
       const total = countResult[0].total;
       const totalPages = Math.ceil(total / limit);
 
+      // Format dates to DD/MM/YYYY
+      const formattedBookings = bookings.map(booking => ({
+        ...booking,
+        event_date: formatMySQLDateToDDMMYYYY(booking.event_date),
+        created: formatDateToDDMMYYYY(booking.created),
+        modified: formatDateToDDMMYYYY(booking.modified)
+      }));
+
       res.json({
         success: true,
-        data: bookings,
+        data: formattedBookings,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -318,60 +595,71 @@ class BookingController {
     try {
       const { id } = req.params;
       const user_id = req.user.id;
+      const user_email = req.user.email;
 
       const [bookings] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
           b.user_id,
+          b.booking_made_by_id,
           b.course_id,
           b.course_event_id,
           b.spaces,
-          b.base_amount,
-          b.booking_fee,
           b.total_amount,
+          b.payment_due,
+          b.admin_payment_received,
+          b.type_of_book,
           b.status,
-          b.customer_notes,
-          b.emergency_contact_name,
-          b.emergency_contact_phone,
-          b.special_requirements,
+          NULL as emergency_contact_name,
+          NULL as emergency_contact_phone,
+          NULL as special_requirements,
           b.created,
           b.modified,
           c.course_name,
           c.course_abb,
           c.description,
           c.dsa_fees,
-          ce.event_date,
-          ce.event_time,
+          MIN(ced.event_date) as event_date,
+          ced.event_start_time,
           l.id as location_id,
           l.location_name,
-          l.address as location_address,
-          l.post_code,
-          l.phone as location_phone,
-          l.email as location_email,
+          l.address1,
+          l.address2,
+          l.address3,
+          l.address4,
+          l.postcode,
           u.first_name,
           u.sur_name,
           u.email,
-          u.mobile,
-          CASE 
+          u.contact1,
+          bp.transation_id as transaction_id,
+          CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
-            WHEN b.status = 2 THEN 'Completed'
-            WHEN b.status = 3 THEN 'Cancelled'
-            WHEN b.status = 4 THEN 'No Show'
+            WHEN b.status = 2 THEN 'Refunded'
+            WHEN b.status = 5 THEN 'Moved'
             ELSE 'Unknown'
           END as status_text,
-          CASE 
-            WHEN ce.event_date > CURDATE() THEN 'upcoming'
-            WHEN ce.event_date = CURDATE() THEN 'today'
+          CASE
+            WHEN MIN(ced.event_date) > CURDATE() THEN 'upcoming'
+            WHEN MIN(ced.event_date) = CURDATE() THEN 'today'
             ELSE 'past'
           END as timing_status
         FROM bookings b
         JOIN courses c ON b.course_id = c.id
         JOIN course_events ce ON b.course_event_id = ce.id
+        JOIN course_event_dates ced ON ce.id = ced.course_event_id AND ced.event_date > '1900-01-01'
         JOIN locations l ON ce.location_id = l.id
         JOIN users u ON b.user_id = u.id
-        WHERE b.id = ? AND b.user_id = ?
-      `, [id, user_id]);
+        LEFT JOIN booking_payments bp ON b.id = bp.booking_id AND bp.payment_type = 'SALE'
+        LEFT JOIN booking_attendees ba ON b.id = ba.booking_id
+        WHERE b.id = ? AND (b.user_id = ? OR ba.email = ?)
+        GROUP BY b.id, b.user_id, b.booking_made_by_id, b.course_id, b.course_event_id, b.spaces, b.total_amount, b.payment_due,
+                 b.admin_payment_received, b.type_of_book, b.status,
+                 b.created, b.modified, c.course_name, c.course_abb, c.description, c.dsa_fees,
+                 ced.event_start_time, l.id, l.location_name, l.address1, l.address2, l.address3, l.address4, l.postcode,
+                 u.first_name, u.sur_name, u.email, u.contact1, bp.transation_id
+      `, [id, user_id, user_email]);
 
       if (bookings.length === 0) {
         return res.status(404).json({
@@ -380,9 +668,77 @@ class BookingController {
         });
       }
 
+      // Fetch all attendees for this booking
+      const [attendees] = await this.pool.query(`
+        SELECT id, first_name, sur_name, email, vehicle_type, \`primary\`
+        FROM booking_attendees
+        WHERE booking_id = ?
+        ORDER BY \`primary\` DESC, id ASC
+      `, [id]);
+
+      // Fetch secondary attendees (same submission group only, scoped by id range to
+      // avoid leaking secondaries from a different submission for the same course_event)
+      const primaryUserId = bookings[0].booking_made_by_id || bookings[0].user_id;
+      const [secondaryAttendees] = await this.pool.query(`
+        SELECT
+          b2.id as booking_id,
+          b2.payment_due,
+          b2.admin_payment_received,
+          b2.total_fees,
+          (
+            SELECT ba2.booking_ref
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as booking_ref,
+          (
+            SELECT ba2.first_name
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as first_name,
+          (
+            SELECT ba2.sur_name
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as sur_name,
+          (
+            SELECT ba2.email
+            FROM booking_attendees ba2
+            WHERE ba2.booking_id = b2.id
+            ORDER BY ba2.\`primary\` DESC, ba2.id ASC
+            LIMIT 1
+          ) as email
+        FROM bookings b2
+        WHERE b2.course_event_id = ?
+          AND b2.booking_made_by_id = ?
+          AND b2.user_id <> ?
+          AND b2.id > ?
+          AND b2.id < COALESCE(
+            (
+              SELECT MIN(b3.id)
+              FROM bookings b3
+              WHERE b3.course_event_id = b2.course_event_id
+                AND b3.booking_made_by_id = b2.booking_made_by_id
+                AND b3.user_id = b3.booking_made_by_id
+                AND b3.id > ?
+            ),
+            ~0
+          )
+        ORDER BY b2.id ASC
+      `, [bookings[0].course_event_id, primaryUserId, primaryUserId, id, id]);
+
       res.json({
         success: true,
-        data: bookings[0]
+        data: {
+          ...bookings[0],
+          attendees,
+          secondary_attendees: secondaryAttendees
+        }
       });
 
     } catch (error) {
@@ -392,6 +748,128 @@ class BookingController {
         message: 'Failed to fetch booking',
         error: error.message
       });
+    }
+  }
+
+  async getBookingConfirmationPreview(req, res) {
+    const connection = await this.pool.getConnection();
+    try {
+      const bookingId = Number.parseInt(req.params.id, 10);
+      const userId = req.user.id;
+      const userEmail = req.user.email;
+
+      const payload = await this.getBookingConfirmationPayload(connection, bookingId, userId, userEmail);
+      if (!payload) {
+        return res.status(404).json({
+          success: false,
+          message: 'Booking not found'
+        });
+      }
+
+      const previewEmail = String(userEmail || payload.attendees?.[0]?.email || '').trim();
+      if (!previewEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'No email available for preview'
+        });
+      }
+
+      const previewResult = await sendBookingConfirmation({
+        ...payload,
+        targetEmails: [previewEmail],
+        previewOnly: true,
+        bookingRefSuffix: 'R',
+        disableBcc: true
+      }, this.pool);
+
+      const firstPreview = previewResult?.previews?.[0] || null;
+
+      return res.json({
+        success: true,
+        data: {
+          subject: previewResult?.subject || `${payload.course_name} Booking confirmation`,
+          to: firstPreview?.to || previewEmail,
+          html: firstPreview?.html || ''
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching booking confirmation preview:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch booking confirmation preview',
+        error: error.message
+      });
+    } finally {
+      connection.release();
+    }
+  }
+
+  async sendBookingConfirmationEmail(req, res) {
+    const connection = await this.pool.getConnection();
+    try {
+      const bookingId = Number.parseInt(req.params.id, 10);
+      const userId = req.user.id;
+      const userEmail = req.user.email;
+      const forwardEmail = String(req.body?.email || '').trim();
+
+      if (forwardEmail && !/^\S+@\S+\.\S+$/.test(forwardEmail)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid email address'
+        });
+      }
+
+      const payload = await this.getBookingConfirmationPayload(connection, bookingId, userId, userEmail);
+      if (!payload) {
+        return res.status(404).json({
+          success: false,
+          message: 'Booking not found'
+        });
+      }
+
+      const targetEmail = forwardEmail || String(userEmail || '').trim();
+      if (!targetEmail) {
+        return res.status(400).json({
+          success: false,
+          message: 'No recipient email available'
+        });
+      }
+
+      const resolvedClientIp = String(
+        req.clientIp || req.ip || req.headers['x-forwarded-for'] || ''
+      )
+        .split(',')[0]
+        .replace(/^::ffff:/, '')
+        .trim();
+
+      await sendBookingConfirmation({
+        ...payload,
+        targetEmails: [targetEmail],
+        previewOnly: false,
+        ip: resolvedClientIp,
+        bookingRefSuffix: 'R',
+        disableBcc: true,
+        logType: forwardEmail
+          ? 'Booking Mail (Resend - Forward)'
+          : 'Booking Mail (Resend)',
+        emailBy: userId || 0
+      }, this.pool);
+
+      return res.json({
+        success: true,
+        message: forwardEmail
+          ? `Booking confirmation forwarded to ${targetEmail}`
+          : `Booking confirmation sent to ${targetEmail}`
+      });
+    } catch (error) {
+      console.error('Error sending booking confirmation email:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send booking confirmation email',
+        error: error.message
+      });
+    } finally {
+      connection.release();
     }
   }
 
@@ -413,7 +891,6 @@ class BookingController {
       const { id } = req.params;
       const user_id = req.user.id;
       const {
-        customer_notes,
         emergency_contact_name,
         emergency_contact_phone,
         special_requirements
@@ -457,16 +934,14 @@ class BookingController {
 
       // Update booking
       await this.pool.query(`
-        UPDATE bookings 
-        SET 
-          customer_notes = ?,
+        UPDATE bookings
+        SET
           emergency_contact_name = ?,
           emergency_contact_phone = ?,
           special_requirements = ?,
           modified = NOW()
         WHERE id = ?
       `, [
-        customer_notes || '',
         emergency_contact_name || '',
         emergency_contact_phone || '',
         special_requirements || '',
@@ -475,9 +950,8 @@ class BookingController {
 
       // Get updated booking
       const [updatedBooking] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
-          b.customer_notes,
           b.emergency_contact_name,
           b.emergency_contact_phone,
           b.special_requirements,
@@ -503,105 +977,171 @@ class BookingController {
   }
 
   /**
-   * Cancel booking
+   * Cancel booking.
+   *
+   * Mirrors the legacy PHP admin delete flow in
+   * 1stop-php/admin/booking_refund_delete_common.php:
+   *   - hard-DELETE from `bookings` and `booking_attendees`
+   *   - soft-delete related `booking_payments` rows (isDelete = 1)
+   *   - archive a serialized snapshot into `deleted_bookings`
+   *   - audit the action in `booking_update_history`
+   *   - decrement capacity counters on `course_events` based on the
+   *     row's status before deletion
+   *
+   * The legacy schema does NOT carry a "Cancelled" status value; we must
+   * not write status=3, otherwise the row stays orphaned in `bookings`
+   * and is treated as live by every PHP query (`status != 5 OR status IS NULL`).
    */
   async cancelBooking(req, res) {
+    const connection = await this.pool.getConnection();
     try {
       const { id } = req.params;
       const user_id = req.user.id;
       const { cancellation_reason } = req.body;
 
-      // Start transaction
-      const connection = await this.pool.getConnection();
       await connection.beginTransaction();
 
       try {
-        // Get booking details
-        const [bookingCheck] = await connection.query(`
-          SELECT 
-            b.id,
-            b.status,
-            b.spaces,
-            b.course_event_id,
-            ce.event_date
-          FROM bookings b
-          JOIN course_events ce ON b.course_event_id = ce.id
-          WHERE b.id = ? AND b.user_id = ?
-        `, [id, user_id]);
+        const [bookingRows] = await connection.query(
+          `SELECT b.*, MIN(ced.event_date) AS first_event_date
+           FROM bookings b
+           JOIN course_events ce ON b.course_event_id = ce.id
+           LEFT JOIN course_event_dates ced
+             ON ce.id = ced.course_event_id
+            AND ced.event_date > '1900-01-01'
+            AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+           WHERE b.id = ?
+             AND b.user_id = ?
+           GROUP BY b.id`,
+          [id, user_id]
+        );
 
-        if (bookingCheck.length === 0) {
+        if (bookingRows.length === 0) {
           throw new Error('Booking not found');
         }
 
-        const booking = bookingCheck[0];
+        const booking = bookingRows[0];
 
-        // Check if booking can be cancelled
-        if (booking.status === 3) {
-          throw new Error('Booking is already cancelled');
+        if (booking.status === BookingStatusManager.STATUS.REFUNDED) {
+          throw new Error('Booking has already been refunded; cannot cancel');
+        }
+        if (booking.status === BookingStatusManager.STATUS.MOVED_OUT) {
+          throw new Error('Booking has been moved to another course and is no longer active');
+        }
+        if (!BookingStatusManager.canCancel(booking.status)) {
+          throw new Error('Booking cannot be cancelled in its current state');
         }
 
-        if (booking.status === 2 || booking.status === 4) {
-          throw new Error('Cannot cancel completed or no-show bookings');
+        if (booking.first_event_date) {
+          const eventDate = new Date(booking.first_event_date);
+          const hoursUntilEvent = (eventDate - new Date()) / (1000 * 60 * 60);
+          if (hoursUntilEvent < 24) {
+            console.log(`Late cancellation for booking ${booking.id}: ${hoursUntilEvent.toFixed(2)} hours until event`);
+          }
         }
 
-        // Check cancellation policy (e.g., must cancel at least 24 hours before)
-        const eventDate = new Date(booking.event_date);
-        const now = new Date();
-        const hoursUntilEvent = (eventDate - now) / (1000 * 60 * 60);
+        const [primaryAttendeeRows] = await connection.query(
+          `SELECT *
+           FROM booking_attendees
+           WHERE booking_id = ?
+           ORDER BY \`primary\` DESC, id ASC
+           LIMIT 1`,
+          [id]
+        );
+        const primaryAttendee = primaryAttendeeRows[0] || {};
+        primaryAttendee.full_name = `${(primaryAttendee.first_name || '').trim()} ${(primaryAttendee.sur_name || '').trim()}`.trim();
 
-        if (hoursUntilEvent < 24) {
-          // Still allow cancellation but note it's late
-          console.log(`Late cancellation: ${hoursUntilEvent} hours until event`);
+        const [courseRows] = await connection.query(
+          `SELECT course_abb FROM courses WHERE id = ? LIMIT 1`,
+          [booking.course_id]
+        );
+        const [eventLocationRows] = await connection.query(
+          `SELECT ce.location_id, l.location_name
+           FROM course_events ce
+           LEFT JOIN locations l ON ce.location_id = l.id
+           WHERE ce.id = ?
+           LIMIT 1`,
+          [booking.course_event_id]
+        );
+        const [firstDateRows] = await connection.query(
+          `SELECT event_date
+           FROM course_event_dates
+           WHERE course_event_id = ?
+             AND event_date > '1900-01-01'
+             AND event_date NOT IN ('1111-11-11', '0000-00-00')
+           ORDER BY event_date ASC
+           LIMIT 1`,
+          [booking.course_event_id]
+        );
+
+        const courseInfo = {};
+        if (courseRows[0]) courseInfo.course_abb = courseRows[0].course_abb;
+        if (eventLocationRows[0]) courseInfo.location = eventLocationRows[0].location_name;
+        if (firstDateRows[0]) courseInfo.event_date = firstDateRows[0].event_date;
+
+        const { applyGroupSpaceDelta } = require('../utils/courseEventGroup');
+        if (booking.status === BookingStatusManager.STATUS.CONFIRMED) {
+          await applyGroupSpaceDelta(connection, booking.course_event_id, {
+            bookingsDoneDelta: -booking.spaces,
+          });
+        } else if (booking.status === BookingStatusManager.STATUS.PENDING_PAYMENT) {
+          await applyGroupSpaceDelta(connection, booking.course_event_id, {
+            lockDelta: -booking.spaces,
+          });
         }
 
-        // Update booking status to cancelled
-        await connection.query(`
-          UPDATE bookings 
-          SET 
-            status = 3,
-            cancellation_reason = ?,
-            cancelled_at = NOW(),
-            modified = NOW()
-          WHERE id = ?
-        `, [cancellation_reason || 'User cancelled', id]);
+        await connection.query(
+          `UPDATE booking_payments SET isDelete = 1 WHERE booking_id = ?`,
+          [id]
+        );
 
-        // Release the spaces back to the event
-        if (booking.status === 0) {
-          // If it was pending, release from locks
-          await connection.query(`
-            UPDATE course_events 
-            SET current_locks = GREATEST(0, current_locks - ?)
-            WHERE id = ?
-          `, [booking.spaces, booking.course_event_id]);
-        } else if (booking.status === 1) {
-          // If it was confirmed, release from bookings_done
-          await connection.query(`
-            UPDATE course_events 
-            SET bookings_done = GREATEST(0, bookings_done - ?)
-            WHERE id = ?
-          `, [booking.spaces, booking.course_event_id]);
-        }
+        const bookingRefValue = primaryAttendee.booking_ref || `1SRC${booking.id}`;
+
+        const snapshot = phpSerialize({
+          booking,
+          attendee: primaryAttendee,
+          course_info: courseInfo,
+          cancellation_reason: cancellation_reason || null,
+          cancelled_via: 'node-api',
+        });
+
+        await connection.query(
+          `INSERT INTO deleted_bookings (booking_id, booking_ref, booking_data)
+           VALUES (?, ?, ?)`,
+          [booking.id, bookingRefValue, snapshot]
+        );
+
+        const auditNote = cancellation_reason
+          ? `Booking cancelled by user: ${cancellation_reason}`
+          : 'Booking cancelled by user';
+        await connection.query(
+          `INSERT INTO booking_update_history
+             (booking_id, updated_by_admin_id, type, status, created, modified)
+           VALUES (?, ?, 'deleted', ?, NOW(), NOW())`,
+          [booking.id, 0, auditNote]
+        );
+
+        await connection.query(`DELETE FROM booking_attendees WHERE booking_id = ?`, [id]);
+        await connection.query(`DELETE FROM bookings WHERE id = ?`, [id]);
 
         await connection.commit();
 
         res.json({
           success: true,
-          message: 'Booking cancelled successfully'
+          message: 'Booking cancelled successfully',
         });
-
       } catch (error) {
         await connection.rollback();
         throw error;
       } finally {
         connection.release();
       }
-
     } catch (error) {
       console.error('Error cancelling booking:', error);
       res.status(400).json({
         success: false,
         message: error.message || 'Failed to cancel booking',
-        error: error.message
+        error: error.message,
       });
     }
   }
@@ -613,36 +1153,62 @@ class BookingController {
     try {
       const user_id = req.user.id;
 
+      // Status semantics (matches PHP):
+      //   0 = pending payment, 1 = confirmed, 2 = refunded, 5 = moved-out tombstone.
+      // "Completed" is derived from event dates (status=1 AND latest event_date < today)
+      // because the legacy schema does not store a Completed flag.
+      // Cancellations are hard-deleted from `bookings` and live in `deleted_bookings`,
+      // so they are counted from there.
       const [stats] = await this.pool.query(`
-        SELECT 
+        SELECT
           COUNT(*) as total_bookings,
           COUNT(CASE WHEN status = 0 THEN 1 END) as pending_bookings,
           COUNT(CASE WHEN status = 1 THEN 1 END) as confirmed_bookings,
-          COUNT(CASE WHEN status = 2 THEN 1 END) as completed_bookings,
-          COUNT(CASE WHEN status = 3 THEN 1 END) as cancelled_bookings,
-          COUNT(CASE WHEN status = 4 THEN 1 END) as noshow_bookings,
+          COUNT(CASE WHEN status = 2 THEN 1 END) as refunded_bookings,
+          COUNT(CASE WHEN status = 5 THEN 1 END) as moved_bookings,
           SUM(total_amount) as total_spent,
           AVG(total_amount) as average_booking_value,
           MAX(created) as last_booking_date
         FROM bookings
         WHERE user_id = ?
+          AND (status <> 5 OR status IS NULL)
       `, [user_id]);
 
-      // Get upcoming bookings count
+      // Completed = confirmed bookings whose latest course event date is in the past.
+      const [completedRows] = await this.pool.query(`
+        SELECT COUNT(*) as completed_bookings FROM (
+          SELECT b.id
+          FROM bookings b
+          JOIN course_event_dates ced
+            ON ced.course_event_id = b.course_event_id
+           AND ced.event_date > '1900-01-01'
+           AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+          WHERE b.user_id = ?
+            AND b.status = 1
+          GROUP BY b.id
+          HAVING MAX(ced.event_date) < CURDATE()
+        ) sub
+      `, [user_id]);
+      const completedCount = completedRows[0]?.completed_bookings ?? 0;
+
       const [upcomingStats] = await this.pool.query(`
-        SELECT COUNT(*) as upcoming_bookings
+        SELECT COUNT(DISTINCT b.id) as upcoming_bookings
         FROM bookings b
-        JOIN course_events ce ON b.course_event_id = ce.id
-        WHERE b.user_id = ? 
+        JOIN course_event_dates ced
+          ON ced.course_event_id = b.course_event_id
+         AND ced.event_date > '1900-01-01'
+         AND ced.event_date NOT IN ('1111-11-11', '0000-00-00')
+        WHERE b.user_id = ?
           AND b.status IN (0, 1)
-          AND ce.event_date >= CURDATE()
+          AND ced.event_date >= CURDATE()
       `, [user_id]);
 
       res.json({
         success: true,
         data: {
           ...stats[0],
-          upcoming_bookings: upcomingStats[0].upcoming_bookings
+          completed_bookings: completedCount,
+          upcoming_bookings: upcomingStats[0].upcoming_bookings,
         }
       });
 
@@ -673,7 +1239,7 @@ class BookingController {
       } = req.query;
 
       const offset = (page - 1) * limit;
-      
+
       // Build query conditions
       let whereClause = 'WHERE 1=1';
       let queryParams = [];
@@ -711,7 +1277,7 @@ class BookingController {
 
       // Get bookings with pagination
       const [bookings] = await this.pool.query(`
-        SELECT 
+        SELECT
           b.id,
           b.user_id,
           b.course_id,
@@ -729,13 +1295,12 @@ class BookingController {
           u.first_name,
           u.sur_name,
           u.email,
-          u.mobile,
-          CASE 
+          u.contact1,
+          CASE
             WHEN b.status = 0 THEN 'Pending Payment'
             WHEN b.status = 1 THEN 'Confirmed'
-            WHEN b.status = 2 THEN 'Completed'
-            WHEN b.status = 3 THEN 'Cancelled'
-            WHEN b.status = 4 THEN 'No Show'
+            WHEN b.status = 2 THEN 'Refunded'
+            WHEN b.status = 5 THEN 'Moved'
             ELSE 'Unknown'
           END as status_text
         FROM bookings b

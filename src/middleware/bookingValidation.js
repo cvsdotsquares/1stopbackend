@@ -115,10 +115,14 @@ class BookingValidation {
    */
   static getUserBookings() {
     return [
+      // Status values must mirror the legacy PHP `bookings.status` column:
+      //   0 = pending payment, 1 = confirmed, 2 = refunded, 5 = moved-out tombstone.
+      // There is no "completed", "cancelled" or "no-show" stored value in this
+      // schema; cancellations are hard-deleted into `deleted_bookings`.
       query('status')
         .optional()
-        .isIn(['all', '0', '1', '2', '3', '4'])
-        .withMessage('Status must be: all, 0 (pending), 1 (confirmed), 2 (completed), 3 (cancelled), or 4 (no-show)'),
+        .isIn(['all', '0', '1', '2', '5'])
+        .withMessage('Status must be: all, 0 (pending payment), 1 (confirmed), 2 (refunded), or 5 (moved)'),
       
       query('page')
         .optional()
@@ -149,8 +153,8 @@ class BookingValidation {
     return [
       query('status')
         .optional()
-        .isIn(['all', '0', '1', '2', '3', '4'])
-        .withMessage('Status must be: all, 0 (pending), 1 (confirmed), 2 (completed), 3 (cancelled), or 4 (no-show)'),
+        .isIn(['all', '0', '1', '2', '5'])
+        .withMessage('Status must be: all, 0 (pending payment), 1 (confirmed), 2 (refunded), or 5 (moved)'),
       
       query('course_id')
         .optional()
@@ -332,23 +336,27 @@ class BookingValidation {
   }
 
   /**
-   * Validate booking can be modified
+   * Validate booking can be modified.
+   *
+   * Refunded (status=2) and moved-out (status=5) rows are terminal in the
+   * legacy schema and should not be edited. Real cancellations are hard-
+   * deleted from `bookings`, so by definition we never see a "cancelled"
+   * row here.
    */
   static validateBookingModifiable(req, res, next) {
     const booking = req.bookingData;
 
-    // Check if booking is in a state that allows modification
-    if (booking.status === 3) {
+    if (booking.status === 2) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot modify a cancelled booking'
+        message: 'Cannot modify a refunded booking'
       });
     }
 
-    if (booking.status === 2 || booking.status === 4) {
+    if (booking.status === 5) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot modify a completed or no-show booking'
+        message: 'Cannot modify a booking that has been moved to another course'
       });
     }
 
@@ -367,24 +375,25 @@ class BookingValidation {
   }
 
   /**
-   * Validate booking can be cancelled
+   * Validate booking can be cancelled.
+   *
+   * Same rationale as validateBookingModifiable. The user-side cancel flow
+   * itself hard-deletes the row and archives it into `deleted_bookings`.
    */
   static validateBookingCancellable(req, res, next) {
     const booking = req.bookingData;
 
-    // Check if booking is already cancelled
-    if (booking.status === 3) {
+    if (booking.status === 2) {
       return res.status(400).json({
         success: false,
-        message: 'Booking is already cancelled'
+        message: 'Booking has already been refunded; cannot cancel'
       });
     }
 
-    // Check if booking is completed or no-show
-    if (booking.status === 2 || booking.status === 4) {
+    if (booking.status === 5) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot cancel completed or no-show bookings'
+        message: 'Booking has been moved to another course and is no longer active'
       });
     }
 
