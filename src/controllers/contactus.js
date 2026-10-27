@@ -100,17 +100,18 @@ class ContactUsController {
             }));
         }
 
-        const processedContactContent = await replaceTokensInObject(this.pool, contactContent);
-
-        // Add homepage-style sections
+        // Homepage-style sections (hero / page slider, sidebar HTML, etc.) carry
+        // ${TOKEN} placeholders too — same as cmspages.js; replace once on the
+        // merged payload so contact-us matches other CMS pages.
         const additionalSections = await this.getHomepageStyleSections(pageId);
+        const processedData = await replaceTokensInObject(this.pool, {
+          ...contactContent,
+          ...additionalSections,
+        });
 
         res.json({
           success: true,
-          data: {
-            ...processedContactContent,
-            ...additionalSections
-          }
+          data: processedData,
         });
     } catch (error) {
       console.error('Error fetching contact us content:', error);
