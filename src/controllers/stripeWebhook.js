@@ -49,6 +49,10 @@ class StripeWebhookController {
           break;
         case 'payment_intent.succeeded':
           const paymentIntent = event.data.object;
+          if (paymentIntent.metadata?.type === 'csv_export_payment') {
+            console.log('ℹ️ CSV export payment collected; no booking created');
+            break;
+          }
           if (paymentIntent.metadata?.type === 'gift_voucher') {
             await this.handleGiftVoucherPaymentIntent(paymentIntent);
           } else if (paymentIntent.metadata?.type === 'admin_payment_link') {
@@ -63,6 +67,10 @@ class StripeWebhookController {
           break;
         case 'checkout.session.completed': {
           const checkoutSession = event.data.object;
+          if (checkoutSession.metadata?.type === 'csv_export_payment') {
+            console.log('ℹ️ CSV export checkout completed; no booking created');
+            break;
+          }
           if (checkoutSession.metadata?.type === 'admin_payment_link') {
             const {
               confirmAdminStripePaymentLink,
@@ -83,13 +91,19 @@ class StripeWebhookController {
         }
         case 'payment_intent.payment_failed':
           console.log('❌ Handling payment failed...');
-          if (event.data.object?.metadata?.type !== 'admin_payment_link') {
+          if (
+            event.data.object?.metadata?.type !== 'admin_payment_link' &&
+            event.data.object?.metadata?.type !== 'csv_export_payment'
+          ) {
             await this.handlePaymentFailed(event.data.object);
           }
           break;
         case 'payment_intent.canceled':
           console.log('❌ Handling payment canceled...');
-          if (event.data.object?.metadata?.type !== 'admin_payment_link') {
+          if (
+            event.data.object?.metadata?.type !== 'admin_payment_link' &&
+            event.data.object?.metadata?.type !== 'csv_export_payment'
+          ) {
             await this.handlePaymentCanceled(event.data.object);
           }
           break;

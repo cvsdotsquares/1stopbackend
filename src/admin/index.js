@@ -48,6 +48,8 @@ const createInstructorsRoutes = require('./routes/instructors');
 const createTokensRoutes = require('./routes/tokens');
 const createIpLogsRoutes = require('./routes/ipLogs');
 const createSearchRoutes = require('./routes/search');
+const createCsvExportRoutes = require('./routes/csvExport');
+const createEmailTemplatesRoutes = require('./routes/emailTemplates');
 const { getAdminSessionCookieOptions } = require('./sessionCookie');
 
 function createAdminRoutes(pool) {
@@ -107,6 +109,8 @@ function createAdminRoutes(pool) {
   router.use('/tokens', createTokensRoutes(pool));
   router.use('/ip-logs', createIpLogsRoutes(pool));
   router.use('/search', createSearchRoutes(pool));
+  router.use('/csv-export', createCsvExportRoutes(pool));
+  router.use('/email-templates', createEmailTemplatesRoutes(pool));
 
   return router;
 }

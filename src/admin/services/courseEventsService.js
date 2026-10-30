@@ -276,27 +276,27 @@ async function getCourseFilterOptions(pool) {
 
 async function getLocationsByCourse(pool, courseId) {
   const cid = Number(courseId);
-  if (!Number.isFinite(cid) || cid <= 0) return [];
+  const hasCourse = Number.isFinite(cid) && cid > 0;
+  const params = [];
+  let courseClause = '';
+  if (hasCourse) {
+    courseClause = 'AND courses.id = ?';
+    params.push(cid);
+  }
 
   const [rows] = await pool.query(
-    `SELECT * FROM (
-      SELECT course_event_dates.event_date,
-        course_event_dates.course_event_id,
-        locations.location_name,
-        locations.id AS location_id
-      FROM course_event_dates
-      JOIN course_events ON course_events.id = course_event_dates.course_event_id
-      JOIN courses ON courses.id = course_events.course_id
-      JOIN locations ON locations.id = course_events.location_id
-      WHERE course_events.status = '1'
-        AND courses.status IN ('1', '2')
-        AND course_event_dates.event_date != '0000-00-00'
-        AND courses.id = ?
-      ORDER BY course_event_dates.course_event_id, course_event_dates.event_date
-    ) sq
-    GROUP BY sq.course_event_id
-    ORDER BY sq.location_name DESC`,
-    [cid]
+    `SELECT locations.id AS location_id, locations.location_name
+     FROM course_event_dates
+     JOIN course_events ON course_events.id = course_event_dates.course_event_id
+     JOIN courses ON courses.id = course_events.course_id
+     JOIN locations ON locations.id = course_events.location_id
+     WHERE course_events.status = '1'
+       AND courses.status IN ('1', '2')
+       AND course_event_dates.event_date != '0000-00-00'
+       ${courseClause}
+     GROUP BY locations.id, locations.location_name
+     ORDER BY locations.location_name ASC`,
+    params
   );
 
   const seen = new Set();
@@ -353,9 +353,7 @@ async function listCourseEvents(pool, { page = 1, searchterm = {} } = {}) {
       sort: trim(searchterm.sort),
     },
     courseOptions: await getCourseFilterOptions(pool),
-    locationOptions: trim(searchterm.name_scr)
-      ? await getLocationsByCourse(pool, searchterm.name_scr)
-      : [],
+    locationOptions: await getLocationsByCourse(pool, searchterm.name_scr),
   };
 }
 
