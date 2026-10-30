@@ -1776,3 +1776,20 @@ exports.sendAdminStripePaymentLinkEmail = async ({
     return { sent: false, reason: error.message };
   }
 };
+
+exports.sendCourseDatesCsvEmail = async ({ to, subject, html, filename, csv }) => {
+  await transporter.sendMail({
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+    to,
+    subject,
+    html,
+    attachments: [
+      {
+        filename,
+        content: `\uFEFF${csv}`,
+        contentType: 'text/csv; charset=utf-8',
+      },
+    ],
+  });
+};
