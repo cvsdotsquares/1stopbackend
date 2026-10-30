@@ -33,11 +33,7 @@ const createHoldSpaceRoutes = require('./routes/holdSpace');
 const createRemoveSpaceRoutes = require('./routes/removeSpace');
 const createFAQRoutes = require('./routes/faq');
 const PreBookingController = require('./controllers/preBooking');
-const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
-const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
-const StripeLinkExpiryCron = require('./cron/cleanupExpiredStripeLinks');
-const StripePaymentLinkLockExpiryCron = require('./cron/cleanupExpiredStripePaymentLinkLocks');
-const GoogleContactsSyncCron = require('./cron/googleContactsSync');
+const { startAllCrons } = require('./cron/cronManager');
 const createAdminRoutes = require('./admin');
 const createInstructorRoutes = require('./instructor');
 const { registerPublicStaticAssets } = require('./utils/publicStaticAssets');
@@ -233,21 +229,6 @@ app.listen(PORT, () => {
   // Unpaid-booking expiry is owned by BookingCleanupCron below; lock expiry
   // is owned by ExpiredLockCleanupCron.
 
-  // Start unpaid bookings cleanup cron
-  const cleanupCron = new BookingCleanupCron(pool);
-  cleanupCron.start();
-
-  // Start expired lock cleanup cron
-  const expiredLockCleanupCron = new ExpiredLockCleanupCron(pool);
-  expiredLockCleanupCron.start();
-
-  // Expire unpaid admin Stripe payment links after configured minutes (min 30 for Stripe)
-  const stripeLinkExpiryCron = new StripeLinkExpiryCron(pool);
-  stripeLinkExpiryCron.start();
-
-  // Delete Stripe payment-link lock_bookings rows after link expiry (+ grace)
-  const stripePaymentLinkLockExpiryCron = new StripePaymentLinkLockExpiryCron(pool);
-  stripePaymentLinkLockExpiryCron.start();
   const {
     ensureStripePaymentLinkLockedByColumn,
   } = require('./admin/services/bookingStripeLinkService');
@@ -272,7 +253,7 @@ app.listen(PORT, () => {
     );
   });
 
-  // Start Google contacts sync cron
-  const googleContactsSyncCron = new GoogleContactsSyncCron(pool);
-  googleContactsSyncCron.start();
+  // Background Cron Jobs (Section E + Core)
+  // Controlled by ENABLE_LIVE_CRONS: staging runs lock/ip/confirmation; live runs all.
+  startAllCrons(pool);
 });

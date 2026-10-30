@@ -29,7 +29,7 @@ async function removeExpirelocks(pool, session) {
   const [locks] = await pool.query(
     `SELECT * FROM lock_bookings
      WHERE NOW() >= (created + INTERVAL ? MINUTE)${activeClause}
-       AND locked_by != ?`,
+       AND locked_by NOT IN (?, 'ride2')`,
     params
   );
 

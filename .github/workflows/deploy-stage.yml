@@ -76,6 +76,7 @@ jobs:
             BOOKING_TIMEOUT_MINUTES=${{ secrets.BOOKING_TIMEOUT_MINUTES }}
             LOCK_EXPIRE_API_MINUTES=${{ secrets.LOCK_EXPIRE_API_MINUTES }}
             LOCK_EXPIRE_ONLINE_MINUTES=${{ secrets.LOCK_EXPIRE_ONLINE_MINUTES }}
+            ENABLE_LIVE_CRONS=false
             MAINTENANCE_MODE=${{ secrets.MAINTENANCE_MODE }}
             MAINTENANCE_BYPASS_TOKEN=${{ secrets.MAINTENANCE_BYPASS_TOKEN }}
             MAINTENANCE_ALLOWED_IPS=${{ secrets.MAINTENANCE_ALLOWED_IPS }}
@@ -96,6 +97,9 @@ jobs:
             WORLDPAY_CURRENCY=${{ secrets.WORLDPAY_CURRENCY }}
             # Optional: card-only HPP channel (hides Apple Pay / Google Pay on MOTO)
             WORLDPAY_HPP_MOTO_CUSTOMISATION_ID=${{ secrets.WORLDPAY_HPP_MOTO_CUSTOMISATION_ID }}
+            RIDETO_API_URL=${{ secrets.RIDETO_API_URL }}
+            RIDETO_AUTHORIZATION_KEY=${{ secrets.RIDETO_AUTHORIZATION_KEY }}
+            RIDETO_API_LIVE=${{ secrets.RIDETO_API_LIVE }}
             EOF
 
             echo "Setting .env file permissions..."
