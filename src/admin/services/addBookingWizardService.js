@@ -8,6 +8,11 @@ const {
   sanitizePhoneInput,
 } = require('../../utils/ukDateValidation');
 const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../constants');
+const {
+  assertAdminCanTakeSpaces,
+  eventsShareCapacity,
+  getGroupAvailability,
+} = require('../../utils/courseEventGroup');
 const { getExpireMinutes } = require('./bookingStripeLinkService');
 const { phpSerialize } = require('../../utils/phpSerialize');
 const {
@@ -1150,6 +1155,12 @@ async function removeAllTerminalLocksForAdmin(pool, session, adminId) {
 
 async function addBookingsDone(pool, session, evId, spaceRequired) {
   if (spaceRequired <= 0) return;
+  const group = await getGroupAvailability(pool, evId);
+  const held = Math.min(
+    spaceRequired,
+    Math.max(0, Number(group?.current_locks) || 0)
+  );
+  await assertAdminCanTakeSpaces(pool, evId, spaceRequired, { creditSpaces: held });
   const [parentRows] = await pool.query(
     'SELECT parent FROM course_events WHERE id = ? LIMIT 1',
     [evId]
@@ -1509,6 +1520,28 @@ async function submitAddBookingAttendees(pool, session, body, adminId) {
     err.status = 400;
     throw err;
   }
+
+  const lockIdForCapacity = Number(adminBooking.lock_session?.id) || 0;
+  let heldSpaces = 0;
+  if (lockIdForCapacity > 0) {
+    const [heldRows] = await pool.query(
+      `SELECT event_id, space_required
+       FROM lock_bookings
+       WHERE id = ? AND delete_process = 0
+       LIMIT 1`,
+      [lockIdForCapacity]
+    );
+    const held = heldRows?.[0];
+    if (
+      held &&
+      (await eventsShareCapacity(pool, eventId, Number(held.event_id)))
+    ) {
+      heldSpaces = Math.min(spaceRequired, Number(held.space_required) || 0);
+    }
+  }
+  await assertAdminCanTakeSpaces(pool, eventId, spaceRequired, {
+    creditSpaces: heldSpaces,
+  });
 
   if (manCount > 0 || autoCount > 0) {
     await updateVehicleLocks(pool, session, manCount, autoCount);

@@ -32,6 +32,7 @@ const createGetcourseRoutes = require('./routes/getcourse');
 const createHoldSpaceRoutes = require('./routes/holdSpace');
 const createRemoveSpaceRoutes = require('./routes/removeSpace');
 const createFAQRoutes = require('./routes/faq');
+const createPayRoutes = require('./routes/pay');
 const PreBookingController = require('./controllers/preBooking');
 const BookingCleanupCron = require('./cron/cleanupUnpaidBookings');
 const ExpiredLockCleanupCron = require('./cron/cleanupExpiredLocks');
@@ -191,6 +192,7 @@ app.use('/restapi/booking', createGetcourseRoutes(pool));
 app.use('/restapi/booking', createHoldSpaceRoutes(pool));
 app.use('/restapi/booking', createRemoveSpaceRoutes(pool));
 app.use('/api/faq', createFAQRoutes(pool));
+app.use('/api/pay', createPayRoutes(pool));
 app.use('/api/admin', createAdminRoutes(pool));
 app.use('/api/instructor', createInstructorRoutes(pool));
 

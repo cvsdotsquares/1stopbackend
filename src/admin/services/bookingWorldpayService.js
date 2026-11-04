@@ -18,6 +18,7 @@ const {
   pickCallbackField,
   resolveMotoIntegrationMode,
 } = require('./motoPaymentService');
+const { adminSeatsWouldFit } = require('../../utils/courseEventGroup');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -486,22 +487,23 @@ async function completeBookingWorldpayNotify(pool, body) {
     const amt = Number(booking.admin_payment_received) || 0;
     lastLockId = Number(booking.lockid) || lastLockId;
 
-    if (Number(eventData.bookings_done) >= Number(eventData.booking_limit)) {
-      if (booking.lockid) {
-        await removeLockById(pool, booking.lockid, false);
-      }
-      await pool.query(
-        `UPDATE bookings
-         SET refundable = 1, payment_due = payment_due - ?, status = 1, modified = ?
-         WHERE id = ?`,
-        [amt, processedAt, bookingId]
+    const spaces = Number(booking.spaces) || 1;
+    const [lockRows] = await pool.query(
+      'SELECT id, space_required FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
+      [booking.lockid || 0]
+    );
+    const lockExists = Boolean(lockRows?.[0]);
+    const heldSpaces = lockExists
+      ? Math.min(spaces, Number(lockRows[0].space_required) || spaces)
+      : 0;
+    const fits = await adminSeatsWouldFit(pool, booking.course_event_id, spaces, {
+      creditSpaces: heldSpaces,
+    });
+    if (!fits) {
+      console.warn(
+        `[ADMIN][WORLDPAY] date is full — booking ${bookingId} was not confirmed`
       );
     } else {
-      const [lockRows] = await pool.query(
-        'SELECT id FROM lock_bookings WHERE id = ? LIMIT 1',
-        [booking.lockid || 0]
-      );
-      const lockExists = Boolean(lockRows?.[0]);
       const vehicleType = Number(attendee.vehicle_type);
 
       if (!lockExists && vehicleType !== 3) {
@@ -531,6 +533,7 @@ async function completeBookingWorldpayNotify(pool, body) {
          WHERE id = ?`,
         [amt, processedAt, bookingId]
       );
+      mailBookingIds.push(confirmedBookingId);
     }
 
     const [existingPayments] = await pool.query(
@@ -555,7 +558,6 @@ async function completeBookingWorldpayNotify(pool, body) {
       );
     }
 
-    mailBookingIds.push(confirmedBookingId);
   }
 
   if (lastLockId) {

@@ -530,7 +530,7 @@ exports.sendBookingConfirmation = async (bookingData, pool) => {
                       Dear ${escapeHtml(recipientFirstName)},
                       </span>
                       ${Number(refundable) === 1
-      ? '<br><br><p style="color:red"><strong><i class="icon fa fa-ban"></i> You have taken longer than expected to make payment & complete your booking, so your reserved places have not been booked. Please contact to the website administrator to arrange a refund.<strong></p>'
+      ? '<br><br><p style="color:red"><strong><i class="icon fa fa-ban"></i> You have taken longer than expected to make payment & complete your booking, so your reserved places have not been booked. Please contact to the website administrator.<strong></p>'
       : ''}
                     </td>
                   </tr>
