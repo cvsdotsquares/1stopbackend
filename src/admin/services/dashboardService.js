@@ -185,6 +185,7 @@ const {
   courseEventsHasOwnVehicleFlag,
   inferOwnVehicleEnabled,
 } = require('../../utils/ownVehicleAvailability');
+const { getConfirmedSeatCounts } = require('../../utils/courseEventGroup');
 
 async function courseAvailsDashboard(pool, searchterm, query = {}) {
   const dateWindow = resolveAvailWindow(query);
@@ -230,7 +231,7 @@ async function enrichCourseAvails(pool, rows) {
   }
 
   const eventIds = rows.map((r) => r.course_event_id);
-  const [dateRows, frozenByEventId] = await Promise.all([
+  const [dateRows, frozenByEventId, confirmedSeats] = await Promise.all([
     pool
       .query(
         `SELECT course_event_id, event_date, event_start_time, event_end_time
@@ -240,6 +241,7 @@ async function enrichCourseAvails(pool, rows) {
       )
       .then(([result]) => result || []),
     getFrozenVehicleRowsByEventId(pool, eventIds),
+    getConfirmedSeatCounts(pool, eventIds),
   ]);
 
   const dayCountByEvent = {};
@@ -281,6 +283,11 @@ async function enrichCourseAvails(pool, rows) {
       const frozenRow = frozenByEventId.get(row.course_event_id);
       const isFrozen = Boolean(frozenRow);
       const vehicleSource = isFrozen ? frozenRow : row;
+      const confirmed = confirmedSeats.get(Number(row.course_event_id)) || 0;
+      const storedBookings = Number(row.bookings_done) || 0;
+      // Freeze rewrites bookings_done to the vehicle total so the date cannot
+      // be sold. That number is not a booking count.
+      const bookingsDone = isFrozen ? confirmed : Math.max(storedBookings, confirmed);
 
       return {
         course_event_id: row.course_event_id,
@@ -295,7 +302,7 @@ async function enrichCourseAvails(pool, rows) {
         event_start_time: formatTimeValue(times.start || row.event_start_time),
         event_end_time: formatTimeValue(times.end || row.event_end_time),
         booking_limit: Number(row.booking_limit) || 0,
-        bookings_done: Number(row.bookings_done) || 0,
+        bookings_done: bookingsDone,
         current_locks: Number(row.current_locks) || 0,
         vehicle_type_manual: Number(vehicleSource.vehicle_type_manual) || 0,
         vehicle_type_automatic: Number(vehicleSource.vehicle_type_automatic) || 0,

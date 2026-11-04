@@ -521,6 +521,39 @@ async function getNearestDateSiblingEventId(db, courseEventId, locationId = null
 }
 
 /**
+ * Confirmed seats sitting on each course date. `bookings_done` can lag behind
+ * these rows when a payment link was confirmed without incrementing the counter.
+ * Held bookings are excluded because hold already released their seat.
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
+ * @param {number[]} eventIds
+ * @returns {Promise<Map<number, number>>}
+ */
+async function getConfirmedSeatCounts(db, eventIds) {
+  const ids = [...new Set((eventIds || []).map((id) => Number(id)).filter((id) => id > 0))];
+  const counts = new Map();
+  if (!ids.length) return counts;
+
+  const [rows] = await db.query(
+    `SELECT course_event_id, COALESCE(SUM(spaces), 0) AS confirmed_spaces
+     FROM bookings
+     WHERE status = 1
+       AND IFNULL(on_hold, 0) = 0
+       AND course_event_id IN (?)
+     GROUP BY course_event_id`,
+    [ids]
+  );
+  for (const row of rows || []) {
+    counts.set(Number(row.course_event_id), Number(row.confirmed_spaces) || 0);
+  }
+  return counts;
+}
+
+function occupiedBookingsDone(storedDone, eventId, confirmedByEvent) {
+  const confirmed = confirmedByEvent.get(Number(eventId)) || 0;
+  return Math.max(Number(storedDone) || 0, confirmed);
+}
+
+/**
  * Min available spaces across siblings (shared cohort capacity).
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
  * @param {number} courseEventId
@@ -529,6 +562,8 @@ async function getNearestDateSiblingEventId(db, courseEventId, locationId = null
 async function getGroupAvailability(db, courseEventId) {
   const cohortIds = await getCohortMemberIds(db, courseEventId);
   if (!cohortIds.length) return null;
+
+  const confirmedByEvent = await getConfirmedSeatCounts(db, cohortIds);
 
   // Single-day (parent = event id): use only this event's counters
   if (cohortIds.length === 1) {
@@ -539,10 +574,16 @@ async function getGroupAvailability(db, courseEventId) {
     );
     if (!rows.length) return null;
     const booking_limit = Number(rows[0].booking_limit) || 0;
-    const bookings_done = Number(rows[0].bookings_done) || 0;
+    const bookings_done = occupiedBookingsDone(
+      rows[0].bookings_done,
+      cohortIds[0],
+      confirmedByEvent
+    );
     const current_locks = Number(rows[0].current_locks) || 0;
+    const rawAvailableSpaces = booking_limit - bookings_done - current_locks;
     return {
-      availableSpaces: Math.max(0, booking_limit - bookings_done - current_locks),
+      availableSpaces: Math.max(0, rawAvailableSpaces),
+      rawAvailableSpaces,
       booking_limit,
       bookings_done,
       current_locks,
@@ -563,25 +604,83 @@ async function getGroupAvailability(db, courseEventId) {
   let ref = rows[0];
   for (const row of rows) {
     const limit = Number(row.booking_limit) || 0;
-    const done = Number(row.bookings_done) || 0;
+    const done = occupiedBookingsDone(row.bookings_done, row.id, confirmedByEvent);
     const locks = Number(row.current_locks) || 0;
     const available = limit - done - locks;
     if (available < minAvailable) {
       minAvailable = available;
-      ref = row;
+      ref = { ...row, bookings_done: done };
     }
   }
 
   const booking_limit = Number(ref.booking_limit) || 0;
   const bookings_done = Number(ref.bookings_done) || 0;
   const current_locks = Number(ref.current_locks) || 0;
+  const rawAvailableSpaces = minAvailable === Infinity ? 0 : minAvailable;
 
   return {
-    availableSpaces: Math.max(0, minAvailable === Infinity ? 0 : minAvailable),
+    availableSpaces: Math.max(0, rawAvailableSpaces),
+    rawAvailableSpaces,
     booking_limit,
     bookings_done,
     current_locks,
   };
+}
+
+const ADMIN_DATE_FULL_MESSAGE =
+  'This date does not have enough spaces left. Choose another date.';
+
+async function eventsShareCapacity(db, eventIdA, eventIdB) {
+  const a = Number(eventIdA);
+  const b = Number(eventIdB);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return false;
+  if (a === b) return true;
+  const members = await getCohortMemberIds(db, a);
+  return members.includes(b);
+}
+
+/**
+ * Reject an admin seat take (add booking, change date, reinstate) when the
+ * shared course date cannot fit `spacesNeeded`.
+ * `creditSpaces` adds back seats this operation already holds on the same
+ * date (an in-progress lock, or a booking moving inside the same course group).
+ */
+async function assertAdminCanTakeSpaces(db, courseEventId, spacesNeeded, options = {}) {
+  const needed = Math.max(1, Number(spacesNeeded) || 1);
+  if (await isCourseEventFrozen(db, courseEventId)) {
+    const err = new Error('This date is frozen and cannot take more bookings.');
+    err.status = 400;
+    throw err;
+  }
+
+  let credit = Math.max(0, Number(options.creditSpaces) || 0);
+  if (options.creditSpacesFromEventId) {
+    const same = await eventsShareCapacity(
+      db,
+      courseEventId,
+      options.creditSpacesFromEventId
+    );
+    if (!same) credit = 0;
+  }
+
+  const group = await getGroupAvailability(db, courseEventId);
+  const raw = Number(group?.rawAvailableSpaces);
+  const available = (Number.isFinite(raw) ? raw : 0) + credit;
+  if (!group || available < needed) {
+    const err = new Error(ADMIN_DATE_FULL_MESSAGE);
+    err.status = 400;
+    throw err;
+  }
+}
+
+async function adminSeatsWouldFit(db, courseEventId, spacesNeeded, options = {}) {
+  try {
+    await assertAdminCanTakeSpaces(db, courseEventId, spacesNeeded, options);
+    return true;
+  } catch (err) {
+    if (err && err.status === 400) return false;
+    throw err;
+  }
 }
 
 /**
@@ -787,7 +886,11 @@ module.exports = {
   getGroupFirstEventDate,
   isGroupFirstDayPassed,
   getNearestDateSiblingEventId,
+  getConfirmedSeatCounts,
   getGroupAvailability,
+  eventsShareCapacity,
+  assertAdminCanTakeSpaces,
+  adminSeatsWouldFit,
   canConfirmSpacesOnCohort,
   isCourseEventFrozen,
   lockSiblingEventsForUpdate,

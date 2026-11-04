@@ -11,6 +11,11 @@ const {
 } = require('../../utils/typeOfBook');
 const { ensureReservedBookingsForLock } = require('./adminBookingReserveService');
 const {
+  assertAdminCanTakeSpaces,
+  eventsShareCapacity,
+  getConfirmedSeatCounts,
+} = require('../../utils/courseEventGroup');
+const {
   canHoldBooking,
   canReinstateBooking,
   getLatestEventDateFromRows,
@@ -268,19 +273,29 @@ async function getEventBookingPage(pool, evId, session) {
     throw err;
   }
 
+  const confirmedSeats = await getConfirmedSeatCounts(pool, [eventId]);
+  const confirmedDone = confirmedSeats.get(eventId) || 0;
+  if (confirmedDone > (Number(event.bookings_done) || 0)) {
+    event.bookings_done = confirmedDone;
+  }
+
   const adminBooking = ensureAdminBookingSession(session);
+  const lockEventId = Number(adminBooking?.lock_session?.event_id) || 0;
+  const lockSpaces =
+    Number(adminBooking?.lock_session?.space_required) ||
+    Number(adminBooking?.space_required) ||
+    0;
   if (adminBooking) {
     adminBooking.eventId = eventId;
     adminBooking.courseId = event.course_id;
   }
 
   let currentSpaceSelection = 0;
-  if (
-    adminBooking &&
-    Number(adminBooking.eventId) === eventId &&
-    adminBooking.space_required
-  ) {
-    currentSpaceSelection = Number(adminBooking.space_required) || 0;
+  if (lockSpaces > 0 && lockEventId > 0) {
+    const sameDate =
+      lockEventId === eventId ||
+      (await eventsShareCapacity(pool, eventId, lockEventId));
+    if (sameDate) currentSpaceSelection = lockSpaces;
   }
 
   const [dateRows] = await pool.query(
@@ -467,10 +482,7 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
 
   const page = await getEventBookingPage(pool, eventId, session);
   const adminBooking = ensureAdminBookingSession(session);
-  let available = page.spaces_available;
-  if (adminBooking?.space_required) {
-    available += Number(adminBooking.space_required) || 0;
-  }
+  const available = page.spaces_available;
 
   if (available < spaces) {
     const err = new Error(
@@ -496,9 +508,10 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
   let previousSpaces = 0;
   const adminBookingSession = adminBooking || {};
   const resolvedAdminId = Number(adminId) || 0;
-  const mutexName = `admin_event_lock_${resolvedAdminId}_${parentId}`;
+  const capacityKey = Number(parentId) > 0 ? `p${parentId}` : `e${eventId}`;
+  const mutexName = `course_capacity_${capacityKey}`;
 
-  // Serialize concurrent Take booking / resize requests for the same admin+event.
+  // Serialize every admin take/resize against this course date.
   await pool.query('SELECT GET_LOCK(?, 10)', [mutexName]);
 
   try {
@@ -538,6 +551,24 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
         previousSpaces = Number(existingByUser[0].space_required) || 0;
       }
     }
+
+    let heldOnThisDate = 0;
+    if (lockId && previousSpaces > 0) {
+      const [heldRows] = await pool.query(
+        'SELECT event_id FROM lock_bookings WHERE id = ? LIMIT 1',
+        [lockId]
+      );
+      const heldEventId = Number(heldRows?.[0]?.event_id) || 0;
+      if (
+        heldEventId &&
+        (await eventsShareCapacity(pool, eventId, heldEventId))
+      ) {
+        heldOnThisDate = previousSpaces;
+      }
+    }
+    await assertAdminCanTakeSpaces(pool, eventId, spaces, {
+      creditSpaces: heldOnThisDate,
+    });
 
     if (lockId && previousSpaces > 0) {
       // Release seats from the lock's current event group (may differ when changing date).

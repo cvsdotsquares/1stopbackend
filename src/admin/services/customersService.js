@@ -684,9 +684,10 @@ async function listAttendingCustomers(pool, { page = 1, limit = RECORDS_PER_PAGE
       OR booking_attendees.contact1 = ?
       OR booking_attendees.contact2 = ?
       OR booking_attendees.contact3 = ?
+      OR booking_attendees.license_number LIKE ?
       OR CONCAT(booking_attendees.first_name, ' ', booking_attendees.sur_name) LIKE ?
     )`;
-    params.push(like, like, like, like, nameScr, nameScr, nameScr, like);
+    params.push(like, like, like, like, nameScr, nameScr, nameScr, like, like);
   }
 
   const fromJoin = `

@@ -10,6 +10,7 @@ const {
   isEventDatePassed,
 } = require('./adminBookingHoldService');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
+const { assertAdminCanTakeSpaces } = require('../../utils/courseEventGroup');
 
 const TBC_DATE = '0000-00-00';
 
@@ -1234,6 +1235,14 @@ async function updateBooking(pool, idParam, body, adminId, session) {
   const isMove =
     newEventId > 0 && newEventId !== Number(booking.course_event_id);
 
+  if (isMove) {
+    const spacesNeeded = Number(booking.spaces) || 1;
+    await assertAdminCanTakeSpaces(pool, newEventId, spacesNeeded, {
+      creditSpaces: spacesNeeded,
+      creditSpacesFromEventId: booking.course_event_id,
+    });
+  }
+
   if (currentVehicleType !== 3 && (vehicleChanged || isMove)) {
     let decField =
       currentVehicleType === 0
@@ -1324,16 +1333,6 @@ async function updateBooking(pool, idParam, body, adminId, session) {
   let resultBookingId = booking.id;
 
   if (newEventId && newEventId !== Number(booking.course_event_id)) {
-    const limit = Number(targetEvent.booking_limit) || 0;
-    const done = Number(targetEvent.bookings_done) || 0;
-    const locks = Number(targetEvent.current_locks) || 0;
-    const spacesNeeded = Number(booking.spaces) || 1;
-    if (limit - done - locks < spacesNeeded) {
-      const err = new Error('No space available on this moved location');
-      err.status = 400;
-      throw err;
-    }
-
     const oldPaid = Number(booking.total_amount) - Number(booking.payment_due);
     if (
       courseCost !== Number(booking.total_amount) ||

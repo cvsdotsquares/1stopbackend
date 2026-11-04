@@ -9,6 +9,7 @@ const {
   attachInferredOwnVehicle,
 } = require('../../utils/ownVehicleAvailability');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
+const { assertAdminCanTakeSpaces } = require('../../utils/courseEventGroup');
 const { sendAdminBookingConfirmationEmail } = require('./adminBookingEmailService');
 
 const TBC_DATE = '0000-00-00';
@@ -588,20 +589,10 @@ async function reinstateBooking(pool, bookingIdParam, adminId = 0, options = {})
 
     const returningToOriginal = targetEventId === fromEventId;
     const spacesNeeded = Number(booking.spaces) || 1;
-    if (!returningToOriginal) {
-      if (await isEventFrozen(connection, targetEventId)) {
-        throw httpError('Selected course date is frozen');
-      }
-      if (!eventHasSpace(targetEvent, spacesNeeded)) {
-        throw httpError(
-          'This date has no remaining spaces. Please choose another course date and location.'
-        );
-      }
-    } else if (!eventHasSpace(targetEvent, spacesNeeded)) {
-      throw httpError(
-        'This date has no remaining spaces. Please choose another course date and location.'
-      );
+    if (!returningToOriginal && (await isEventFrozen(connection, targetEventId))) {
+      throw httpError('Selected course date is frozen');
     }
+    await assertAdminCanTakeSpaces(connection, targetEventId, spacesNeeded);
 
     await assertTargetEventVehicleAvailable(
       connection,
