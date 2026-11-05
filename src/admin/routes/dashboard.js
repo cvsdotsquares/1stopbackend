@@ -18,6 +18,9 @@ function createDashboardRoutes(pool) {
   router.get('/next-course-dates', requireAdminSession, (req, res) =>
     controller.getNextCourseDates(req, res)
   );
+  router.get('/alerts', requireAdminSession, (req, res) =>
+    controller.getAlerts(req, res)
+  );
 
   return router;
 }

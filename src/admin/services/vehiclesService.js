@@ -794,7 +794,6 @@ async function createVehicleLog(pool, vehicleId, body, session) {
   }
   if (
     !trim(body.add_log_date ?? body.log_date) ||
-    !trim(body.add_log_notes ?? body.log_notes) ||
     !trim(body.log_issue_status ?? body.issue_status) ||
     !Number(body.log_event_id)
   ) {
@@ -848,7 +847,6 @@ async function updateVehicleLog(pool, logId, body, session) {
   }
   if (
     !trim(body.add_log_date ?? body.log_date) ||
-    !trim(body.add_log_notes ?? body.log_notes) ||
     !trim(body.log_issue_status ?? body.issue_status) ||
     !Number(body.log_event_id)
   ) {

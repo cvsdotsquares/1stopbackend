@@ -17,6 +17,97 @@ function isValidEmail(value) {
 
 const DEFAULT_PAGE_SIZE = 10;
 
+const PROFILE_COLUMNS = [
+  ['nok1_name', 'VARCHAR(150) NULL DEFAULT NULL'],
+  ['nok1_contact', 'VARCHAR(40) NULL DEFAULT NULL'],
+  ['nok1_relationship', 'VARCHAR(80) NULL DEFAULT NULL'],
+  ['nok2_name', 'VARCHAR(150) NULL DEFAULT NULL'],
+  ['nok2_contact', 'VARCHAR(40) NULL DEFAULT NULL'],
+  ['nok2_relationship', 'VARCHAR(80) NULL DEFAULT NULL'],
+  ['instructor_badge_expiry', 'DATE NULL DEFAULT NULL'],
+];
+
+let profileColumnsReady = false;
+
+async function ensureInstructorProfileColumns(pool) {
+  if (profileColumnsReady) return;
+  const [cols] = await pool.query('SHOW COLUMNS FROM itineraries');
+  const names = new Set((cols || []).map((col) => col.Field));
+  for (const [name, definition] of PROFILE_COLUMNS) {
+    if (names.has(name)) continue;
+    await pool.query(`ALTER TABLE itineraries ADD COLUMN ${name} ${definition}`);
+  }
+  profileColumnsReady = true;
+}
+
+function formatBadgeExpiry(value) {
+  if (!value) return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const day = String(value.getUTCDate()).padStart(2, '0');
+    const month = String(value.getUTCMonth() + 1).padStart(2, '0');
+    return `${day}/${month}/${value.getUTCFullYear()}`;
+  }
+  const raw = String(value).slice(0, 10);
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : '';
+}
+
+function parseBadgeExpiry(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { ok: true, value: null };
+  const match = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) {
+    return {
+      ok: false,
+      message: 'Instructor Badge Expiry Date must be DD/MM/YYYY',
+    };
+  }
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return {
+      ok: false,
+      message: 'Instructor Badge Expiry Date is not a valid date',
+    };
+  }
+  return { ok: true, value: `${match[3]}-${match[2]}-${match[1]}` };
+}
+
+function profileFromRow(row) {
+  return {
+    nok1_name: String(row.nok1_name || ''),
+    nok1_contact: String(row.nok1_contact || ''),
+    nok1_relationship: String(row.nok1_relationship || ''),
+    nok2_name: String(row.nok2_name || ''),
+    nok2_contact: String(row.nok2_contact || ''),
+    nok2_relationship: String(row.nok2_relationship || ''),
+    instructor_badge_expiry: formatBadgeExpiry(row.instructor_badge_expiry),
+  };
+}
+
+function profileFromPayload(data) {
+  const badge = parseBadgeExpiry(data.instructor_badge_expiry);
+  if (!badge.ok) return badge;
+  return {
+    ok: true,
+    value: {
+      nok1_name: String(data.nok1_name || '').trim().slice(0, 150),
+      nok1_contact: String(data.nok1_contact || '').trim().slice(0, 40),
+      nok1_relationship: String(data.nok1_relationship || '').trim().slice(0, 80),
+      nok2_name: String(data.nok2_name || '').trim().slice(0, 150),
+      nok2_contact: String(data.nok2_contact || '').trim().slice(0, 40),
+      nok2_relationship: String(data.nok2_relationship || '').trim().slice(0, 80),
+      instructor_badge_expiry: badge.value,
+    },
+  };
+}
+
 /**
  * List instructors with search and optional status filtering
  */
@@ -24,6 +115,7 @@ async function listInstructors(
   pool,
   { page = 1, limit = 0, search = '', status = '' } = {}
 ) {
+  await ensureInstructorProfileColumns(pool);
   const pageNum = Math.max(1, Number(page) || 1);
   const pageSize = Number(limit) > 0 ? Number(limit) : 0;
   const offset = (pageNum - 1) * pageSize;
@@ -73,6 +165,13 @@ async function listInstructors(
       i.email,
       i.username,
       i.instructor_certificate_number,
+      i.nok1_name,
+      i.nok1_contact,
+      i.nok1_relationship,
+      i.nok2_name,
+      i.nok2_contact,
+      i.nok2_relationship,
+      i.instructor_badge_expiry,
       i.location,
       COALESCE(l.location_name, 'All Locations') AS location_name,
       i.status,
@@ -95,6 +194,7 @@ async function listInstructors(
       email: String(row.email || ''),
       username: String(row.username || ''),
       instructor_certificate_number: String(row.instructor_certificate_number || ''),
+      ...profileFromRow(row),
       location: Number(row.location) || 0,
       location_name: row.location === 0 ? 'All Locations' : String(row.location_name || 'All Locations'),
       status: Number(row.status) === 1 ? 1 : 0,
@@ -114,6 +214,7 @@ async function listInstructors(
  * Get instructor by ID
  */
 async function getInstructorById(pool, instructorId) {
+  await ensureInstructorProfileColumns(pool);
   const id = Number(instructorId);
   if (!Number.isFinite(id) || id <= 0) return null;
 
@@ -125,6 +226,13 @@ async function getInstructorById(pool, instructorId) {
       i.email,
       i.username,
       i.instructor_certificate_number,
+      i.nok1_name,
+      i.nok1_contact,
+      i.nok1_relationship,
+      i.nok2_name,
+      i.nok2_contact,
+      i.nok2_relationship,
+      i.instructor_badge_expiry,
       i.location,
       COALESCE(l.location_name, 'All Locations') AS location_name,
       i.status,
@@ -147,6 +255,7 @@ async function getInstructorById(pool, instructorId) {
     email: String(row.email || ''),
     username: String(row.username || ''),
     instructor_certificate_number: String(row.instructor_certificate_number || ''),
+    ...profileFromRow(row),
     location: Number(row.location) || 0,
     location_name: row.location === 0 ? 'All Locations' : String(row.location_name || 'All Locations'),
     status: Number(row.status) === 1 ? 1 : 0,
@@ -159,6 +268,7 @@ async function getInstructorById(pool, instructorId) {
  * Create instructor (add_itinerary.php parity)
  */
 async function createInstructor(pool, data) {
+  await ensureInstructorProfileColumns(pool);
   const fname = String(data.fname || '').trim();
   const lname = String(data.lname || '').trim();
   const email = String(data.email || '').trim();
@@ -167,6 +277,8 @@ async function createInstructor(pool, data) {
   const certNumber = String(data.instructor_certificate_number || '').trim();
   const location = Number(data.location) || 0;
   const status = Number(data.status) === 0 ? 0 : 1;
+  const profile = profileFromPayload(data);
+  if (!profile.ok) return { ok: false, message: profile.message };
 
   if (!fname) {
     return { ok: false, message: 'First name is required' };
@@ -217,11 +329,34 @@ async function createInstructor(pool, data) {
       username,
       pass,
       instructor_certificate_number,
+      nok1_name,
+      nok1_contact,
+      nok1_relationship,
+      nok2_name,
+      nok2_contact,
+      nok2_relationship,
+      instructor_badge_expiry,
       location,
       status,
       created
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [fname, lname, email, username, encryptedPass, certNumber, location, status]
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+    [
+      fname,
+      lname,
+      email,
+      username,
+      encryptedPass,
+      certNumber,
+      profile.value.nok1_name,
+      profile.value.nok1_contact,
+      profile.value.nok1_relationship,
+      profile.value.nok2_name,
+      profile.value.nok2_contact,
+      profile.value.nok2_relationship,
+      profile.value.instructor_badge_expiry,
+      location,
+      status,
+    ]
   );
 
   return {
@@ -253,6 +388,8 @@ async function updateInstructor(pool, instructorId, data) {
   const certNumber = String(data.instructor_certificate_number || '').trim();
   const location = data.location !== undefined ? Number(data.location) || 0 : existing.location;
   const status = data.status !== undefined ? (Number(data.status) === 0 ? 0 : 1) : existing.status;
+  const profile = profileFromPayload(data);
+  if (!profile.ok) return { ok: false, message: profile.message };
 
   if (!fname) {
     return { ok: false, message: 'First name is required' };
@@ -300,10 +437,34 @@ async function updateInstructor(pool, instructorId, data) {
         username = ?,
         pass = ?,
         instructor_certificate_number = ?,
+        nok1_name = ?,
+        nok1_contact = ?,
+        nok1_relationship = ?,
+        nok2_name = ?,
+        nok2_contact = ?,
+        nok2_relationship = ?,
+        instructor_badge_expiry = ?,
         location = ?,
         status = ?
       WHERE id = ?`,
-      [fname, lname, email, username, encryptedPass, certNumber, location, status, id]
+      [
+        fname,
+        lname,
+        email,
+        username,
+        encryptedPass,
+        certNumber,
+        profile.value.nok1_name,
+        profile.value.nok1_contact,
+        profile.value.nok1_relationship,
+        profile.value.nok2_name,
+        profile.value.nok2_contact,
+        profile.value.nok2_relationship,
+        profile.value.instructor_badge_expiry,
+        location,
+        status,
+        id,
+      ]
     );
   } else {
     await pool.query(
@@ -313,10 +474,33 @@ async function updateInstructor(pool, instructorId, data) {
         email = ?,
         username = ?,
         instructor_certificate_number = ?,
+        nok1_name = ?,
+        nok1_contact = ?,
+        nok1_relationship = ?,
+        nok2_name = ?,
+        nok2_contact = ?,
+        nok2_relationship = ?,
+        instructor_badge_expiry = ?,
         location = ?,
         status = ?
       WHERE id = ?`,
-      [fname, lname, email, username, certNumber, location, status, id]
+      [
+        fname,
+        lname,
+        email,
+        username,
+        certNumber,
+        profile.value.nok1_name,
+        profile.value.nok1_contact,
+        profile.value.nok1_relationship,
+        profile.value.nok2_name,
+        profile.value.nok2_contact,
+        profile.value.nok2_relationship,
+        profile.value.instructor_badge_expiry,
+        location,
+        status,
+        id,
+      ]
     );
   }
 

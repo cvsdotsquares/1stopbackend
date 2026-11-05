@@ -19,6 +19,9 @@ const {
   resolveMotoIntegrationMode,
 } = require('./motoPaymentService');
 const { adminSeatsWouldFit } = require('../../utils/courseEventGroup');
+const {
+  loadConfirmationEventSummary,
+} = require('./bookingConfirmationHelpers');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -377,7 +380,7 @@ async function getBookingConfirmationDetails(pool, { evId, cartId } = {}) {
   }
 
   if (!bookingIds.length) {
-    return { event_id: evId || null, bookings: [] };
+    return { event_id: evId || null, event: null, bookings: [] };
   }
 
   const bookings = [];
@@ -387,13 +390,10 @@ async function getBookingConfirmationDetails(pool, { evId, cartId } = {}) {
               b.type_of_book, b.created,
               ba.booking_ref, ba.first_name, ba.sur_name, ba.email, ba.contact1,
               ba.vehicle_type, ba.license_number,
-              c.course_name, ce.id AS course_event_id,
-              l.location_name
+              ce.id AS course_event_id
        FROM bookings b
        JOIN booking_attendees ba ON ba.booking_id = b.id
        JOIN course_events ce ON ce.id = b.course_event_id
-       JOIN courses c ON c.id = b.course_id
-       LEFT JOIN locations l ON l.id = ce.location_id
        WHERE b.id = ?
        LIMIT 1`,
       [bookingId]
@@ -403,23 +403,28 @@ async function getBookingConfirmationDetails(pool, { evId, cartId } = {}) {
 
   const resolvedEvId =
     evId || bookings[0]?.course_event_id || null;
+  const event = await loadConfirmationEventSummary(pool, resolvedEvId);
 
   return {
     event_id: resolvedEvId,
-    bookings: bookings.map((row) => ({
-      id: row.id,
-      booking_ref: row.booking_ref,
-      status: Number(row.status),
-      pupil: `${row.first_name || ''} ${row.sur_name || ''}`.trim(),
-      email: row.email || '',
-      contact1: row.contact1 || '',
-      course_name: row.course_name || '',
-      location_name: row.location_name || '',
-      payment_received: Number(row.admin_payment_received) || 0,
-      payment_due: Number(row.payment_due) || 0,
-      total_amount: Number(row.total_amount) || 0,
-      created: row.created,
-    })),
+    event,
+    bookings: bookings.map((row) => {
+      const totalAmount = Number(row.total_amount) || 0;
+      const paymentDue = Number(row.payment_due) || 0;
+      const paymentReceived = Math.max(0, totalAmount - paymentDue);
+      return {
+        id: row.id,
+        booking_ref: row.booking_ref,
+        status: Number(row.status),
+        name: `${row.first_name || ''} ${row.sur_name || ''}`.trim(),
+        email: row.email || '',
+        contact1: row.contact1 || '',
+        payment_received: paymentReceived,
+        payment_due: paymentDue,
+        total_amount: totalAmount,
+        created: row.created,
+      };
+    }),
   };
 }
 

@@ -70,6 +70,10 @@ class BookingsController {
         searchterm: {
           name_scr: req.query.name_scr,
           status_scr: req.query.status_scr,
+          course_scr: req.query.course_scr,
+          location_scr: req.query.location_scr,
+          tob_scr: req.query.tob_scr,
+          payment_scr: req.query.payment_scr,
         },
       });
       return res.json({ success: true, data });

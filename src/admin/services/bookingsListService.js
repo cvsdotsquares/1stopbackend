@@ -1,5 +1,8 @@
 const { isEventDatePassed } = require('./adminBookingHoldService');
-const { getTransactionTypeLabel } = require('../../utils/typeOfBook');
+const {
+  getTransactionTypeLabel,
+  getTransactionTypeFilterOptions,
+} = require('../../utils/typeOfBook');
 const {
   getExpireMinutes,
   getExpireGraceMs,
@@ -111,6 +114,17 @@ function resolveBookedLabel(booking, paymentRow, expiredPaymentLink) {
   return formatBookingCreated(booking.created);
 }
 
+function buildPaymentFilter(paymentScr) {
+  const key = trim(paymentScr).toLowerCase();
+  if (key === 'paid') {
+    return ' AND IFNULL(bookings.payment_due, 0) <= 0 ';
+  }
+  if (key === 'outstanding') {
+    return ' AND IFNULL(bookings.payment_due, 0) > 0 ';
+  }
+  return '';
+}
+
 function buildStatusFilter(statusScr) {
   const key = trim(statusScr).toLowerCase();
   switch (key) {
@@ -129,16 +143,74 @@ function buildStatusFilter(statusScr) {
   }
 }
 
+async function loadBookingsListFilterOptions(pool) {
+  const [courseRows] = await pool.query(
+    `SELECT id, course_name
+     FROM courses
+     WHERE isDeleted = '0' AND status IN ('1', '2')
+     ORDER BY course_name ASC`
+  );
+  const [locationRows] = await pool.query(
+    `SELECT id, location_name
+     FROM locations
+     WHERE status = '1'
+     ORDER BY location_name ASC`
+  );
+  return {
+    courses: (courseRows || []).map((row) => ({
+      value: String(row.id),
+      label: row.course_name || '',
+    })),
+    locations: (locationRows || []).map((row) => ({
+      value: String(row.id),
+      label: row.location_name || '',
+    })),
+    type_of_booking: (() => {
+      const options = getTransactionTypeFilterOptions().filter((opt) => opt.value);
+      if (!options.some((opt) => opt.value === 'w')) {
+        options.push({ value: 'w', label: 'Worldpay' });
+      }
+      return options.sort((a, b) => a.label.localeCompare(b.label));
+    })(),
+    payment_status: [
+      { value: 'paid', label: 'Paid' },
+      { value: 'outstanding', label: 'Outstanding' },
+    ],
+  };
+}
+
 async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
   const nameScr = trim(searchterm?.name_scr);
   const statusScr = trim(searchterm?.status_scr);
+  const courseScr = trim(searchterm?.course_scr);
+  const locationScr = trim(searchterm?.location_scr);
+  const tobScr = trim(searchterm?.tob_scr);
+  const paymentScr = trim(searchterm?.payment_scr);
 
   // Confirmed / on-hold / refunded only — unpaid (status 0) live on In Progress page.
   let where = ' WHERE bookings.status != 5 AND bookings.status != 0 ';
   const params = [];
 
   where += buildStatusFilter(statusScr);
+  where += buildPaymentFilter(paymentScr);
+
+  const courseId = Number(courseScr);
+  if (Number.isFinite(courseId) && courseId > 0) {
+    where += ' AND bookings.course_id = ? ';
+    params.push(courseId);
+  }
+
+  const locationId = Number(locationScr);
+  if (Number.isFinite(locationId) && locationId > 0) {
+    where += ' AND course_events.location_id = ? ';
+    params.push(locationId);
+  }
+
+  if (tobScr) {
+    where += ' AND bookings.type_of_book = ? ';
+    params.push(tobScr);
+  }
 
   if (nameScr) {
     const like = `%${nameScr}%`;
@@ -181,7 +253,13 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
     LEFT JOIN (
       SELECT
         course_event_id,
-        MIN(event_date) AS event_date,
+        MIN(
+          CASE
+            WHEN event_date > '1900-01-01'
+             AND event_date NOT IN ('1111-11-11', '0000-00-00')
+            THEN event_date
+          END
+        ) AS event_date,
         MAX(
           CASE
             WHEN event_date > '1900-01-01'
@@ -300,16 +378,24 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
       };
   });
 
+  const filterOptions = await loadBookingsListFilterOptions(pool);
+
   return {
     items,
     pagination: paginationMeta(pageNum, RECORDS_PER_PAGE, total),
     filters: {
       name_scr: nameScr,
       status_scr: statusScr,
+      course_scr: courseScr,
+      location_scr: locationScr,
+      tob_scr: tobScr,
+      payment_scr: paymentScr,
     },
+    filterOptions,
   };
 }
 
 module.exports = {
   listBookings,
+  loadBookingsListFilterOptions,
 };
