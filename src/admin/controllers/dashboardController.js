@@ -11,6 +11,7 @@ const {
   parseViewParams,
   getNextCourseDates,
 } = require('../services/dashboardService');
+const { getDashboardAlerts } = require('../services/dashboardAlertsService');
 const {
   showMonthDashboard,
   showMonthDashboardNew,
@@ -183,6 +184,19 @@ class DashboardController {
       return res.status(500).json({
         success: false,
         message: 'Unable to load in-progress bookings',
+      });
+    }
+  }
+
+  async getAlerts(req, res) {
+    try {
+      const data = await getDashboardAlerts(this.pool);
+      return res.json({ success: true, data });
+    } catch (err) {
+      console.error('[ADMIN][DASHBOARD][ALERTS]', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Unable to load dashboard alerts',
       });
     }
   }

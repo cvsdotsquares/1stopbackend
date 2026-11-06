@@ -11,6 +11,21 @@ function formatTimestamp(date = new Date()) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+let ownVehicleModeReady = false;
+
+async function ensureOwnVehicleModeColumn(pool) {
+  if (ownVehicleModeReady) return;
+  const [cols] = await pool.query(
+    "SHOW COLUMNS FROM courses LIKE 'own_vehicle_mode'"
+  );
+  if (!cols || cols.length === 0) {
+    await pool.query(
+      'ALTER TABLE courses ADD COLUMN own_vehicle_mode TINYINT(1) NOT NULL DEFAULT 0'
+    );
+  }
+  ownVehicleModeReady = true;
+}
+
 function getStatusLabel(status) {
   const index = Number(status);
   return COURSE_STATUS_LABELS[index] ?? COURSE_STATUS_LABELS[0];
@@ -49,6 +64,7 @@ function mapCourseRow(row) {
     default_own_one_off_price: row.default_own_one_off_price,
     default_own_deposit_price: row.default_own_deposit_price,
     default_own_total_price: row.default_own_total_price,
+    own_vehicle_mode: Number(row.own_vehicle_mode) === 1 ? 1 : 0,
     status: String(row.status ?? '0'),
     status_label: getStatusLabel(row.status),
     is_cbt: Number(row.is_cbt) || 0,
@@ -73,6 +89,7 @@ function buildListWhere(searchterm) {
 }
 
 async function listCourses(pool, { page = 1, searchterm = {} } = {}) {
+  await ensureOwnVehicleModeColumn(pool);
   const pageNum = Math.max(1, Number(page) || 1);
   const { where, params } = buildListWhere(searchterm);
   const offset = (pageNum - 1) * RECORDS_PER_PAGE;
@@ -108,6 +125,7 @@ async function listCourses(pool, { page = 1, searchterm = {} } = {}) {
 }
 
 async function getCourseById(pool, id) {
+  await ensureOwnVehicleModeColumn(pool);
   const [rows] = await pool.query('SELECT * FROM courses WHERE id = ? LIMIT 1', [
     id,
   ]);
@@ -320,11 +338,13 @@ function validateCourseBody(body, isEdit = false) {
       status,
       is_cbt: isCbt ? 1 : 0,
       dvsa_email: isCbt ? trim(body.dvsa_email) : '',
+      own_vehicle_mode: String(body.own_vehicle_mode ?? '0') === '1' ? 1 : 0,
     },
   };
 }
 
 async function createCourse(pool, body) {
+  await ensureOwnVehicleModeColumn(pool);
   const validation = validateCourseBody(body, false);
   if (!validation.ok) {
     return validation;
@@ -349,8 +369,8 @@ async function createCourse(pool, body) {
       default_automatic_vehicle, default_start_time, default_end_time,
       default_price_type, default_school_one_off_price, default_school_deposit_price,
       default_school_total_price, default_own_one_off_price, default_own_deposit_price,
-      default_own_total_price, course_abb, is_cbt, dvsa_email, course_bullet_points
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      default_own_total_price, own_vehicle_mode, course_abb, is_cbt, dvsa_email, course_bullet_points
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.course_name,
       data.description,
@@ -376,6 +396,7 @@ async function createCourse(pool, body) {
       data.default_own_one_off_price,
       data.default_own_deposit_price,
       data.default_own_total_price,
+      data.own_vehicle_mode,
       data.course_abb,
       data.is_cbt,
       data.dvsa_email,
@@ -427,6 +448,7 @@ async function updateCourse(pool, id, body) {
       default_school_one_off_price = ?, default_school_deposit_price = ?,
       default_school_total_price = ?, default_own_one_off_price = ?,
       default_own_deposit_price = ?, default_own_total_price = ?,
+      own_vehicle_mode = ?,
       course_abb = ?, is_cbt = ?,
       dvsa_email = ?, send_feedback_mail = ?, course_bullet_points = ?
     WHERE id = ?`,
@@ -454,6 +476,7 @@ async function updateCourse(pool, id, body) {
       data.default_own_one_off_price,
       data.default_own_deposit_price,
       data.default_own_total_price,
+      data.own_vehicle_mode,
       data.course_abb,
       data.is_cbt,
       data.dvsa_email,
@@ -514,6 +537,7 @@ async function softDeleteCourse(pool, id) {
 module.exports = {
   RECORDS_PER_PAGE,
   COURSE_STATUS_LABELS,
+  ensureOwnVehicleModeColumn,
   listCourses,
   getCourseById,
   createCourse,
