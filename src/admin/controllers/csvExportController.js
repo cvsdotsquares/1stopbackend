@@ -1,5 +1,7 @@
 const {
   shareCourseDatesCsv,
+  searchAttendeesForMailshot,
+  searchAttendeesForMailshotBatch,
   listStripePaymentLinks,
 } = require('../services/csvExportService');
 
@@ -20,6 +22,26 @@ class CsvExportController {
       return res.status(status).json({
         success: false,
         message: err.message || 'Unable to load payment links',
+      });
+    }
+  }
+
+  async attendeeSearch(req, res) {
+    try {
+      const body = req.body || {};
+      const queries = Array.isArray(body.queries) ? body.queries : null;
+      const items = queries
+        ? await searchAttendeesForMailshotBatch(this.pool, queries)
+        : await searchAttendeesForMailshot(this.pool, body);
+      return res.json({ success: true, data: { items } });
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) {
+        console.error('[ADMIN][CSV_EXPORT][ATTENDEE_SEARCH]', err.message);
+      }
+      return res.status(status).json({
+        success: false,
+        message: err.message || 'Unable to load attendees',
       });
     }
   }

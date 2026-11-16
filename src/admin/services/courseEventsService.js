@@ -49,10 +49,58 @@ function buildListWhere(searchterm = {}) {
     conditions.push('course_event_dates.event_date >= CURDATE()');
   }
 
+  if (trim(searchterm.exclude_frozen) === '1') {
+    conditions.push(
+      'course_events.id NOT IN (SELECT course_event_id FROM freeze WHERE course_event_id IS NOT NULL)'
+    );
+  }
+
+  if (trim(searchterm.only_available) === '1') {
+    conditions.push(
+      '(course_events.booking_limit - course_events.bookings_done - COALESCE(course_events.current_locks, 0)) > 0'
+    );
+  }
+
   return {
     where: `WHERE ${conditions.join(' AND ')}`,
     params,
   };
+}
+
+function buildScopedEventDateSql(searchterm = {}) {
+  const conditions = [
+    `course_events.status = '1'`,
+    `courses.status IN ('1', '2')`,
+    `course_event_dates.event_date != '0000-00-00'`,
+  ];
+  const params = [];
+
+  const fromScr = trim(searchterm.from_scr);
+  const toScr = trim(searchterm.to_scr);
+  if (fromScr) {
+    conditions.push('course_event_dates.event_date >= ?');
+    params.push(fromScr);
+  } else {
+    conditions.push('course_event_dates.event_date >= CURDATE()');
+  }
+  if (toScr) {
+    conditions.push('course_event_dates.event_date <= ?');
+    params.push(toScr);
+  }
+
+  if (trim(searchterm.only_available) === '1') {
+    conditions.push(
+      '(course_events.booking_limit - course_events.bookings_done - COALESCE(course_events.current_locks, 0)) > 0'
+    );
+  }
+
+  if (trim(searchterm.exclude_frozen) === '1') {
+    conditions.push(
+      'course_events.id NOT IN (SELECT course_event_id FROM freeze WHERE course_event_id IS NOT NULL)'
+    );
+  }
+
+  return { conditions, params };
 }
 
 const LIST_SELECT = `
@@ -123,12 +171,14 @@ function formatDisplayDate(value) {
   if (!raw) return '';
   const d = new Date(`${raw}T12:00:00`);
   if (Number.isNaN(d.getTime())) return raw;
+  const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ];
   const day = String(d.getDate()).padStart(2, '0');
-  return `${day}-${months[d.getMonth()]}-${d.getFullYear()}`;
+  const year = String(d.getFullYear()).slice(-2);
+  return `${weekdays[d.getDay()]}, ${day} ${months[d.getMonth()]} ${year}`;
 }
 
 function formatPriceLabel(row) {
@@ -168,6 +218,10 @@ function mapListRow(row, frozenMap) {
   const bookingsDone = isFrozen
     ? String(frozen.bookings_done ?? row.bookings_done ?? '0')
     : String(row.bookings_done ?? '0');
+  const bookingLimit = Number(row.booking_limit) || 0;
+  const bookingsNum = Number(bookingsDone) || 0;
+  const currentLocks = Number(row.current_locks) || 0;
+  const availableSpaces = Math.max(0, bookingLimit - bookingsNum - currentLocks);
 
   return {
     id: row.id,
@@ -187,6 +241,7 @@ function mapListRow(row, frozenMap) {
     school_total_price: row.school_total_price,
     bookings_done: bookingsDone,
     booking_limit: String(row.booking_limit ?? ''),
+    available_spaces: availableSpaces,
     event_type: row.event_type,
     parent: row.parent,
     status: String(row.status ?? '0'),
@@ -261,12 +316,17 @@ function isOwnVehicleEnabled(value) {
   return value != null && String(value) !== '' && Number(value) !== 0;
 }
 
-async function getCourseFilterOptions(pool) {
+async function getCourseFilterOptions(pool, searchterm = {}) {
+  const { conditions, params } = buildScopedEventDateSql(searchterm);
   const [rows] = await pool.query(
-    `SELECT id, course_name
-     FROM courses
-     WHERE isDeleted = '0' AND status IN ('1', '2')
-     ORDER BY course_name ASC`
+    `SELECT DISTINCT courses.id, courses.course_name
+     FROM course_event_dates
+     JOIN course_events ON course_events.id = course_event_dates.course_event_id
+     JOIN courses ON courses.id = course_events.course_id
+     WHERE courses.isDeleted = '0'
+       AND ${conditions.join(' AND ')}
+     ORDER BY courses.course_name ASC`,
+    params
   );
   return (rows || []).map((row) => ({
     value: String(row.id),
@@ -274,7 +334,7 @@ async function getCourseFilterOptions(pool) {
   }));
 }
 
-async function getLocationsByCourse(pool, courseId) {
+async function getLocationsByCourse(pool, courseId, searchterm = {}) {
   const cid = Number(courseId);
   const hasCourse = Number.isFinite(cid) && cid > 0;
   const params = [];
@@ -284,19 +344,19 @@ async function getLocationsByCourse(pool, courseId) {
     params.push(cid);
   }
 
+  const { conditions, params: scopeParams } = buildScopedEventDateSql(searchterm);
+
   const [rows] = await pool.query(
     `SELECT locations.id AS location_id, locations.location_name
      FROM course_event_dates
      JOIN course_events ON course_events.id = course_event_dates.course_event_id
      JOIN courses ON courses.id = course_events.course_id
      JOIN locations ON locations.id = course_events.location_id
-     WHERE course_events.status = '1'
-       AND courses.status IN ('1', '2')
-       AND course_event_dates.event_date != '0000-00-00'
+     WHERE ${conditions.join(' AND ')}
        ${courseClause}
      GROUP BY locations.id, locations.location_name
      ORDER BY locations.location_name ASC`,
-    params
+  [...scopeParams, ...params]
   );
 
   const seen = new Set();
@@ -313,6 +373,27 @@ async function getLocationsByCourse(pool, courseId) {
 }
 
 async function listCourseEvents(pool, { page = 1, searchterm = {} } = {}) {
+  if (trim(searchterm.options_only) === '1') {
+    return {
+      items: [],
+      pagination: {
+        page: 1,
+        perPage: RECORDS_PER_PAGE,
+        total: 0,
+        totalPages: 1,
+      },
+      filters: {
+        name_scr: trim(searchterm.name_scr),
+        from_scr: trim(searchterm.from_scr),
+        to_scr: trim(searchterm.to_scr),
+        loc_scr: trim(searchterm.loc_scr),
+        sort: trim(searchterm.sort),
+      },
+      courseOptions: await getCourseFilterOptions(pool, searchterm),
+      locationOptions: await getLocationsByCourse(pool, searchterm.name_scr, searchterm),
+    };
+  }
+
   const pageNum = Math.max(1, Number(page) || 1);
   const { where, params } = buildListWhere(searchterm);
   const offset = (pageNum - 1) * RECORDS_PER_PAGE;
@@ -352,8 +433,8 @@ async function listCourseEvents(pool, { page = 1, searchterm = {} } = {}) {
       loc_scr: trim(searchterm.loc_scr),
       sort: trim(searchterm.sort),
     },
-    courseOptions: await getCourseFilterOptions(pool),
-    locationOptions: await getLocationsByCourse(pool, searchterm.name_scr),
+    courseOptions: await getCourseFilterOptions(pool, searchterm),
+    locationOptions: await getLocationsByCourse(pool, searchterm.name_scr, searchterm),
   };
 }
 

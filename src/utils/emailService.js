@@ -1793,3 +1793,19 @@ exports.sendCourseDatesCsvEmail = async ({ to, subject, html, filename, csv }) =
     ],
   });
 };
+
+exports.sendEmailTemplateMessage = async ({ to, bcc, subject, html }) => {
+  const bccList = Array.isArray(bcc)
+    ? bcc.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  await transporter.sendMail({
+    from: getMailFrom(),
+    ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
+    to,
+    ...(bccList.length ? { bcc: bccList.join(', ') } : {}),
+    subject,
+    html,
+  });
+};
+
+exports.resolveBookingBccForPool = resolveBookingBccForPool;
