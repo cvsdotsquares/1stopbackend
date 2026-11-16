@@ -7,6 +7,9 @@ function createCsvExportRoutes(pool) {
   const controller = new CsvExportController(pool);
 
   router.get('/payment-links', requireAdminSession, (req, res) => controller.paymentLinks(req, res));
+  router.post('/attendee-search', requireAdminSession, (req, res) =>
+    controller.attendeeSearch(req, res)
+  );
   router.post('/share', requireAdminSession, (req, res) => controller.share(req, res));
 
   return router;

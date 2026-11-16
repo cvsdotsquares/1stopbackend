@@ -44,6 +44,9 @@ class CourseEventsController {
           to_scr: req.query.to_scr,
           loc_scr: req.query.loc_scr,
           sort: req.query.sort,
+          exclude_frozen: req.query.exclude_frozen,
+          only_available: req.query.only_available,
+          options_only: req.query.options_only,
         },
       });
       return res.json({ success: true, data });
@@ -59,7 +62,12 @@ class CourseEventsController {
   async locationsByCourse(req, res) {
     try {
       const courseId = req.query.cid || req.query.course_id;
-      const locationOptions = await getLocationsByCourse(this.pool, courseId);
+      const locationOptions = await getLocationsByCourse(this.pool, courseId, {
+        from_scr: req.query.from_scr,
+        to_scr: req.query.to_scr,
+        only_available: req.query.only_available,
+        exclude_frozen: req.query.exclude_frozen,
+      });
       return res.json({ success: true, data: { locationOptions } });
     } catch (err) {
       console.error('[ADMIN][COURSE_EVENTS][LOCATIONS]', err.message);

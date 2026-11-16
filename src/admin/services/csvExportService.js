@@ -1,11 +1,22 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { getMailFromAddress } = require('../../utils/mailFrom');
-const { sendCourseDatesCsvEmail } = require('../../utils/emailService');
+const {
+  sendEmailTemplateMessage,
+  resolveBookingBccForPool,
+} = require('../../utils/emailService');
 const { getEmailTemplateById } = require('./emailTemplatesService');
 
 const MAX_EDITED_BODY = 200000;
 
-const COLUMNS = [
+const TABLE_COLUMNS = [
+  'Course',
+  'Location',
+  'Start Date',
+  'Start Time/End Time',
+  'Price',
+];
+
+const CSV_COLUMNS = [
   'Course',
   'Location',
   'Start Date',
@@ -13,6 +24,7 @@ const COLUMNS = [
   'Price',
   'Current Bookings',
   'Booking Limit',
+  'Available Spaces',
 ];
 
 const MAX_ROWS = 200;
@@ -26,6 +38,10 @@ function nowMysql() {
 
 function clip(value) {
   return String(value ?? '').trim().slice(0, MAX_FIELD);
+}
+
+function trim(value) {
+  return value == null ? '' : String(value).trim();
 }
 
 function isEmail(value) {
@@ -46,8 +62,9 @@ function htmlEscape(value) {
     .replace(/"/g, '&quot;');
 }
 
-function normalizeRows(rows) {
+function normalizeRows(rows, { allowEmpty = false } = {}) {
   if (!Array.isArray(rows) || rows.length === 0) {
+    if (allowEmpty) return [];
     const err = new Error('Select at least one course date.');
     err.status = 400;
     throw err;
@@ -65,11 +82,12 @@ function normalizeRows(rows) {
     price: clip(row.price),
     currentBookings: clip(row.currentBookings),
     bookingLimit: clip(row.bookingLimit),
+    availableSpaces: clip(row.availableSpaces),
   }));
 }
 
 function buildCsv(rows) {
-  const lines = [COLUMNS.map(csvEscape).join(',')];
+  const lines = [CSV_COLUMNS.map(csvEscape).join(',')];
   for (const row of rows) {
     lines.push(
       [
@@ -80,6 +98,7 @@ function buildCsv(rows) {
         row.price,
         row.currentBookings,
         row.bookingLimit,
+        row.availableSpaces,
       ]
         .map(csvEscape)
         .join(',')
@@ -97,31 +116,42 @@ function buildTableHtml(rows) {
         <td>${htmlEscape(row.startDate)}</td>
         <td>${htmlEscape(row.time)}</td>
         <td>${htmlEscape(row.price)}</td>
-        <td>${htmlEscape(row.currentBookings)}</td>
-        <td>${htmlEscape(row.bookingLimit)}</td>
       </tr>`
     )
     .join('');
 
+  const tableBody = bodyRows || '';
   return `<table border="1" cellpadding="6" cellspacing="0">
   <thead>
-    <tr>${COLUMNS.map((column) => `<th>${htmlEscape(column)}</th>`).join('')}</tr>
+    <tr>${TABLE_COLUMNS.map((column) => `<th>${htmlEscape(column)}</th>`).join('')}</tr>
   </thead>
-  <tbody>${bodyRows}</tbody>
+  <tbody>${tableBody}</tbody>
 </table>`;
 }
 
-function renderTemplateBody(body, { name, rows, paymentUrl }) {
+function renderTemplateBody(body, { name, rows }) {
   const source = String(body || '');
   const looksLikeHtml = /<\/?[a-z][\s\S]*>/i.test(source);
   const prepared = looksLikeHtml
     ? source
     : htmlEscape(source).replace(/\r\n|\r|\n/g, '<br/>');
-  const linkHtml = `<a href="${htmlEscape(paymentUrl)}">${htmlEscape(paymentUrl)}</a>`;
+  const tableHtml = buildTableHtml(rows);
   return prepared
     .replaceAll('[client_name]', htmlEscape(name || ''))
-    .replaceAll('[exported_table]', buildTableHtml(rows))
-    .replaceAll('[payment_link]', linkHtml);
+    .replaceAll('[exported_table]', tableHtml)
+    .replaceAll('[payment_link]', '');
+}
+
+function parseEmailList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter((item) => isEmail(item));
+  }
+  const text = String(value || '').trim();
+  if (!text) return [];
+  return text
+    .split(/[;,\s]+/)
+    .map((part) => part.trim())
+    .filter((part) => isEmail(part));
 }
 
 function httpError(message, status) {
@@ -328,7 +358,21 @@ async function resolvePaymentLink(paymentLinkId) {
   return link.url;
 }
 
-async function resolveRecipient(pool, { customerId, email, name }) {
+function mergeRecipientEmails(...sources) {
+  const merged = [];
+  const seen = new Set();
+  for (const source of sources) {
+    for (const address of parseEmailList(source)) {
+      const key = address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(address);
+    }
+  }
+  return merged;
+}
+
+async function resolveRecipient(pool, { customerId, email, name, emails }) {
   const typedEmail = String(email || '').trim();
   const typedName = clip(name);
   const id = Number(customerId);
@@ -357,19 +401,139 @@ async function resolveRecipient(pool, { customerId, email, name }) {
     }
     const customerName =
       [row.first_name, row.sur_name].filter(Boolean).join(' ').trim() || typedName;
-    return { email: customerEmail, name: customerName };
+    const addresses = mergeRecipientEmails(customerEmail, typedEmail, emails);
+    return { emails: addresses, name: customerName };
   }
 
-  if (!isEmail(typedEmail)) {
-    const err = new Error('Enter an email address for the new customer.');
+  const combined = mergeRecipientEmails(typedEmail, emails);
+  if (!combined.length) {
+    const err = new Error('Select or add at least one recipient email.');
     err.status = 400;
     throw err;
   }
-  return { email: typedEmail, name: typedName };
+  return { emails: combined, name: typedName };
+}
+
+function formatMailshotEventDate(value) {
+  const raw = String(value || '').slice(0, 10);
+  if (!raw || raw.startsWith('0000')) return '';
+  const d = new Date(`${raw}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return raw;
+  const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  const day = String(d.getDate()).padStart(2, '0');
+  const year = String(d.getFullYear()).slice(-2);
+  return `${weekdays[d.getDay()]}, ${day} ${months[d.getMonth()]} ${year}`;
+}
+
+function mapAttendeeRow(row) {
+  const eventDate = row.event_date ? String(row.event_date).slice(0, 10) : '';
+  const first = trim(row.first_name);
+  const last = trim(row.sur_name);
+  return {
+    attendee_id: Number(row.attendee_id),
+    booking_id: Number(row.booking_id),
+    booking_ref: trim(row.booking_ref),
+    first_name: first,
+    sur_name: last,
+    name: [first, last].filter(Boolean).join(' ').trim(),
+    email: trim(row.email),
+    course_name: trim(row.course_name),
+    location_name: trim(row.location_name),
+    event_date: eventDate,
+    event_date_label: formatMailshotEventDate(eventDate),
+  };
+}
+
+async function searchAttendeesForMailshot(pool, query = {}) {
+  const courseId = Number(query.course_id);
+  const locationId = Number(query.location_id);
+  const fromScr = trim(query.from_scr);
+  const toScr = trim(query.to_scr);
+
+  if (!Number.isFinite(courseId) || courseId <= 0) {
+    throw httpError('Select a course.', 400);
+  }
+  if (!Number.isFinite(locationId) || locationId <= 0) {
+    throw httpError('Select a location.', 400);
+  }
+
+  const params = [courseId, locationId];
+  let dateClause = ' AND ced.event_date >= CURDATE() ';
+  if (fromScr) {
+    dateClause = ' AND ced.event_date >= ? ';
+    params.push(fromScr);
+  }
+  if (toScr) {
+    dateClause += ' AND ced.event_date <= ? ';
+    params.push(toScr);
+  }
+
+  const [rows] = await pool.query(
+    `SELECT
+       ba.id AS attendee_id,
+       ba.booking_id,
+       ba.booking_ref,
+       ba.first_name,
+       ba.sur_name,
+       ba.email,
+       c.course_name,
+       l.location_name,
+       MIN(ced.event_date) AS event_date
+     FROM bookings b
+     INNER JOIN booking_attendees ba ON ba.booking_id = b.id
+     INNER JOIN course_events ce ON ce.id = b.course_event_id
+     INNER JOIN courses c ON c.id = b.course_id
+     INNER JOIN locations l ON l.id = ce.location_id
+     INNER JOIN course_event_dates ced ON ced.course_event_id = ce.id
+     WHERE b.status = 1
+       AND IFNULL(b.on_hold, 0) = 0
+       AND b.course_id = ?
+       AND ce.location_id = ?
+       AND ced.event_date NOT IN ('0000-00-00', '1111-11-11')
+       AND ced.event_date > '1900-01-01'
+       ${dateClause}
+       AND TRIM(IFNULL(ba.email, '')) != ''
+       AND ba.email LIKE '%@%'
+     GROUP BY ba.id, ba.booking_id, ba.booking_ref, ba.first_name, ba.sur_name, ba.email,
+       c.course_name, l.location_name
+     ORDER BY event_date ASC, ba.sur_name ASC, ba.first_name ASC
+     LIMIT 500`,
+    params
+  );
+
+  return (rows || []).map(mapAttendeeRow).filter((row) => isEmail(row.email));
+}
+
+async function searchAttendeesForMailshotBatch(pool, queries) {
+  const list = Array.isArray(queries) ? queries : [];
+  if (!list.length) {
+    throw httpError('Add at least one course search.', 400);
+  }
+  if (list.length > 20) {
+    throw httpError('Add no more than 20 course searches at once.', 400);
+  }
+
+  const merged = [];
+  const seen = new Set();
+  for (const query of list) {
+    const batch = await searchAttendeesForMailshot(pool, query);
+    for (const row of batch) {
+      const key = row.attendee_id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(row);
+    }
+  }
+  return merged;
 }
 
 async function shareCourseDatesCsv(pool, payload, emailBy) {
-  const rows = normalizeRows(payload.rows);
+  const allowEmpty = Boolean(payload.templateOnly || payload.skipDates);
+  const rows = normalizeRows(payload.rows, { allowEmpty });
   const recipient = await resolveRecipient(pool, payload);
   const templateId = Number(payload.templateId);
   if (!Number.isFinite(templateId) || templateId <= 0) {
@@ -379,29 +543,41 @@ async function shareCourseDatesCsv(pool, payload, emailBy) {
   if (!template) {
     throw httpError('Email template not found.', 400);
   }
-  const paymentUrl = await resolvePaymentLink(payload.paymentLinkId);
   const editedBody = String(payload.body || '').trim();
   if (editedBody.length > MAX_EDITED_BODY) {
     throw httpError('The email is too long.', 400);
   }
-  const csv = buildCsv(rows);
   const subject = String(template.title || 'Course dates from 1 Stop Instruction').slice(0, 200);
   const html = renderTemplateBody(editedBody || template.body, {
     name: recipient.name,
     rows,
-    paymentUrl,
   });
-  const filename = 'course-dates.csv';
+
+  const recipientEmails = [...new Set(recipient.emails)];
+  const bccBooking = Boolean(payload.bccBooking);
+  const mailshot = Boolean(payload.mailshotAttendees);
+  const bcc = [];
+  const useBccRecipients = mailshot || recipientEmails.length > 1;
+  if (useBccRecipients) {
+    bcc.push(...recipientEmails);
+  }
+  if (bccBooking) {
+    const bookingBcc = await resolveBookingBccForPool(pool);
+    if (bookingBcc && !bcc.includes(bookingBcc) && !recipientEmails.includes(bookingBcc)) {
+      bcc.push(bookingBcc);
+    }
+  }
+
+  const to = useBccRecipients ? getMailFromAddress() : recipientEmails[0];
 
   let emailStatus = 0;
   let emailError = '';
   try {
-    await sendCourseDatesCsvEmail({
-      to: recipient.email,
+    await sendEmailTemplateMessage({
+      to,
+      bcc: bcc.length ? bcc : undefined,
       subject,
       html,
-      filename,
-      csv,
     });
     emailStatus = 1;
   } catch (mailErr) {
@@ -410,20 +586,27 @@ async function shareCourseDatesCsv(pool, payload, emailBy) {
     err.status = 502;
     throw err;
   } finally {
+    const logTo = useBccRecipients ? getMailFromAddress() : recipientEmails.join(', ');
+    const logBcc = useBccRecipients
+      ? bcc.join(', ')
+      : bccBooking
+        ? bcc.join(', ')
+        : '';
     try {
       await pool.query(
         `INSERT INTO email_logs (book_ref, \`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, created, type, error)
-         VALUES (?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           '',
-          recipient.email,
+          logTo,
+          logBcc,
           getMailFromAddress(),
           subject,
           html,
           String(emailBy || 'admin').slice(0, 50),
           emailStatus,
           nowMysql(),
-          'CSV Export',
+          'Email Template',
           emailError,
         ]
       );
@@ -433,13 +616,15 @@ async function shareCourseDatesCsv(pool, payload, emailBy) {
   }
 
   return {
-    email: recipient.email,
-    message: `Course dates sent to ${recipient.email}.`,
+    email: recipientEmails.join(', '),
+    message: `Email sent to ${recipientEmails.join(', ')}.`,
   };
 }
 
 module.exports = {
   shareCourseDatesCsv,
+  searchAttendeesForMailshot,
+  searchAttendeesForMailshotBatch,
   listStripePaymentLinks,
   buildCsv,
   normalizeRows,
