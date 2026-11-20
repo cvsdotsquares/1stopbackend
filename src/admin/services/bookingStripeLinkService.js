@@ -530,12 +530,16 @@ async function refundAdminStripePaymentIfPossible(source, reason) {
 }
 
 /**
- * Payment arrived after another admin froze the course. Refund it and remove
- * the unconfirmed booking. The seat hold stays on the payment-link lock, so
- * the archive step must not subtract current_locks as well.
+ * Refund a settled payment and remove unconfirmed payment-link bookings.
+ * `spaces: 0` on archive avoids double-subtracting current_locks (hold still on lock row).
  */
-async function abandonFrozenAdminPaymentLink(pool, source, bookingIds) {
-  const refund = await refundAdminStripePaymentIfPossible(source, 'course_frozen');
+async function abandonUnconfirmedAdminPaymentLink(
+  pool,
+  source,
+  bookingIds,
+  { archiveReason, cancelledVia, refundReason }
+) {
+  const refund = await refundAdminStripePaymentIfPossible(source, refundReason);
   const connection = await pool.getConnection();
   let lockId = Number(source?.metadata?.lock_id) || 0;
   try {
@@ -550,8 +554,8 @@ async function abandonFrozenAdminPaymentLink(pool, source, bookingIds) {
       if (!booking) continue;
       lockId = Number(booking.lockid) || lockId;
       await archiveAndDeleteBooking(connection, { ...booking, spaces: 0 }, {
-        reason: 'Course frozen by admin before payment completed; payment refunded',
-        cancelledVia: 'admin-stripe-link-frozen-course',
+        reason: archiveReason,
+        cancelledVia,
         at,
       });
     }
@@ -559,7 +563,8 @@ async function abandonFrozenAdminPaymentLink(pool, source, bookingIds) {
   } catch (err) {
     await connection.rollback();
     console.error(
-      '[ADMIN][STRIPE_LINK] Failed to remove bookings after frozen-course refund',
+      '[ADMIN][STRIPE_LINK] Failed to remove bookings after payment-link refund',
+      refundReason,
       err
     );
   } finally {
@@ -569,6 +574,103 @@ async function abandonFrozenAdminPaymentLink(pool, source, bookingIds) {
     await removeLockById(pool, lockId, true);
   }
   return refund;
+}
+
+async function abandonFrozenAdminPaymentLink(pool, source, bookingIds) {
+  return abandonUnconfirmedAdminPaymentLink(pool, source, bookingIds, {
+    archiveReason: 'Course frozen by admin before payment completed; payment refunded',
+    cancelledVia: 'admin-stripe-link-frozen-course',
+    refundReason: 'course_frozen',
+  });
+}
+
+async function abandonCapacityAdminPaymentLink(pool, source, bookingIds) {
+  return abandonUnconfirmedAdminPaymentLink(pool, source, bookingIds, {
+    archiveReason:
+      'Payment refunded: course was full before payment completed (spaces taken by another booking)',
+    cancelledVia: 'admin-stripe-link-capacity-exceeded',
+    refundReason: 'course_full',
+  });
+}
+
+/**
+ * Pay by Bank / async Checkout can fire checkout.session.completed before money
+ * has cleared. Never confirm bookings until Stripe reports paid / PI succeeded.
+ */
+async function listUnconfirmedBookingIds(pool, bookingIds) {
+  const pending = [];
+  for (const id of bookingIds) {
+    const [st] = await pool.query(
+      'SELECT status FROM bookings WHERE id = ? LIMIT 1',
+      [id]
+    );
+    if (st?.[0] && Number(st[0].status) !== 1) pending.push(id);
+  }
+  return pending;
+}
+
+/**
+ * All-or-nothing gate before mutating bookings_done for payment-link checkout.
+ */
+async function validateAdminLinkBookingsCanConfirm(pool, bookingIds) {
+  for (const bookingId of bookingIds) {
+    const [bookingRows] = await pool.query(
+      'SELECT * FROM bookings WHERE id = ? LIMIT 1',
+      [bookingId]
+    );
+    const booking = bookingRows?.[0];
+    if (!booking || Number(booking.status) === 1) continue;
+
+    if (await isCourseEventFrozen(pool, booking.course_event_id)) {
+      return { ok: false, reason: 'course_frozen' };
+    }
+
+    const spaces = Number(booking.spaces) || 1;
+    const [lockRows] = await pool.query(
+      'SELECT id, space_required FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
+      [booking.lockid || 0]
+    );
+    const lockExists = Boolean(lockRows?.[0]);
+    const heldSpaces = lockExists
+      ? Math.min(spaces, Number(lockRows[0].space_required) || spaces)
+      : 0;
+    const fits = await adminSeatsWouldFit(pool, booking.course_event_id, spaces, {
+      creditSpaces: heldSpaces,
+    });
+    if (!fits) {
+      return { ok: false, reason: 'course_full', booking_id: bookingId };
+    }
+  }
+  return { ok: true };
+}
+
+async function adminPaymentLinkSourceIsPaid(source) {
+  if (typeof source?.id === 'string' && source.id.startsWith('pi_')) {
+    return trim(source.status) === 'succeeded';
+  }
+
+  const sessionPaymentStatus = trim(source?.payment_status);
+  if (sessionPaymentStatus === 'paid') return true;
+
+  const sessionId =
+    typeof source?.id === 'string' && source.id.startsWith('cs_')
+      ? source.id
+      : trim(source?.checkout_session_id);
+
+  if (sessionId) {
+    const check = await retrieveAdminCheckoutPaymentState(sessionId);
+    return check.state === 'paid';
+  }
+
+  const piId = await resolveAdminStripePaymentIntentId(source);
+  if (!piId) return false;
+  try {
+    const pi = await stripe.paymentIntents.retrieve(piId);
+    return trim(pi.status) === 'succeeded';
+  } catch (err) {
+    console.warn('[ADMIN][STRIPE_LINK] Could not read PI for paid check', piId, err.message);
+    return false;
+  }
 }
 
 async function removeLockById(pool, lockId, revertVehicleCounts = true) {
@@ -908,9 +1010,28 @@ async function confirmAdminStripePaymentLink(pool, source) {
     return { skipped: true };
   }
 
+  if (!(await adminPaymentLinkSourceIsPaid(source))) {
+    console.log(
+      '[ADMIN][STRIPE_LINK] Payment not settled yet — skipping confirm',
+      {
+        source_id: source?.id,
+        payment_status: source?.payment_status,
+        booking_ids: bookingIds,
+      }
+    );
+    return { skipped: true, reason: 'payment_in_flight' };
+  }
+
   const businessExpireMs = Number(metadata.expire_at) * 1000;
   if (isPastBusinessPaymentLinkExpiry(businessExpireMs)) {
-    const refund = await refundAdminStripePaymentIfPossible(source, 'past_business_expiry');
+    const pendingToRemove = await listUnconfirmedBookingIds(pool, bookingIds);
+    const refund = pendingToRemove.length
+      ? await abandonUnconfirmedAdminPaymentLink(pool, source, pendingToRemove, {
+        archiveReason: 'Payment link expired before payment completed; payment refunded',
+        cancelledVia: 'admin-stripe-link-expired',
+        refundReason: 'past_business_expiry',
+      })
+      : await refundAdminStripePaymentIfPossible(source, 'past_business_expiry');
     console.warn(
       '[ADMIN][STRIPE_LINK] Payment received after link expiry — booking not confirmed',
       { bookingIds, refunded: refund.refunded }
@@ -955,6 +1076,44 @@ async function confirmAdminStripePaymentLink(pool, source) {
     return { skipped: true, reason: 'course_frozen', refund, booking_ids: pendingIds };
   }
 
+  const canConfirm = await validateAdminLinkBookingsCanConfirm(pool, bookingIds);
+  if (!canConfirm.ok) {
+    const pendingToRemove = await listUnconfirmedBookingIds(pool, bookingIds);
+    if (canConfirm.reason === 'course_frozen') {
+      const refund = await abandonFrozenAdminPaymentLink(
+        pool,
+        source,
+        pendingToRemove.length ? pendingToRemove : bookingIds
+      );
+      console.warn(
+        '[ADMIN][STRIPE_LINK] Course frozen — payment refunded before confirm',
+        { bookingIds: pendingToRemove, refunded: refund.refunded }
+      );
+      return {
+        skipped: true,
+        reason: 'course_frozen',
+        refund,
+        booking_ids: pendingToRemove,
+      };
+    }
+    const refund = await abandonCapacityAdminPaymentLink(
+      pool,
+      source,
+      pendingToRemove.length ? pendingToRemove : bookingIds
+    );
+    console.warn(
+      '[ADMIN][STRIPE_LINK] Capacity exceeded — payment refunded before confirm',
+      { bookingIds: pendingToRemove, booking_id: canConfirm.booking_id, refunded: refund.refunded }
+    );
+    return {
+      skipped: true,
+      reason: 'course_full',
+      refund,
+      booking_ids: pendingToRemove,
+      confirmed: 0,
+    };
+  }
+
   const paymentIntentId =
     trim(source.payment_intent) ||
     (typeof source.id === 'string' && source.id.startsWith('pi_') ? source.id : '') ||
@@ -965,7 +1124,6 @@ async function confirmAdminStripePaymentLink(pool, source) {
   const processedAt = nowMysql();
 
   let lastLockId = 0;
-  let capacityRefund = null;
   const mailBookingIds = [];
 
   let missingBookingIds = [];
@@ -1018,21 +1176,6 @@ async function confirmAdminStripePaymentLink(pool, source) {
         [booking.lockid || 0]
       );
       const lockExists = Boolean(lockRows?.[0]);
-      const heldSpaces = lockExists
-        ? Math.min(spaces, Number(lockRows[0].space_required) || spaces)
-        : 0;
-      const fits = await adminSeatsWouldFit(pool, booking.course_event_id, spaces, {
-        creditSpaces: heldSpaces,
-      });
-      if (!fits) {
-        if (!capacityRefund) {
-          capacityRefund = await refundAdminStripePaymentIfPossible(source, 'course_full');
-        }
-        console.warn(
-          `[ADMIN][STRIPE_LINK] date is full — booking ${bookingId} was not confirmed`
-        );
-        continue;
-      }
 
       {
         const [attendeeRows] = await pool.query(
@@ -1073,15 +1216,17 @@ async function confirmAdminStripePaymentLink(pool, source) {
       mailBookingIds.push(bookingId);
     }
 
-    await upsertSingleBookingPayment(pool, {
-      bookingId,
-      paymentType: COMPLETED_PAYMENT_TYPE,
-      transactionId: transactionId || checkoutSessionId,
-      amount: amt,
-      transationType: 'booking',
-      response: responseDump,
-      created: processedAt,
-    });
+    if (alreadyConfirmed || mailBookingIds.includes(bookingId)) {
+      await upsertSingleBookingPayment(pool, {
+        bookingId,
+        paymentType: COMPLETED_PAYMENT_TYPE,
+        transactionId: transactionId || checkoutSessionId,
+        amount: amt,
+        transationType: 'booking',
+        response: responseDump,
+        created: processedAt,
+      });
+    }
   }
 
   if (missingBookingIds.length) {
@@ -1357,6 +1502,7 @@ async function refundReasonForBookings(pool, bookingIds, eventId) {
     );
     const blob = (rows || []).map((row) => String(row.booking_data || '')).join('\n');
     if (blob.includes('admin-stripe-link-frozen-course')) return 'course_frozen';
+    if (blob.includes('admin-stripe-link-capacity-exceeded')) return 'course_unavailable';
   }
   if (eventId && (await isCourseEventFrozen(pool, eventId))) return 'course_frozen';
   return 'course_unavailable';

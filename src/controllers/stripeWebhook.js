@@ -65,6 +65,16 @@ class StripeWebhookController {
           }
           console.log('✅ Payment intent succeeded');
           break;
+        case 'checkout.session.async_payment_succeeded': {
+          const asyncSession = event.data.object;
+          if (asyncSession.metadata?.type === 'admin_payment_link') {
+            const {
+              confirmAdminStripePaymentLink,
+            } = require('../admin/services/bookingStripeLinkService');
+            await confirmAdminStripePaymentLink(this.pool, asyncSession);
+          }
+          break;
+        }
         case 'checkout.session.completed': {
           const checkoutSession = event.data.object;
           if (checkoutSession.metadata?.type === 'csv_export_payment') {
@@ -72,10 +82,17 @@ class StripeWebhookController {
             break;
           }
           if (checkoutSession.metadata?.type === 'admin_payment_link') {
-            const {
-              confirmAdminStripePaymentLink,
-            } = require('../admin/services/bookingStripeLinkService');
-            await confirmAdminStripePaymentLink(this.pool, checkoutSession);
+            const paymentStatus = String(checkoutSession.payment_status || '').trim();
+            if (paymentStatus === 'paid') {
+              const {
+                confirmAdminStripePaymentLink,
+              } = require('../admin/services/bookingStripeLinkService');
+              await confirmAdminStripePaymentLink(this.pool, checkoutSession);
+            } else {
+              console.log(
+                '[stripeWebhook] Admin payment link checkout completed; payment not paid yet (async method)'
+              );
+            }
           }
           break;
         }

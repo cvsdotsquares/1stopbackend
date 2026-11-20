@@ -252,12 +252,19 @@ function normalizeContactPayload(body) {
   };
 }
 
+const { validateDrivingLicenceNumber } = require('../../utils/drivingLicenceValidation');
+
 function validateContactPayload(data, { requireName = true } = {}) {
   if (requireName && !data.first_name) {
     return 'First name is required';
   }
-  if (data.license_number && data.license_number.length > 16) {
-    return 'Licence number must be 16 characters or fewer';
+  if (data.license_number) {
+    const check = validateDrivingLicenceNumber(data.license_number, {
+      required: false,
+    });
+    if (!check.valid) {
+      return check.message || 'Driving licence number is not valid';
+    }
   }
   return null;
 }
