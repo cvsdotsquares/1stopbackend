@@ -1,6 +1,7 @@
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
 const { getVehicleHeaderStatus } = require('../../admin/services/headerService');
 const { sendAdminBookingFeedbackEmail } = require('../../admin/services/adminBookingEmailService');
+const { validateDrivingLicenceNumber } = require('../../utils/drivingLicenceValidation');
 
 const VEHICLE_TYPE_LABELS = {
   0: 'Manual',
@@ -798,6 +799,18 @@ async function updateClientDetails(pool, bookingId, data) {
   const email = trim(data.email || '');
   const licenceNo = trim(data.license_number || '').toUpperCase();
   const theoryNo = trim(data.theory_number || '');
+
+  if (licenceNo) {
+    const licenceCheck = validateDrivingLicenceNumber(licenceNo, {
+      required: false,
+    });
+    if (!licenceCheck.valid) {
+      return {
+        ok: false,
+        message: licenceCheck.message || 'Driving licence number is not valid',
+      };
+    }
+  }
 
   await pool.query(
     `UPDATE booking_attendees

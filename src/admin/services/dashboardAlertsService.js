@@ -1,25 +1,49 @@
 /**
  * Home dashboard Alerts widget (global; not filtered by crs_scr / loc_scr).
  */
-const { isEnglandBankHoliday } = require('../../utils/ukEnglandBankHolidays');
+const {
+  ensureEnglandBankHolidaysLoaded,
+  isEnglandBankHoliday,
+} = require('../../utils/ukEnglandBankHolidays');
 const {
   getGroupRootId,
   getGroupAvailability,
   isCourseEventFrozen,
+  getCohortMemberIds,
 } = require('../../utils/courseEventGroup');
 
-const MOTORCYCLE_ABBREVS = new Set([
+/**
+ * Tests-to-cancel alert courses (cancel window: 3 days motorcycle, 4 days module).
+ * Sundays / England bank holidays in the range add one extra day each (GOV.UK).
+ * Match on course_abb and/or course_name (see testsToCancelCourseProfile).
+ */
+const MOTORCYCLE_3_DAY_ABBREVS = new Set([
   '3 day a1',
   '3 day a2',
   '3 day das',
 ]);
 
-const MODULE_TEST_ABBREVS = new Set([
+const MOTORCYCLE_3_DAY_COURSE_NAMES = new Set([
+  'a1 motorcycle licence - 11kw/14.6bhp (cat a1 - 3 days)',
+  'a2 motorcycle licence - 35kw/46.6bhp (cat a2 - 3 days)',
+  'das - unrestricted motorcycle licence (cat a - 3 days)',
+]);
+
+const MODULE_TEST_4_DAY_ABBREVS = new Set([
   'module 1 test day',
   'mod 1 resit',
   'mod 1 test day',
+  'mod 1',
   'module 2 test day',
   'mod 2 test day',
+  'mod 2',
+]);
+
+const MODULE_TEST_4_DAY_COURSE_NAMES = new Set([
+  'module 1 test day',
+  'module 2 test day',
+  'module 1 test day (4 days)',
+  'module 2 test day (4 days)',
 ]);
 
 function normalizeAbb(value) {
@@ -27,6 +51,42 @@ function normalizeAbb(value) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, ' ');
+}
+
+/** Strip trailing “(N Days)” so module titles match with or without the suffix. */
+function normalizeCourseNameForMatch(value) {
+  const base = normalizeAbb(value);
+  return base.replace(/\s*\(\d+\s*days?\)\s*$/i, '').trim();
+}
+
+function isMotorcycle3DayTestsToCancelCourse(courseAbb, courseName) {
+  const abb = normalizeAbb(courseAbb);
+  const name = normalizeCourseNameForMatch(courseName);
+  if (MOTORCYCLE_3_DAY_ABBREVS.has(abb)) return true;
+  if (MOTORCYCLE_3_DAY_COURSE_NAMES.has(name)) return true;
+  if (/^3\s*day\s*(a1|a2|das)\b/.test(abb)) return true;
+  if (name.includes('(cat a1 - 3 days)')) return true;
+  if (name.includes('(cat a2 - 3 days)')) return true;
+  if (name.includes('(cat a - 3 days)') && name.includes('das')) return true;
+  return false;
+}
+
+function isModuleTest4DayTestsToCancelCourse(courseAbb, courseName) {
+  const abb = normalizeAbb(courseAbb);
+  const name = normalizeCourseNameForMatch(courseName);
+  if (MODULE_TEST_4_DAY_ABBREVS.has(abb)) return true;
+  if (MODULE_TEST_4_DAY_COURSE_NAMES.has(name)) return true;
+  if (/^mod\s*[12]\b/.test(abb)) return true;
+  if (/^mod\s*[12]\s+/.test(abb)) return true;
+  if (/^module\s*[12]\s+test\b/.test(name)) return true;
+  return false;
+}
+
+/** @returns {3|4|null} base day count before Sunday/bank-holiday extension */
+function testsToCancelCourseProfile(courseAbb, courseName) {
+  if (isMotorcycle3DayTestsToCancelCourse(courseAbb, courseName)) return 3;
+  if (isModuleTest4DayTestsToCancelCourse(courseAbb, courseName)) return 4;
+  return null;
 }
 
 function pad2(n) {
@@ -131,13 +191,19 @@ function formatMoneyGbp(value) {
   return `£${n.toFixed(2)}`;
 }
 
-/** Sundays and England bank holidays from day after `fromIso` through `toIso` inclusive. */
+/**
+ * Sundays and England/Wales bank holidays (GOV.UK) from the day after `fromIso`
+ * through the day before course start (start date itself is not counted).
+ * Each adds +1 to the module (4) or motorcycle (3) day threshold.
+ */
 function countNonWorkingDaysInRange(fromIso, toIso) {
   if (toIso <= fromIso) return 0;
   let count = 0;
   let cur = parseIsoLocal(fromIso);
   cur.setDate(cur.getDate() + 1);
   const end = parseIsoLocal(toIso);
+  end.setDate(end.getDate() - 1);
+  if (end < cur) return 0;
   while (cur <= end) {
     const iso = toIsoLocal(cur);
     if (cur.getDay() === 0 || isEnglandBankHoliday(iso)) {
@@ -148,6 +214,10 @@ function countNonWorkingDaysInRange(fromIso, toIso) {
   return count;
 }
 
+/**
+ * Show tests-to-cancel alert when start is within `baseDays` calendar days,
+ * plus one extra day per Sunday/bank holiday in (today, start].
+ */
 function isWithinAdjustedWindow(today, eventDate, baseDays) {
   if (isTbcDate(eventDate) || eventDate < today) return false;
   const calendarDays = diffCalendarDays(today, eventDate);
@@ -157,21 +227,43 @@ function isWithinAdjustedWindow(today, eventDate, baseDays) {
   return calendarDays <= threshold;
 }
 
-function baseDaysForAbb(courseAbb) {
-  const norm = normalizeAbb(courseAbb);
-  if (MOTORCYCLE_ABBREVS.has(norm)) return 5;
-  if (MODULE_TEST_ABBREVS.has(norm)) return 4;
-  return null;
+
+function formatEventTime(value) {
+  if (!value) return '';
+  const str = String(value).trim();
+  if (/^\d{2}:\d{2}:\d{2}$/.test(str)) return str.slice(0, 5);
+  if (/^\d{2}:\d{2}$/.test(str)) return str;
+  return str;
+}
+
+function formatEventTimeRange(start, end) {
+  const s = formatEventTime(start);
+  const e = formatEventTime(end);
+  if (s && e) return `${s}–${e}`;
+  return s || e || '';
+}
+
+/** Linked motorcycle cohorts (shared capacity): one alert, label "3 Day Course". */
+function displayAbbForTestsToCancel(abb, courseName, isLinkedMotorcyclePackage) {
+  if (isLinkedMotorcyclePackage) {
+    return { abb: '3 Day Course', name: '3 Day Course' };
+  }
+  return {
+    abb: String(abb || '').trim(),
+    name: String(courseName || '').trim(),
+  };
 }
 
 async function getTestsToCancelAlerts(pool) {
+  await ensureEnglandBankHolidaysLoaded();
+
   const [courseRows] = await pool.query(
     `SELECT id, course_abb, course_name FROM courses WHERE status IN ('1', '2')`
   );
   const courseIds = [];
   const abbByCourseId = new Map();
   for (const row of courseRows || []) {
-    const baseDays = baseDaysForAbb(row.course_abb);
+    const baseDays = testsToCancelCourseProfile(row.course_abb, row.course_name);
     if (baseDays == null) continue;
     courseIds.push(row.id);
     abbByCourseId.set(Number(row.id), {
@@ -189,6 +281,8 @@ async function getTestsToCancelAlerts(pool) {
     `SELECT ce.id AS course_event_id,
             ce.course_id,
             DATE_FORMAT(ced.event_date, '%Y-%m-%d') AS event_date,
+            ced.event_start_time,
+            ced.event_end_time,
             l.loc_abb,
             l.location_name
      FROM course_events ce
@@ -208,6 +302,7 @@ async function getTestsToCancelAlerts(pool) {
   const rootCache = new Map();
   const availCache = new Map();
   const frozenCache = new Map();
+  const cohortSizeCache = new Map();
   const alerts = [];
 
   async function groupRoot(eventId) {
@@ -235,35 +330,75 @@ async function getTestsToCancelAlerts(pool) {
     return frozenCache.get(key);
   }
 
-  /** One alert per course package (linked cohort or single event), using day 1 only. */
+  async function cohortMemberCount(eventId) {
+    const key = Number(eventId);
+    if (!cohortSizeCache.has(key)) {
+      const members = await getCohortMemberIds(pool, key);
+      cohortSizeCache.set(key, members.length);
+    }
+    return cohortSizeCache.get(key);
+  }
+
+  /**
+   * Align with dashboard calendar (getCalendarDisplayDates):
+   * - Module tests: one alert per course_event, first confirmed date only
+   *   (multi events are not repeated on every scheduled day).
+   * - Linked 3-day motorcycle cohorts: one row per package root, day 1 only.
+   * - Otherwise: one alert per course_event + start date.
+   */
   const packages = new Map();
+
+  async function resolvePackageKey(meta, eventId, rootId, eventDate) {
+    if (meta.baseDays === 4) {
+      return `mod:${eventId}`;
+    }
+    if (meta.baseDays === 3) {
+      const cohort = await cohortMemberCount(eventId);
+      if (cohort > 1) return `cohort:${rootId}`;
+    }
+    return `session:${eventId}:${eventDate}`;
+  }
 
   for (const row of rows || []) {
     const eventDate = String(row.event_date).slice(0, 10);
     if (isTbcDate(eventDate)) continue;
 
     const eventId = Number(row.course_event_id);
-    const rootId = await groupRoot(eventId);
-    const packageKey = String(rootId);
     const courseId = Number(row.course_id);
+    const meta = abbByCourseId.get(courseId);
+    if (!meta) continue;
+
+    const rootId = await groupRoot(eventId);
+    const packageKey = await resolvePackageKey(meta, eventId, rootId, eventDate);
+
+    const candidate = {
+      rootId,
+      eventId,
+      courseId,
+      firstDate: eventDate,
+      loc_abb: row.loc_abb,
+      location_name: row.location_name,
+      event_start_time: row.event_start_time,
+      event_end_time: row.event_end_time,
+    };
 
     const existing = packages.get(packageKey);
     if (!existing) {
-      packages.set(packageKey, {
-        rootId,
-        eventId,
-        courseId,
-        firstDate: eventDate,
-        loc_abb: row.loc_abb,
-        location_name: row.location_name,
-      });
+      packages.set(packageKey, candidate);
       continue;
     }
-    if (eventDate < existing.firstDate) {
-      existing.firstDate = eventDate;
-      existing.eventId = eventId;
-      existing.loc_abb = row.loc_abb;
-      existing.location_name = row.location_name;
+    if (
+      packageKey.startsWith('cohort:') ||
+      packageKey.startsWith('mod:')
+    ) {
+      if (eventDate < existing.firstDate) {
+        existing.firstDate = eventDate;
+        existing.eventId = eventId;
+        existing.loc_abb = row.loc_abb;
+        existing.location_name = row.location_name;
+        existing.event_start_time = row.event_start_time;
+        existing.event_end_time = row.event_end_time;
+      }
     }
   }
 
@@ -280,21 +415,40 @@ async function getTestsToCancelAlerts(pool) {
     const locationLabel = formatLocationLabel(pkg.loc_abb, pkg.location_name);
     const startLabel = formatLongDate(pkg.firstDate);
     const spaces = avail.availableSpaces;
+    const isLinkedMotorcyclePackage =
+      isMotorcycle3DayTestsToCancelCourse(meta.abb, meta.course_name) &&
+      (await cohortMemberCount(pkg.rootId)) > 1;
+    const display = displayAbbForTestsToCancel(
+      meta.abb,
+      meta.course_name,
+      isLinkedMotorcyclePackage
+    );
+
+    const timeLabel = formatEventTimeRange(
+      pkg.event_start_time,
+      pkg.event_end_time
+    );
+    const alertEventId = isLinkedMotorcyclePackage ? pkg.rootId : pkg.eventId;
+
+    const cancelByUk = formatUkDate(pkg.firstDate);
 
     alerts.push({
       category: 'tests_to_cancel',
-      message: `${meta.abb}: cancel module tests — ${startLabel} (${spaces} space${spaces === 1 ? '' : 's'} left)`,
-      course_abb: meta.abb,
-      course_name: meta.course_name,
-      course_event_id: pkg.rootId,
+      message: `Cancel Tests on ${cancelByUk} NOW`,
+      course_abb: display.abb,
+      course_name: display.name,
+      course_event_id: alertEventId,
       start_date: pkg.firstDate,
       start_date_label: startLabel,
+      event_start_time: formatEventTime(pkg.event_start_time) || null,
+      event_end_time: formatEventTime(pkg.event_end_time) || null,
+      time_label: timeLabel || null,
       location_label: locationLabel,
       spaces_available: spaces,
       days_until_start: daysUntil,
       days_until_label: daysUntilLabel(daysUntil),
       cancel_window_days: meta.baseDays,
-      sort_key: pkg.firstDate,
+      sort_key: `${pkg.firstDate}\t${timeLabel || ''}\t${alertEventId}`,
     });
   }
 
@@ -354,7 +508,7 @@ async function getOutstandingPaymentAlerts(pool) {
     const courseAbb = String(row.course_abb || '').trim();
     alerts.push({
       category: 'outstanding_payments',
-      message: `${name} has ${dueLabel} on their upcoming course`,
+      message: `${name} has an outstanding balance of ${dueLabel} on their ${courseAbb || 'course'} course`,
       booking_id: bookingId,
       booking_ref: String(row.booking_ref || '').trim(),
       attendee_name: name,
@@ -459,7 +613,9 @@ async function getDashboardAlerts(pool) {
 module.exports = {
   getDashboardAlerts,
   normalizeAbb,
-  baseDaysForAbb,
+  testsToCancelCourseProfile,
+  isMotorcycle3DayTestsToCancelCourse,
+  isModuleTest4DayTestsToCancelCourse,
   countNonWorkingDaysInRange,
   isWithinAdjustedWindow,
 };

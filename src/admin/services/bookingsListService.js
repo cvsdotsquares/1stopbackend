@@ -214,6 +214,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
 
   if (nameScr) {
     const like = `%${nameScr}%`;
+    const licenceNorm = nameScr.replace(/\s+/g, '').toUpperCase();
+    const licenceLike = licenceNorm ? `%${licenceNorm}%` : like;
     where += ` AND (
       booking_attendees.booking_ref LIKE ?
       OR booking_attendees.first_name LIKE ?
@@ -223,6 +225,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
       OR booking_attendees.contact2 = ?
       OR booking_attendees.contact3 = ?
       OR CONCAT(booking_attendees.first_name, ' ', booking_attendees.sur_name) LIKE ?
+      OR REPLACE(UPPER(booking_attendees.license_number), ' ', '') LIKE ?
+      OR booking_attendees.license_number = ?
       OR courses.course_name LIKE ?
       OR courses.course_abb LIKE ?
       OR locations.location_name LIKE ?
@@ -236,6 +240,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
       nameScr,
       nameScr,
       like,
+      licenceLike,
+      licenceNorm || nameScr,
       like,
       like,
       like

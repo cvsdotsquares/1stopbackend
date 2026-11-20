@@ -247,6 +247,7 @@ async function enrichCourseAvails(pool, rows) {
   const dayCountByEvent = {};
   const datesByEvent = {};
   const timeByEvent = {};
+  const dateTimesByEvent = {};
 
   for (const row of dateRows) {
     const id = row.course_event_id;
@@ -262,6 +263,13 @@ async function enrichCourseAvails(pool, rows) {
     if (!datesByEvent[id].includes(formatted)) {
       datesByEvent[id].push(formatted);
     }
+    if (!dateTimesByEvent[id]) {
+      dateTimesByEvent[id] = {};
+    }
+    dateTimesByEvent[id][formatted] = {
+      start: formatTimeValue(row.event_start_time),
+      end: formatTimeValue(row.event_end_time),
+    };
     if (!timeByEvent[id] || formatted < timeByEvent[id].date) {
       timeByEvent[id] = {
         date: formatted,
@@ -310,6 +318,7 @@ async function enrichCourseAvails(pool, rows) {
         manual_lock_done: Number(vehicleSource.manual_lock_done) || 0,
         automatic_lock_done: Number(vehicleSource.automatic_lock_done) || 0,
         eventDates,
+        eventDateTimes: dateTimesByEvent[row.course_event_id] || {},
         eventDayCount: dayCountByEvent[row.course_event_id] || eventDates.length,
         isFrozen,
       };

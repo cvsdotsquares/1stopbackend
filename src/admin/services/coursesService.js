@@ -12,6 +12,7 @@ function formatTimestamp(date = new Date()) {
 }
 
 let ownVehicleModeReady = false;
+let schoolVehicleModeReady = false;
 
 async function ensureOwnVehicleModeColumn(pool) {
   if (ownVehicleModeReady) return;
@@ -24,6 +25,19 @@ async function ensureOwnVehicleModeColumn(pool) {
     );
   }
   ownVehicleModeReady = true;
+}
+
+async function ensureSchoolVehicleModeColumn(pool) {
+  if (schoolVehicleModeReady) return;
+  const [cols] = await pool.query(
+    "SHOW COLUMNS FROM courses LIKE 'school_vehicle_mode'"
+  );
+  if (!cols || cols.length === 0) {
+    await pool.query(
+      'ALTER TABLE courses ADD COLUMN school_vehicle_mode TINYINT(1) NOT NULL DEFAULT 1'
+    );
+  }
+  schoolVehicleModeReady = true;
 }
 
 function getStatusLabel(status) {
@@ -65,6 +79,7 @@ function mapCourseRow(row) {
     default_own_deposit_price: row.default_own_deposit_price,
     default_own_total_price: row.default_own_total_price,
     own_vehicle_mode: Number(row.own_vehicle_mode) === 1 ? 1 : 0,
+    school_vehicle_mode: Number(row.school_vehicle_mode) !== 0 ? 1 : 0,
     status: String(row.status ?? '0'),
     status_label: getStatusLabel(row.status),
     is_cbt: Number(row.is_cbt) || 0,
@@ -126,6 +141,7 @@ async function listCourses(pool, { page = 1, searchterm = {} } = {}) {
 
 async function getCourseById(pool, id) {
   await ensureOwnVehicleModeColumn(pool);
+  await ensureSchoolVehicleModeColumn(pool);
   const [rows] = await pool.query('SELECT * FROM courses WHERE id = ? LIMIT 1', [
     id,
   ]);
@@ -339,12 +355,14 @@ function validateCourseBody(body, isEdit = false) {
       is_cbt: isCbt ? 1 : 0,
       dvsa_email: isCbt ? trim(body.dvsa_email) : '',
       own_vehicle_mode: String(body.own_vehicle_mode ?? '0') === '1' ? 1 : 0,
+      school_vehicle_mode: String(body.school_vehicle_mode ?? '1') === '0' ? 0 : 1,
     },
   };
 }
 
 async function createCourse(pool, body) {
   await ensureOwnVehicleModeColumn(pool);
+  await ensureSchoolVehicleModeColumn(pool);
   const validation = validateCourseBody(body, false);
   if (!validation.ok) {
     return validation;
@@ -369,8 +387,8 @@ async function createCourse(pool, body) {
       default_automatic_vehicle, default_start_time, default_end_time,
       default_price_type, default_school_one_off_price, default_school_deposit_price,
       default_school_total_price, default_own_one_off_price, default_own_deposit_price,
-      default_own_total_price, own_vehicle_mode, course_abb, is_cbt, dvsa_email, course_bullet_points
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      default_own_total_price, own_vehicle_mode, school_vehicle_mode, course_abb, is_cbt, dvsa_email, course_bullet_points
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.course_name,
       data.description,
@@ -397,6 +415,7 @@ async function createCourse(pool, body) {
       data.default_own_deposit_price,
       data.default_own_total_price,
       data.own_vehicle_mode,
+      data.school_vehicle_mode,
       data.course_abb,
       data.is_cbt,
       data.dvsa_email,
@@ -416,6 +435,8 @@ async function createCourse(pool, body) {
 }
 
 async function updateCourse(pool, id, body) {
+  await ensureOwnVehicleModeColumn(pool);
+  await ensureSchoolVehicleModeColumn(pool);
   const bodyWithId = { ...body, id: String(id) };
   const validation = validateCourseBody(bodyWithId, true);
   if (!validation.ok) {
@@ -448,7 +469,7 @@ async function updateCourse(pool, id, body) {
       default_school_one_off_price = ?, default_school_deposit_price = ?,
       default_school_total_price = ?, default_own_one_off_price = ?,
       default_own_deposit_price = ?, default_own_total_price = ?,
-      own_vehicle_mode = ?,
+      own_vehicle_mode = ?, school_vehicle_mode = ?,
       course_abb = ?, is_cbt = ?,
       dvsa_email = ?, send_feedback_mail = ?, course_bullet_points = ?
     WHERE id = ?`,
@@ -477,6 +498,7 @@ async function updateCourse(pool, id, body) {
       data.default_own_deposit_price,
       data.default_own_total_price,
       data.own_vehicle_mode,
+      data.school_vehicle_mode,
       data.course_abb,
       data.is_cbt,
       data.dvsa_email,
@@ -538,6 +560,7 @@ module.exports = {
   RECORDS_PER_PAGE,
   COURSE_STATUS_LABELS,
   ensureOwnVehicleModeColumn,
+  ensureSchoolVehicleModeColumn,
   listCourses,
   getCourseById,
   createCourse,

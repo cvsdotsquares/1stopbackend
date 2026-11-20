@@ -7,7 +7,7 @@ const {
   createRideToCourse,
   updateRideToCourse,
 } = require('./rideToApiService');
-const { ensureOwnVehicleModeColumn } = require('./coursesService');
+const { ensureOwnVehicleModeColumn, ensureSchoolVehicleModeColumn } = require('./coursesService');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -182,13 +182,15 @@ function buildCalendarMonth(monthInput, yearInput) {
 
 async function getWizardFormOptions(pool, { includeLocationId } = {}) {
   await ensureOwnVehicleModeColumn(pool);
+  await ensureSchoolVehicleModeColumn(pool);
   const [courseRows] = await pool.query(
     `SELECT id, course_name, default_booking_limit, default_manual_vehicle,
             default_automatic_vehicle, default_start_time, default_end_time,
             default_price_type, default_school_one_off_price,
             default_school_deposit_price, default_school_total_price,
             default_own_one_off_price, default_own_deposit_price,
-            default_own_total_price, own_vehicle_mode, deposit_days, cancel_days
+            default_own_total_price, own_vehicle_mode, school_vehicle_mode,
+            deposit_days, cancel_days
      FROM courses
      WHERE isDeleted = '0' AND status IN ('1', '2')
      ORDER BY course_name ASC`
@@ -246,6 +248,7 @@ async function getWizardFormOptions(pool, { includeLocationId } = {}) {
       default_own_deposit_price: row.default_own_deposit_price || 0,
       default_own_total_price: row.default_own_total_price || 0,
       own_vehicle_mode: Number(row.own_vehicle_mode) === 1 ? 1 : 0,
+      school_vehicle_mode: Number(row.school_vehicle_mode) !== 0 ? 1 : 0,
       cancel_days: Number(row.cancel_days ?? row.deposit_days ?? 7) || 7,
       deposit_days: Number(row.deposit_days ?? row.cancel_days ?? 7) || 7,
     })),

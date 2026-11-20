@@ -11,6 +11,7 @@ const {
 } = require('./adminBookingHoldService');
 const { getCurrentMysqlDateTime } = require('../../utils/dateFormat');
 const { assertAdminCanTakeSpaces } = require('../../utils/courseEventGroup');
+const { validateDrivingLicenceNumber } = require('../../utils/drivingLicenceValidation');
 
 const TBC_DATE = '0000-00-00';
 
@@ -1178,6 +1179,15 @@ async function updateBooking(pool, idParam, body, adminId, session) {
   const currentVehicleType = Number(booking.vehicle_type);
   const newVehicleType = Number(body.vehicle_type);
   const newEventId = body.new_event_id ? Number(body.new_event_id) : 0;
+
+  const licenceCheck = validateDrivingLicenceNumber(body.license_number, {
+    required: false,
+  });
+  if (!licenceCheck.valid) {
+    const err = new Error(licenceCheck.message || 'Driving licence number is not valid');
+    err.status = 400;
+    throw err;
+  }
 
   const blackData = await checkBlacklisted(pool, body.license_number);
   if (blackData) {
