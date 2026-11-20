@@ -222,7 +222,7 @@ app.use('/api/instructor', createInstructorRoutes(pool));
   app.get('/admin/release_ip.php', legacyReleaseIp);
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, () => {
   console.log(`1Stop Instruction API server listening on http://localhost:${PORT}`);
   console.log(`Health Check: http://localhost:${PORT}/health`);

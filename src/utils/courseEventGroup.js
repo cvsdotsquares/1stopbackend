@@ -690,9 +690,11 @@ async function adminSeatsWouldFit(db, courseEventId, spacesNeeded, options = {})
  *
  * Call after `lockSiblingEventsForUpdate` inside the webhook transaction.
  *
+ * @param {{ creditSpaces?: number }} [options] seats already held on `current_locks`
+ *   for this booking (released when the webhook moves lock → bookings_done).
  * @returns {Promise<{ allowed: boolean, groupAvail?: object, reason?: string }>}
  */
-async function canConfirmSpacesOnCohort(db, courseEventId, spacesToConfirm) {
+async function canConfirmSpacesOnCohort(db, courseEventId, spacesToConfirm, options = {}) {
   const spaces = Number(spacesToConfirm) || 0;
   if (spaces <= 0) {
     return { allowed: false, reason: 'invalid_spaces' };
@@ -703,8 +705,11 @@ async function canConfirmSpacesOnCohort(db, courseEventId, spacesToConfirm) {
     return { allowed: false, reason: 'no_event' };
   }
 
-  const { booking_limit, bookings_done } = groupAvail;
-  if (bookings_done + spaces > booking_limit) {
+  const credit = Math.max(0, Number(options.creditSpaces) || 0);
+  const raw = Number(groupAvail.rawAvailableSpaces);
+  const available = (Number.isFinite(raw) ? raw : 0) + credit;
+
+  if (available < spaces) {
     return {
       allowed: false,
       reason: 'capacity_exceeded',

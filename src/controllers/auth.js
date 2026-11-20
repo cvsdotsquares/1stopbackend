@@ -34,30 +34,44 @@ class AuthController {
    * from booking_attendees_dropdown, not the users table).
    */
   async _getBookingPrefillFallback(userId) {
+  // Prefer a booking this account made or owns that still has a contact card.
+  // Confirmed bookings (status = 1) win over stale unpaid rows that may have
+  // been deleted or lost their attendee join after cleanup.
     const [rows] = await this.pool.query(
       `SELECT
-        bad.first_name,
-        bad.sur_name,
-        bad.date_of_birth,
-        bad.email,
-        bad.contact1,
-        bad.contact2,
-        bad.license_type,
-        bad.license_number,
-        bad.theory_number
+        COALESCE(NULLIF(TRIM(bad.first_name), ''), ba.first_name) AS first_name,
+        COALESCE(NULLIF(TRIM(bad.sur_name), ''), ba.sur_name) AS sur_name,
+        COALESCE(bad.date_of_birth, ba.date_of_birth) AS date_of_birth,
+        COALESCE(NULLIF(TRIM(bad.email), ''), ba.email) AS email,
+        COALESCE(NULLIF(TRIM(bad.contact1), ''), ba.contact1) AS contact1,
+        COALESCE(NULLIF(TRIM(bad.contact2), ''), ba.contact2) AS contact2,
+        COALESCE(bad.license_type, ba.license_type) AS license_type,
+        COALESCE(NULLIF(TRIM(bad.license_number), ''), ba.license_number) AS license_number,
+        COALESCE(NULLIF(TRIM(bad.theory_number), ''), ba.theory_number) AS theory_number
       FROM bookings b
-      JOIN booking_attendees ba
+      INNER JOIN booking_attendees ba
         ON ba.booking_id = b.id
-      JOIN booking_attendees_dropdown bad
+        AND ba.\`primary\` = 1
+      LEFT JOIN booking_attendees_dropdown bad
         ON bad.id = ba.contact_card_id
-      WHERE b.id = (
-        SELECT id FROM bookings WHERE user_id = ? ORDER BY id DESC LIMIT 1
-      )
-      ORDER BY ba.id ASC
+        AND ba.contact_card_id > 0
+      WHERE (b.user_id = ? OR b.booking_made_by_id = ?)
+      ORDER BY CASE WHEN b.status = 1 THEN 0 ELSE 1 END, b.id DESC
       LIMIT 1`,
-      [userId]
+      [userId, userId]
     );
     if (!rows || rows.length === 0) return null;
+    return rows[0];
+  }
+
+  async _getUserAccountPrefill(userId) {
+    const [rows] = await this.pool.query(
+      `SELECT first_name, sur_name, email, contact1, contact2,
+              date_of_birth, license_type, license_number, theory_number
+       FROM users WHERE id = ? LIMIT 1`,
+      [userId]
+    );
+    if (!rows?.length) return null;
     return rows[0];
   }
 
@@ -69,7 +83,12 @@ class AuthController {
     try {
       const userId = req.user.id;
 
-      const row = await this._getBookingPrefillFallback(userId);
+      let row = await this._getBookingPrefillFallback(userId);
+      let source = 'booking';
+      if (!row) {
+        row = await this._getUserAccountPrefill(userId);
+        source = 'profile';
+      }
       if (!row) {
         return res.json({ success: true, data: { has_fallback: false } });
       }
@@ -90,6 +109,7 @@ class AuthController {
         success: true,
         data: {
           has_fallback: true,
+          source,
           prefill: {
             first_name: row.first_name,
             sur_name: row.sur_name,

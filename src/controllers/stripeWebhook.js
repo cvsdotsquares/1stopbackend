@@ -209,7 +209,7 @@ class StripeWebhookController {
       // Prefer per-booking amounts from the booking records, so mixed own/school values (e.g. 200 + 300) are preserved.
       const placeholderList = allBookingIds.map(() => '?').join(',');
       const [bookingRows] = await connection.query(
-        `SELECT id, total_amount, payment_due FROM bookings WHERE id IN (${placeholderList})`,
+        `SELECT id, total_amount, payment_due, lockid, spaces, status FROM bookings WHERE id IN (${placeholderList})`,
         allBookingIds
       );
 
@@ -235,7 +235,7 @@ class StripeWebhookController {
           `[stripeWebhook] Payment ${session.id} succeeded but course event ${courseEventId} ` +
           `is frozen; refunding and removing bookings ${allBookingIds.join(', ')}`
         );
-        await this.refundOrphanedPaymentIntent(session);
+        await this.refundOrphanedPaymentIntent(session, { refundReason: 'course_frozen' });
         await this.archivePendingBookingsAfterRefund(allBookingIds, {
           reason: 'Course frozen by admin before payment completed; payment refunded',
           cancelledVia: 'stripe-webhook-frozen-course',
@@ -245,10 +245,30 @@ class StripeWebhookController {
       }
 
       await lockSiblingEventsForUpdate(connection, courseEventId);
+
+      let creditSpaces = 0;
+      const primaryBooking = bookingRows[0];
+      const lockId = Number(primaryBooking?.lockid) || 0;
+      if (lockId > 0) {
+        const [lockRows] = await connection.query(
+          'SELECT id, space_required FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
+          [lockId]
+        );
+        if (lockRows?.[0]) {
+          const held = Number(lockRows[0].space_required) || bookingSpaces;
+          creditSpaces = Math.min(bookingSpaces, held);
+        }
+      } else if (Number(primaryBooking?.status) === 0) {
+        // Front-end checkout always reserves via current_locks; credit the
+        // pending row even if the lock_bookings row was already cleaned up.
+        creditSpaces = bookingSpaces;
+      }
+
       const capacityCheck = await canConfirmSpacesOnCohort(
         connection,
         courseEventId,
-        bookingSpaces
+        bookingSpaces,
+        { creditSpaces }
       );
       if (!capacityCheck.allowed) {
         await connection.rollback();
@@ -256,11 +276,13 @@ class StripeWebhookController {
         console.error(
           `[stripeWebhook] Payment ${session.id} succeeded but course event ${courseEventId} ` +
           `has no capacity (limit=${snap?.booking_limit ?? '?'}, done=${snap?.bookings_done ?? '?'}, ` +
-          `need=${bookingSpaces}); refunding bookings ${allBookingIds.join(', ')}`
+          `locks=${snap?.current_locks ?? '?'}, credit=${creditSpaces}, need=${bookingSpaces}); ` +
+          `refunding bookings ${allBookingIds.join(', ')}`
         );
-        await this.refundOrphanedPaymentIntent(session);
+        await this.refundOrphanedPaymentIntent(session, { refundReason: 'course_full' });
         await this.archivePendingBookingsAfterRefund(allBookingIds, {
-          reason: 'Payment refunded: course was full before payment completed',
+          reason:
+            'Payment refunded: course was full before payment completed (spaces taken by another booking)',
           cancelledVia: 'stripe-webhook-capacity-exceeded',
           logLabel: 'capacity exceeded',
         });
@@ -406,16 +428,18 @@ class StripeWebhookController {
    * Cancelling the PaymentIntent is the primary fix; this refunds if a late
    * Pay by Bank authorisation still succeeded.
    */
-  async refundOrphanedPaymentIntent(paymentIntent) {
+  async refundOrphanedPaymentIntent(paymentIntent, options = {}) {
     const piId = paymentIntent.id;
     if (!piId) return;
+
+    const refundReason = String(options.refundReason || 'booking_removed_before_payment_completed');
 
     try {
       const refund = await stripe.refunds.create({
         payment_intent: piId,
         reason: 'requested_by_customer',
         metadata: {
-          reason: 'booking_removed_before_payment_completed',
+          reason: refundReason,
           booking_id: String(paymentIntent.metadata?.booking_id || ''),
           booking_ids: String(paymentIntent.metadata?.booking_ids || ''),
         },
@@ -716,12 +740,18 @@ class StripeWebhookController {
 
       // Get payment intent from Stripe
       const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent, {
-        expand: ['latest_charge'],
+        expand: ['latest_charge', 'latest_charge.refunds'],
       });
       const bookingIdFromMeta = paymentIntent.metadata?.booking_id;
       const latestCharge = paymentIntent.latest_charge;
       const amountRefunded = Number(latestCharge?.amount_refunded || 0);
       const isRefunded = Boolean(latestCharge?.refunded) || amountRefunded > 0;
+      const refundList = Array.isArray(latestCharge?.refunds?.data)
+        ? latestCharge.refunds.data
+        : [];
+      const refundReasonFromStripe = String(
+        refundList[0]?.metadata?.reason || paymentIntent.metadata?.refund_reason || ''
+      ).trim();
 
       // If payment succeeded, try to find the created booking
       if (paymentIntent.status === 'succeeded') {
@@ -740,12 +770,15 @@ class StripeWebhookController {
 
         if (bookings.length > 0 && !isRefunded) {
           const booking = bookings[0];
+          const bookingConfirmed = Number(booking.status) === 1;
           return res.json({
             success: true,
             data: {
               booking_id: booking.id,
               booking_ref: booking.booking_ref,
-              payment_status: paymentIntent.status,
+              // Pay by Bank can return before the webhook confirms — never
+              // treat PI `succeeded` alone as a confirmed booking.
+              payment_status: bookingConfirmed ? 'confirmed' : 'processing',
               booking_status: booking.status,
               amount_paid: paymentIntent.amount_received / 100,
               payment_due: booking.payment_due,
@@ -761,6 +794,7 @@ class StripeWebhookController {
           success: true,
           data: {
             payment_status: isRefunded ? 'refunded' : 'booking_released',
+            refund_reason: refundReasonFromStripe || 'booking_released',
             payment_method_type: paymentIntent.payment_method_types?.[0] || null,
             temp_ref: temp_ref || null,
             amount_paid: paymentIntent.amount_received / 100,
