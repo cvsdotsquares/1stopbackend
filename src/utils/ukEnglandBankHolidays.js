@@ -4,67 +4,7 @@
  */
 const GOV_UK_BANK_HOLIDAYS_URL = 'https://www.gov.uk/bank-holidays.json';
 
-/** Fallback when offline or before first fetch (extend when publishing new years). */
-const ENGLAND_BANK_HOLIDAYS_STATIC = new Set([
-  '2024-01-01',
-  '2024-03-29',
-  '2024-04-01',
-  '2024-05-06',
-  '2024-05-27',
-  '2024-08-26',
-  '2024-12-25',
-  '2024-12-26',
-  '2025-01-01',
-  '2025-04-18',
-  '2025-04-21',
-  '2025-05-05',
-  '2025-05-26',
-  '2025-08-25',
-  '2025-12-25',
-  '2025-12-26',
-  '2026-01-01',
-  '2026-04-03',
-  '2026-04-06',
-  '2026-05-04',
-  '2026-05-25',
-  '2026-08-31',
-  '2026-12-25',
-  '2026-12-28',
-  '2027-01-01',
-  '2027-03-26',
-  '2027-03-29',
-  '2027-05-03',
-  '2027-05-31',
-  '2027-08-30',
-  '2027-12-27',
-  '2027-12-28',
-  '2028-01-03',
-  '2028-04-14',
-  '2028-04-17',
-  '2028-05-01',
-  '2028-05-29',
-  '2028-08-28',
-  '2028-12-25',
-  '2028-12-26',
-  '2029-01-01',
-  '2029-03-30',
-  '2029-04-02',
-  '2029-05-07',
-  '2029-05-28',
-  '2029-08-27',
-  '2029-12-25',
-  '2029-12-26',
-  '2030-01-01',
-  '2030-04-19',
-  '2030-04-22',
-  '2030-05-06',
-  '2030-05-27',
-  '2030-08-26',
-  '2030-12-25',
-  '2030-12-26',
-]);
-
-let loadedHolidaySet = new Set(ENGLAND_BANK_HOLIDAYS_STATIC);
+let loadedHolidaySet = new Set();
 let lastFetchedAt = 0;
 let fetchInFlight = null;
 
@@ -106,30 +46,33 @@ async function fetchGovUkBankHolidays() {
     return true;
   } catch (err) {
     console.error(
-      '[BANK_HOLIDAYS] GOV.UK fetch failed, using static fallback:',
+      '[BANK_HOLIDAYS] GOV.UK fetch failed:',
       err?.message || err
     );
-    if (!loadedHolidaySet.size) {
-      loadedHolidaySet = new Set(ENGLAND_BANK_HOLIDAYS_STATIC);
-    }
-    return false;
   } finally {
     clearTimeout(timer);
   }
+  return false;
 }
 
 /**
  * Load or refresh holidays (cached 24h). Safe to call on every alerts request.
+ * Bank holidays are only known after a successful GOV.UK fetch (no static list).
  */
 async function ensureEnglandBankHolidaysLoaded() {
   const stale = Date.now() - lastFetchedAt > CACHE_TTL_MS;
-  if (!stale && loadedHolidaySet.size && lastFetchedAt > 0) {
+  const needsFetch =
+  !loadedHolidaySet.size || lastFetchedAt === 0 || stale;
+
+  if (!needsFetch) {
     return loadedHolidaySet;
   }
+
   if (fetchInFlight) {
     await fetchInFlight;
     return loadedHolidaySet;
   }
+
   fetchInFlight = fetchGovUkBankHolidays().finally(() => {
     fetchInFlight = null;
   });
@@ -146,5 +89,4 @@ module.exports = {
   GOV_UK_BANK_HOLIDAYS_URL,
   ensureEnglandBankHolidaysLoaded,
   isEnglandBankHoliday,
-  ENGLAND_BANK_HOLIDAYS: ENGLAND_BANK_HOLIDAYS_STATIC,
 };
