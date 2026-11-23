@@ -317,7 +317,10 @@ async function getTestsToCancelAlerts(pool) {
   async function groupAvail(eventId) {
     const key = Number(eventId);
     if (!availCache.has(key)) {
-      availCache.set(key, await getGroupAvailability(pool, key));
+      availCache.set(
+        key,
+        await getGroupAvailability(pool, key)
+      );
     }
     return availCache.get(key);
   }

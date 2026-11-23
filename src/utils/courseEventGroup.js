@@ -555,15 +555,53 @@ function occupiedBookingsDone(storedDone, eventId, confirmedByEvent) {
 
 /**
  * Min available spaces across siblings (shared cohort capacity).
+ *
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
  * @param {number} courseEventId
- * @returns {Promise<{ availableSpaces: number, booking_limit: number, bookings_done: number, current_locks: number }|null>}
+ * @param {{ useStoredCountersOnly?: boolean }} [options]
+ *   When `useStoredCountersOnly` is true, use `course_events.bookings_done` only
+ *   (legacy admin dashboard / public availability). When false (default), also
+ *   reconcile against confirmed booking rows so stale counters cannot oversell.
+ * @returns {Promise<{ availableSpaces: number, rawAvailableSpaces: number, booking_limit: number, bookings_done: number, current_locks: number }|null>}
  */
-async function getGroupAvailability(db, courseEventId) {
+/**
+ * When confirmed booking rows outran `course_events.bookings_done` (e.g. admin
+ * terminal checkout), bump the stored counter so legacy PHP and new admin match.
+ */
+async function reconcileBookingsDoneIfLagging(db, courseEventId, groupAvail) {
+  if (!groupAvail) return false;
+  const eventId = Number(courseEventId);
+  if (!Number.isFinite(eventId) || eventId <= 0) return false;
+
+  const cohortIds = await getCohortMemberIds(db, eventId);
+  const confirmedByEvent = await getConfirmedSeatCounts(db, cohortIds);
+  let anyUpdated = false;
+
+  for (const id of cohortIds) {
+    const [rows] = await db.query(
+      'SELECT bookings_done FROM course_events WHERE id = ? LIMIT 1',
+      [id]
+    );
+    const stored = Number(rows[0]?.bookings_done) || 0;
+    const occupied = occupiedBookingsDone(stored, id, confirmedByEvent);
+    const delta = occupied - stored;
+    if (delta > 0) {
+      await applyGroupSpaceDelta(db, id, { bookingsDoneDelta: delta });
+      anyUpdated = true;
+    }
+  }
+
+  return anyUpdated;
+}
+
+async function getGroupAvailability(db, courseEventId, options = {}) {
+  const useStoredCountersOnly = Boolean(options.useStoredCountersOnly);
   const cohortIds = await getCohortMemberIds(db, courseEventId);
   if (!cohortIds.length) return null;
 
-  const confirmedByEvent = await getConfirmedSeatCounts(db, cohortIds);
+  const confirmedByEvent = useStoredCountersOnly
+    ? new Map()
+    : await getConfirmedSeatCounts(db, cohortIds);
 
   // Single-day (parent = event id): use only this event's counters
   if (cohortIds.length === 1) {
@@ -574,11 +612,13 @@ async function getGroupAvailability(db, courseEventId) {
     );
     if (!rows.length) return null;
     const booking_limit = Number(rows[0].booking_limit) || 0;
-    const bookings_done = occupiedBookingsDone(
-      rows[0].bookings_done,
-      cohortIds[0],
-      confirmedByEvent
-    );
+    const bookings_done = useStoredCountersOnly
+      ? Number(rows[0].bookings_done) || 0
+      : occupiedBookingsDone(
+          rows[0].bookings_done,
+          cohortIds[0],
+          confirmedByEvent
+        );
     const current_locks = Number(rows[0].current_locks) || 0;
     const rawAvailableSpaces = booking_limit - bookings_done - current_locks;
     return {
@@ -604,7 +644,9 @@ async function getGroupAvailability(db, courseEventId) {
   let ref = rows[0];
   for (const row of rows) {
     const limit = Number(row.booking_limit) || 0;
-    const done = occupiedBookingsDone(row.bookings_done, row.id, confirmedByEvent);
+    const done = useStoredCountersOnly
+      ? Number(row.bookings_done) || 0
+      : occupiedBookingsDone(row.bookings_done, row.id, confirmedByEvent);
     const locks = Number(row.current_locks) || 0;
     const available = limit - done - locks;
     if (available < minAvailable) {
@@ -888,6 +930,7 @@ module.exports = {
   getNearestDateSiblingEventId,
   getConfirmedSeatCounts,
   getGroupAvailability,
+  reconcileBookingsDoneIfLagging,
   eventsShareCapacity,
   assertAdminCanTakeSpaces,
   adminSeatsWouldFit,
