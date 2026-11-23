@@ -9,9 +9,9 @@ const {
 } = require('../../utils/ukDateValidation');
 const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../constants');
 const {
+  applyGroupSpaceDelta,
   assertAdminCanTakeSpaces,
   eventsShareCapacity,
-  getGroupAvailability,
 } = require('../../utils/courseEventGroup');
 const { getExpireMinutes } = require('./bookingStripeLinkService');
 const { phpSerialize } = require('../../utils/phpSerialize');
@@ -1155,23 +1155,38 @@ async function removeAllTerminalLocksForAdmin(pool, session, adminId) {
 
 async function addBookingsDone(pool, session, evId, spaceRequired) {
   if (spaceRequired <= 0) return;
-  const group = await getGroupAvailability(pool, evId);
-  const held = Math.min(
-    spaceRequired,
-    Math.max(0, Number(group?.current_locks) || 0)
-  );
-  await assertAdminCanTakeSpaces(pool, evId, spaceRequired, { creditSpaces: held });
-  const [parentRows] = await pool.query(
-    'SELECT parent FROM course_events WHERE id = ? LIMIT 1',
-    [evId]
-  );
-  const parent = parentRows?.[0]?.parent;
-  if (parent == null) return;
 
-  await pool.query(
-    'UPDATE course_events SET bookings_done = bookings_done + ? WHERE parent = ?',
-    [spaceRequired, parent]
-  );
+  let heldOnThisDate = 0;
+  const lockId = Number(session?.adminBooking?.lock_session?.id) || 0;
+  if (lockId > 0) {
+    const [lockRows] = await pool.query(
+      'SELECT id, space_required, event_id FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
+      [lockId]
+    );
+    const lock = lockRows?.[0];
+    const heldEventId = Number(lock?.event_id) || 0;
+    if (lock && heldEventId && (await eventsShareCapacity(pool, evId, heldEventId))) {
+      heldOnThisDate = Math.min(spaceRequired, Number(lock.space_required) || spaceRequired);
+    }
+  }
+
+  await assertAdminCanTakeSpaces(pool, evId, spaceRequired, {
+    creditSpaces: heldOnThisDate,
+  });
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await applyGroupSpaceDelta(connection, evId, {
+      bookingsDoneDelta: spaceRequired,
+    });
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
 
   await removeCurrentLock(pool, session, false);
   if (session) delete session.adminBooking;
