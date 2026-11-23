@@ -40,6 +40,9 @@ async function resolveBookingBccForPool(pool) {
 
 exports.resolveBookingBcc = resolveBookingBcc;
 exports.resolveBookingBccForPool = resolveBookingBccForPool;
+exports.getMailFrom = getMailFrom;
+exports.getMailFromAddress = getMailFromAddress;
+exports.getReplyTo = getReplyTo;
 
 /** Legacy PHPMailer `AddBCC(email, "Booking Administrator")` log format. */
 function formatBookingAdministratorBccLog(address) {
@@ -65,6 +68,8 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASS
   }
 });
+
+exports.transporter = transporter;
 
 exports.sendOTPEmail = async (email, firstName, otp) => {
   const mailOptions = {

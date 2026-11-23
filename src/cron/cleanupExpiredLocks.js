@@ -14,34 +14,39 @@ class ExpiredLockCleanupCron {
   async cleanupExpiredLocks() {
     const connection = await this.pool.getConnection();
     const apiExpiryMinutes = Number(process.env.LOCK_EXPIRE_API_MINUTES || 20);
+    const onlineExpiryMinutes = Number(process.env.LOCK_EXPIRE_ONLINE_MINUTES || 10);
 
     try {
       console.log(
-        `[LOCK CLEANUP CRON] Starting cleanup: API expiry = ${apiExpiryMinutes} min...`
+        `[LOCK CLEANUP CRON] Starting cleanup: Terminal/Ride2 expiry = ${apiExpiryMinutes}m, Online expiry = ${onlineExpiryMinutes}m...`
       );
 
       await connection.beginTransaction();
 
-      const [rideTerminalLocks] = await connection.query(
+      const [expiredLocks] = await connection.query(
         `SELECT
             id,
+            event_id,
             parent,
             COALESCE(space_required, 1) AS space_required,
             COALESCE(manual_lock, 0) AS manual_lock,
             COALESCE(automatic_lock, 0) AS automatic_lock,
             locked_by
         FROM lock_bookings
-        WHERE created <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-          AND locked_by = 'ride2'
+        WHERE (
+          (locked_by IN ('ride2', 'terminal') AND created <= DATE_SUB(NOW(), INTERVAL ? MINUTE))
+          OR
+          (locked_by = 'online' AND created <= DATE_SUB(NOW(), INTERVAL ? MINUTE))
+        )
         FOR UPDATE`,
-        [apiExpiryMinutes]
+        [apiExpiryMinutes, onlineExpiryMinutes]
       );
 
-      let locksToProcess = rideTerminalLocks;
+      let locksToProcess = expiredLocks;
 
       if (!locksToProcess || locksToProcess.length === 0) {
         await connection.commit();
-        console.log('[LOCK CLEANUP CRON] No expired locks found (ride2)');
+        console.log('[LOCK CLEANUP CRON] No expired locks found (terminal/ride2/online)');
         return;
       }
 
@@ -84,10 +89,23 @@ class ExpiredLockCleanupCron {
         }
         deletedCount += deleteResult.affectedRows;
 
-        const [siblings] = await connection.query(
-          'SELECT id, COALESCE(manual_lock_done, 0) AS manual_lock_done, COALESCE(automatic_lock_done, 0) AS automatic_lock_done FROM course_events WHERE parent = ?',
-          [lock.parent]
-        );
+        const parentId = Number(lock.parent) || 0;
+        const eventId = Number(lock.event_id) || 0;
+        let siblings = [];
+
+        if (parentId > 0) {
+          const [rows] = await connection.query(
+            'SELECT id, COALESCE(manual_lock_done, 0) AS manual_lock_done, COALESCE(automatic_lock_done, 0) AS automatic_lock_done FROM course_events WHERE parent = ?',
+            [parentId]
+          );
+          siblings = rows || [];
+        } else if (eventId > 0) {
+          const [rows] = await connection.query(
+            'SELECT id, COALESCE(manual_lock_done, 0) AS manual_lock_done, COALESCE(automatic_lock_done, 0) AS automatic_lock_done FROM course_events WHERE id = ?',
+            [eventId]
+          );
+          siblings = rows || [];
+        }
 
         for (const ev of siblings) {
           const newManual = Math.max(0, Number(ev.manual_lock_done) - Number(lock.manual_lock));
