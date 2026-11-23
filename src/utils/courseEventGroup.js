@@ -787,28 +787,29 @@ async function lockSiblingEventsForUpdate(connection, courseEventId) {
 }
 
 /**
- * Admin freeze, matching the read-side checks used by availability: a row in
- * `freeze`, or `course_event_dates.freeze = 1`. Checked across the cohort
- * because linked days are one course — freezing any day stops all of them.
+ * Admin freeze for this course event only.
  *
- * Freeze rows are written by the PHP admin, never by this backend.
+ * A shared parent groups different courses on the same days (they share seat
+ * capacity). Freezing one of those courses must not block the others — the
+ * dashboard and the event page both key off this event's own `freeze` row
+ * and its own `course_event_dates.freeze` flag.
+ *
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
  * @param {number} courseEventId
  * @returns {Promise<boolean>}
  */
 async function isCourseEventFrozen(db, courseEventId) {
-  const cohortIds = await getCohortMemberIds(db, courseEventId);
-  const ids = cohortIds.length ? cohortIds : [Number(courseEventId)];
-  const placeholders = ids.map(() => '?').join(',');
+  const id = Number(courseEventId);
+  if (!Number.isFinite(id) || id <= 0) return false;
 
   const [rows] = await db.query(
     `SELECT
-       EXISTS (SELECT 1 FROM freeze WHERE course_event_id IN (${placeholders})) AS freeze_rows,
+       EXISTS (SELECT 1 FROM freeze WHERE course_event_id = ?) AS freeze_rows,
        EXISTS (
          SELECT 1 FROM course_event_dates
-         WHERE course_event_id IN (${placeholders}) AND freeze = 1
+         WHERE course_event_id = ? AND freeze = 1
        ) AS frozen_dates`,
-    [...ids, ...ids]
+    [id, id]
   );
 
   return Boolean(Number(rows[0]?.freeze_rows) || Number(rows[0]?.frozen_dates));
