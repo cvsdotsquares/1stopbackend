@@ -13,7 +13,8 @@ const { ensureReservedBookingsForLock } = require('./adminBookingReserveService'
 const {
   assertAdminCanTakeSpaces,
   eventsShareCapacity,
-  getConfirmedSeatCounts,
+  getGroupAvailability,
+  reconcileBookingsDoneIfLagging,
 } = require('../../utils/courseEventGroup');
 const {
   canHoldBooking,
@@ -178,16 +179,26 @@ function deriveBookingDisplayStatus(booking) {
   return 'In Process';
 }
 
-function computeSpacesAvailable(event, isFrozen, currentSpaceSelection) {
-  const bookingLimit = Number(event.booking_limit) || 0;
-  const bookingsDone = Number(event.bookings_done) || 0;
-  const currentLocks = Number(event.current_locks) || 0;
-  const selected = Number(currentSpaceSelection) || 0;
+/**
+ * Same shared-pool rules as public booking / assertAdminCanTakeSpaces.
+ * `creditSpaces` — seats already held by this admin session on the same cohort.
+ */
+async function computeSpacesAvailable(pool, eventId, isFrozen, creditSpaces = 0) {
+  if (isFrozen) return { spaces: 0, group: null };
 
-  if (isFrozen) return 0;
+  let group = await getGroupAvailability(pool, eventId);
+  if (group && (await reconcileBookingsDoneIfLagging(pool, eventId, group))) {
+    group = await getGroupAvailability(pool, eventId);
+  }
+  if (!group) return { spaces: 0, group: null };
 
-  const raw = bookingLimit - (bookingsDone + currentLocks) + selected;
-  return raw < 0 ? 0 : raw;
+  const raw = Number(group.rawAvailableSpaces);
+  const base = Number.isFinite(raw) ? raw : Number(group.availableSpaces) || 0;
+  const credit = Math.max(0, Number(creditSpaces) || 0);
+  return {
+    spaces: Math.max(0, base + credit),
+    group,
+  };
 }
 
 function computeConfirmedBookings(event, frozenData, isFrozen) {
@@ -271,12 +282,6 @@ async function getEventBookingPage(pool, evId, session) {
     const err = new Error('Invalid course, Try again');
     err.status = 404;
     throw err;
-  }
-
-  const confirmedSeats = await getConfirmedSeatCounts(pool, [eventId]);
-  const confirmedDone = confirmedSeats.get(eventId) || 0;
-  if (confirmedDone > (Number(event.bookings_done) || 0)) {
-    event.bookings_done = confirmedDone;
   }
 
   const adminBooking = ensureAdminBookingSession(session);
@@ -409,11 +414,15 @@ async function getEventBookingPage(pool, evId, session) {
   }));
 
   const firstDateKey = Object.keys(dates).find((k) => k !== 'TBC') || null;
-  const spacesAvailable = computeSpacesAvailable(
-    event,
-    isFrozen,
-    currentSpaceSelection
-  );
+  const { spaces: spacesAvailable, group: groupAvail } =
+    await computeSpacesAvailable(pool, eventId, isFrozen, currentSpaceSelection);
+
+  if (groupAvail) {
+    event.booking_limit = groupAvail.booking_limit;
+    event.bookings_done = groupAvail.bookings_done;
+    event.current_locks = groupAvail.current_locks;
+  }
+
   const bookingInProcess = Math.abs(
     Number(event.current_locks || 0) - currentSpaceSelection
   );

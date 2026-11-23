@@ -11,6 +11,7 @@ const { LOCK_EXPIRE_TIME_MINUTES, isStripePaymentLinkLockedBy } = require('../co
 const {
   assertAdminCanTakeSpaces,
   eventsShareCapacity,
+  applyGroupSpaceDelta,
   getGroupAvailability,
 } = require('../../utils/courseEventGroup');
 const { getExpireMinutes } = require('./bookingStripeLinkService');
@@ -1161,17 +1162,9 @@ async function addBookingsDone(pool, session, evId, spaceRequired) {
     Math.max(0, Number(group?.current_locks) || 0)
   );
   await assertAdminCanTakeSpaces(pool, evId, spaceRequired, { creditSpaces: held });
-  const [parentRows] = await pool.query(
-    'SELECT parent FROM course_events WHERE id = ? LIMIT 1',
-    [evId]
-  );
-  const parent = parentRows?.[0]?.parent;
-  if (parent == null) return;
-
-  await pool.query(
-    'UPDATE course_events SET bookings_done = bookings_done + ? WHERE parent = ?',
-    [spaceRequired, parent]
-  );
+  await applyGroupSpaceDelta(pool, evId, {
+    bookingsDoneDelta: spaceRequired,
+  });
 
   await removeCurrentLock(pool, session, false);
   if (session) delete session.adminBooking;
