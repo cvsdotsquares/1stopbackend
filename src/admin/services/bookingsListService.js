@@ -187,6 +187,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   const locationScr = trim(searchterm?.location_scr);
   const tobScr = trim(searchterm?.tob_scr);
   const paymentScr = trim(searchterm?.payment_scr);
+  const fromScr = trim(searchterm?.from_scr);
+  const toScr = trim(searchterm?.to_scr);
 
   // Confirmed / on-hold / refunded only — unpaid (status 0) live on In Progress page.
   let where = ' WHERE bookings.status != 5 AND bookings.status != 0 ';
@@ -210,6 +212,15 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   if (tobScr) {
     where += ' AND bookings.type_of_book = ? ';
     params.push(tobScr);
+  }
+
+  if (fromScr) {
+    where += ' AND DATE(course_event_dates.event_date) >= ? ';
+    params.push(fromScr);
+  }
+  if (toScr) {
+    where += ' AND DATE(course_event_dates.event_date) <= ? ';
+    params.push(toScr);
   }
 
   if (nameScr) {
@@ -396,6 +407,8 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
       location_scr: locationScr,
       tob_scr: tobScr,
       payment_scr: paymentScr,
+      from_scr: fromScr,
+      to_scr: toScr,
     },
     filterOptions,
   };

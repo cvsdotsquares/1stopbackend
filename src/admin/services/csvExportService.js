@@ -136,10 +136,30 @@ function renderTemplateBody(body, { name, rows }) {
     ? source
     : htmlEscape(source).replace(/\r\n|\r|\n/g, '<br/>');
   const tableHtml = buildTableHtml(rows);
-  return prepared
-    .replaceAll('[client_name]', htmlEscape(name || ''))
-    .replaceAll('[exported_table]', tableHtml)
-    .replaceAll('[payment_link]', '');
+  return applyClientFirstName(
+    prepared
+      .replaceAll('[exported_table]', tableHtml)
+      .replaceAll('[payment_link]', ''),
+    name
+  );
+}
+
+function applyClientFirstName(html, firstName) {
+  const label = htmlEscape(String(firstName || '').trim());
+  const source = String(html || '');
+  if (/class=["'][^"']*\bcsv-client-name\b/.test(source)) {
+    return source.replace(
+      /(<span\b[^>]*\bcsv-client-name\b[^>]*>)[\s\S]*?(<\/span>)/gi,
+      `$1${label}$2`
+    );
+  }
+  return source.replaceAll('[client_name]', label);
+}
+
+function firstNameOnly(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.split(/\s+/)[0] || '';
 }
 
 function parseEmailList(value) {
@@ -399,8 +419,7 @@ async function resolveRecipient(pool, { customerId, email, name, emails }) {
       err.status = 400;
       throw err;
     }
-    const customerName =
-      [row.first_name, row.sur_name].filter(Boolean).join(' ').trim() || typedName;
+    const customerName = trim(row.first_name) || firstNameOnly(typedName);
     const addresses = mergeRecipientEmails(customerEmail, typedEmail, emails);
     return { emails: addresses, name: customerName };
   }
@@ -411,7 +430,64 @@ async function resolveRecipient(pool, { customerId, email, name, emails }) {
     err.status = 400;
     throw err;
   }
-  return { emails: combined, name: typedName };
+  return { emails: combined, name: firstNameOnly(typedName) };
+}
+
+function normalizeOutgoingRecipients(payload, resolved) {
+  const list = [];
+  const seen = new Set();
+
+  function add(email, firstName, bcc) {
+    const address = String(email || '').trim();
+    if (!isEmail(address)) return;
+    const key = address.toLowerCase();
+    const name = trim(firstName);
+    if (seen.has(key)) {
+      const existing = list.find((item) => item.email.toLowerCase() === key);
+      if (existing && !existing.firstName && name) existing.firstName = name;
+      if (existing && !bcc) existing.bcc = false;
+      return;
+    }
+    seen.add(key);
+    list.push({ email: address, firstName: name, bcc: Boolean(bcc) });
+  }
+
+  const incoming = Array.isArray(payload.recipients) ? payload.recipients : [];
+  for (const item of incoming) {
+    if (typeof item === 'string') add(item, '', false);
+    else add(item?.email, item?.firstName || item?.first_name || '', Boolean(item?.bcc));
+  }
+
+  if (!list.length && resolved) {
+    const sharedName = firstNameOnly(resolved.name);
+    for (const email of resolved.emails || []) add(email, sharedName);
+  }
+
+  return list;
+}
+
+async function insertTemplateEmailLog(pool, { to, bcc, subject, html, emailBy, status, error }) {
+  try {
+    await pool.query(
+      `INSERT INTO email_logs (book_ref, \`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, created, type, error)
+       VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        '',
+        String(to || '').slice(0, 5000),
+        String(bcc || '').slice(0, 5000),
+        getMailFromAddress(),
+        String(subject || '').slice(0, 200),
+        html,
+        String(emailBy || 'admin').slice(0, 50),
+        status,
+        nowMysql(),
+        'Email Template',
+        String(error || '').slice(0, 5000),
+      ]
+    );
+  } catch (logErr) {
+    console.error('[ADMIN][CSV_EXPORT][LOG]', logErr.message);
+  }
 }
 
 function formatMailshotEventDate(value) {
@@ -534,7 +610,13 @@ async function searchAttendeesForMailshotBatch(pool, queries) {
 async function shareCourseDatesCsv(pool, payload, emailBy) {
   const allowEmpty = Boolean(payload.templateOnly || payload.skipDates);
   const rows = normalizeRows(payload.rows, { allowEmpty });
-  const recipient = await resolveRecipient(pool, payload);
+  const hasExplicitRecipients = Array.isArray(payload.recipients) && payload.recipients.length > 0;
+  const resolved = hasExplicitRecipients ? null : await resolveRecipient(pool, payload);
+  const recipients = normalizeOutgoingRecipients(payload, resolved);
+  if (!recipients.length) {
+    throw httpError('Select or add at least one recipient email.', 400);
+  }
+
   const templateId = Number(payload.templateId);
   if (!Number.isFinite(templateId) || templateId <= 0) {
     throw httpError('Select an email template.', 400);
@@ -547,77 +629,104 @@ async function shareCourseDatesCsv(pool, payload, emailBy) {
   if (editedBody.length > MAX_EDITED_BODY) {
     throw httpError('The email is too long.', 400);
   }
-  const subject = String(template.title || 'Course dates from 1 Stop Instruction').slice(0, 200);
-  const html = renderTemplateBody(editedBody || template.body, {
-    name: recipient.name,
+  const subject = String(
+    payload.subject || template.title || 'Course dates from 1 Stop Instruction'
+  ).trim().slice(0, 200);
+  const templateHtml = renderTemplateBody(editedBody || template.body, {
+    name: '[client_name]',
     rows,
   });
 
-  const recipientEmails = [...new Set(recipient.emails)];
-  const bccBooking = Boolean(payload.bccBooking);
-  const mailshot = Boolean(payload.mailshotAttendees);
-  const bcc = [];
-  const useBccRecipients = mailshot || recipientEmails.length > 1;
-  if (useBccRecipients) {
-    bcc.push(...recipientEmails);
-  }
-  if (bccBooking) {
-    const bookingBcc = await resolveBookingBccForPool(pool);
-    if (bookingBcc && !bcc.includes(bookingBcc) && !recipientEmails.includes(bookingBcc)) {
-      bcc.push(bookingBcc);
+  const sent = [];
+  const sentBcc = [];
+  const failed = [];
+  for (const recipient of recipients) {
+    const html = applyClientFirstName(templateHtml, recipient.firstName);
+    const asBcc = Boolean(recipient.bcc);
+    try {
+      await sendEmailTemplateMessage({
+        to: asBcc ? '' : recipient.email,
+        bcc: asBcc ? [recipient.email] : [],
+        subject,
+        html,
+      });
+      if (asBcc) sentBcc.push(recipient.email);
+      else sent.push(recipient.email);
+      await insertTemplateEmailLog(pool, {
+        to: asBcc ? '' : recipient.email,
+        bcc: asBcc ? recipient.email : '',
+        subject,
+        html,
+        emailBy,
+        status: 1,
+        error: '',
+      });
+    } catch (mailErr) {
+      const emailError = mailErr?.message || String(mailErr);
+      failed.push(recipient.email);
+      await insertTemplateEmailLog(pool, {
+        to: asBcc ? '' : recipient.email,
+        bcc: asBcc ? recipient.email : '',
+        subject,
+        html,
+        emailBy,
+        status: 0,
+        error: emailError,
+      });
     }
   }
 
-  const to = useBccRecipients ? getMailFromAddress() : recipientEmails[0];
+  const delivered = [...sent, ...sentBcc];
+  const bccAdmin = Boolean(payload.bccBooking || payload.bccAdmin);
+  if (bccAdmin && delivered.length) {
+    const adminBcc = await resolveBookingBccForPool(pool);
+    const clientList = delivered.join(', ');
+    const adminHtml = `<p><strong>This copy was sent to:</strong> ${htmlEscape(clientList)}</p>${applyClientFirstName(templateHtml, '')}`;
+    try {
+      await sendEmailTemplateMessage({
+        to: '',
+        bcc: [adminBcc],
+        subject,
+        html: adminHtml,
+      });
+      await insertTemplateEmailLog(pool, {
+        to: '',
+        bcc: adminBcc,
+        subject,
+        html: adminHtml,
+        emailBy,
+        status: 1,
+        error: '',
+      });
+    } catch (mailErr) {
+      const emailError = mailErr?.message || String(mailErr);
+      failed.push(adminBcc);
+      await insertTemplateEmailLog(pool, {
+        to: '',
+        bcc: adminBcc,
+        subject,
+        html: adminHtml,
+        emailBy,
+        status: 0,
+        error: emailError,
+      });
+    }
+  }
 
-  let emailStatus = 0;
-  let emailError = '';
-  try {
-    await sendEmailTemplateMessage({
-      to,
-      bcc: bcc.length ? bcc : undefined,
-      subject,
-      html,
-    });
-    emailStatus = 1;
-  } catch (mailErr) {
-    emailError = mailErr?.message || String(mailErr);
-    const err = new Error(`The email could not be sent. ${emailError}`);
+  if (!delivered.length) {
+    const err = new Error('The email could not be sent.');
     err.status = 502;
     throw err;
-  } finally {
-    const logTo = useBccRecipients ? getMailFromAddress() : recipientEmails.join(', ');
-    const logBcc = useBccRecipients
-      ? bcc.join(', ')
-      : bccBooking
-        ? bcc.join(', ')
-        : '';
-    try {
-      await pool.query(
-        `INSERT INTO email_logs (book_ref, \`to\`, cc, bcc, \`from\`, subject, email_content, email_by, status, created, type, error)
-         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          '',
-          logTo,
-          logBcc,
-          getMailFromAddress(),
-          subject,
-          html,
-          String(emailBy || 'admin').slice(0, 50),
-          emailStatus,
-          nowMysql(),
-          'Email Template',
-          emailError,
-        ]
-      );
-    } catch (logErr) {
-      console.error('[ADMIN][CSV_EXPORT][LOG]', logErr.message);
-    }
   }
 
+  const parts = [];
+  if (sent.length) parts.push(`Email sent to ${sent.join(', ')}`);
+  if (sentBcc.length) parts.push(`BCC ${sentBcc.join(', ')}`);
+  let message = `${parts.join('. ')}.`;
+  if (failed.length) message += ` Could not send to ${failed.join(', ')}.`;
   return {
-    email: recipientEmails.join(', '),
-    message: `Email sent to ${recipientEmails.join(', ')}.`,
+    email: delivered.join(', '),
+    message,
   };
 }
 
