@@ -74,6 +74,8 @@ class BookingsController {
           location_scr: req.query.location_scr,
           tob_scr: req.query.tob_scr,
           payment_scr: req.query.payment_scr,
+          from_scr: req.query.from_scr,
+          to_scr: req.query.to_scr,
         },
       });
       return res.json({ success: true, data });

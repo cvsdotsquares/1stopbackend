@@ -1800,17 +1800,31 @@ exports.sendCourseDatesCsvEmail = async ({ to, subject, html, filename, csv }) =
 };
 
 exports.sendEmailTemplateMessage = async ({ to, bcc, subject, html }) => {
+  const toAddress = String(to || '').trim();
   const bccList = Array.isArray(bcc)
     ? bcc.map((item) => String(item || '').trim()).filter(Boolean)
-    : [];
-  await transporter.sendMail({
+    : String(bcc || '')
+        .split(/[;,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+  const mail = {
     from: getMailFrom(),
     ...(getReplyTo() ? { replyTo: getReplyTo() } : {}),
-    to,
-    ...(bccList.length ? { bcc: bccList.join(', ') } : {}),
     subject,
     html,
-  });
+  };
+  if (toAddress) mail.to = toAddress;
+  if (bccList.length) {
+    mail.bcc = bccList.join(', ');
+    if (!toAddress) {
+      mail.to = 'undisclosed-recipients:;';
+      mail.envelope = {
+        from: getMailFromAddress(),
+        to: bccList,
+      };
+    }
+  }
+  await transporter.sendMail(mail);
 };
 
 exports.resolveBookingBccForPool = resolveBookingBccForPool;
