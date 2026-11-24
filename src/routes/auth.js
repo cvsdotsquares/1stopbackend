@@ -92,9 +92,14 @@ function createAuthRoutes(pool) {
 
     body('license_number')
       .optional({ values: 'falsy' })
-      .trim()
-      .isLength({ min: 2, max: 32 })
-      .withMessage('License number must be between 2 and 32 characters'),
+      .custom((value) => {
+        const { validateDrivingLicenceNumber } = require('../utils/drivingLicenceValidation');
+        const result = validateDrivingLicenceNumber(value, { required: false });
+        if (!result.valid) {
+          throw new Error(result.message);
+        }
+        return true;
+      }),
 
     body('license_type')
       .optional({ values: 'falsy' })

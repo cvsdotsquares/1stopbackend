@@ -829,6 +829,19 @@ async function canConfirmSpacesOnCohort(db, courseEventId, spacesToConfirm, opti
     return { allowed: false, reason: 'no_event' };
   }
 
+  const { booking_limit, bookings_done } = groupAvail;
+
+  // Converting this payment moves `spaces` from locks into bookings_done. If the
+  // cohort is already full on confirmed/done counters, refuse even when a stale
+  // hold credit would otherwise pass (e.g. admin took the last seat during Pay by Bank).
+  if (bookings_done + spaces > booking_limit) {
+    return {
+      allowed: false,
+      reason: 'capacity_exceeded',
+      groupAvail,
+    };
+  }
+
   const credit = Math.max(0, Number(options.creditSpaces) || 0);
   const raw = Number(groupAvail.rawAvailableSpaces);
   const available = (Number.isFinite(raw) ? raw : 0) + credit;

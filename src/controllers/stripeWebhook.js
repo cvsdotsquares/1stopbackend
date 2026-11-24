@@ -5,6 +5,7 @@ const { formatDateToDDMMYYYY, getCurrentMysqlDateTime } = require('../utils/date
 const {
   applyGroupSpaceDelta,
   canConfirmSpacesOnCohort,
+  getGroupAvailability,
   isCourseEventFrozen,
   lockSiblingEventsForUpdate,
 } = require('../utils/courseEventGroup');
@@ -249,6 +250,9 @@ class StripeWebhookController {
       let creditSpaces = 0;
       const primaryBooking = bookingRows[0];
       const lockId = Number(primaryBooking?.lockid) || 0;
+      const cohortBeforeConfirm = await getGroupAvailability(connection, courseEventId);
+      const cohortLocks = Number(cohortBeforeConfirm?.current_locks) || 0;
+
       if (lockId > 0) {
         const [lockRows] = await connection.query(
           'SELECT id, space_required FROM lock_bookings WHERE id = ? AND delete_process = 0 LIMIT 1',
@@ -256,12 +260,11 @@ class StripeWebhookController {
         );
         if (lockRows?.[0]) {
           const held = Number(lockRows[0].space_required) || bookingSpaces;
-          creditSpaces = Math.min(bookingSpaces, held);
+          creditSpaces = Math.min(bookingSpaces, held, cohortLocks);
         }
       } else if (Number(primaryBooking?.status) === 0) {
-        // Front-end checkout always reserves via current_locks; credit the
-        // pending row even if the lock_bookings row was already cleaned up.
-        creditSpaces = bookingSpaces;
+        // Public checkout reserves via current_locks only (lockid stays 0).
+        creditSpaces = Math.min(bookingSpaces, cohortLocks);
       }
 
       const capacityCheck = await canConfirmSpacesOnCohort(
