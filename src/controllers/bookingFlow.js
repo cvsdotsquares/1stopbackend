@@ -14,7 +14,19 @@ const {
   applyGroupSpaceDelta,
   lockSiblingEventsForUpdate,
 } = require('../utils/courseEventGroup');
-const e = require('express');
+const { validateDrivingLicenceNumber } = require('../utils/drivingLicenceValidation');
+
+function validatePublicAttendeeDrivingLicence(attendee, attendeeIndex) {
+  const licenseType = Number.parseInt(attendee?.license_type, 10);
+  if (licenseType === 4) return null;
+
+  const result = validateDrivingLicenceNumber(attendee?.license_number, { required: true });
+  if (!result.valid) {
+    const label = Number.isFinite(attendeeIndex) ? `Attendee ${attendeeIndex + 1}: ` : '';
+    return `${label}${result.message}`;
+  }
+  return null;
+}
 
 const parseDobToMysql = (dob) => {
   if (!dob) return null;
@@ -712,6 +724,11 @@ class BookingFlowController {
         attendeeData.license_number = attendeeData.license_number.toUpperCase();
       }
 
+      const licenceError = validatePublicAttendeeDrivingLicence(attendeeData, null);
+      if (licenceError) {
+        return res.status(400).json({ success: false, message: licenceError });
+      }
+
       // Process names (title case)
       const toTitleCase = (str) => {
         return str.replace(/\w\S*/g, (txt) =>
@@ -1210,6 +1227,13 @@ class BookingFlowController {
 
       if (!terms_agreed) {
         return res.status(400).json({ success: false, message: 'Please agree to the Terms & Conditions and Privacy Policy' });
+      }
+
+      for (let i = 0; i < attendees.length; i++) {
+        const licenceError = validatePublicAttendeeDrivingLicence(attendees[i], i);
+        if (licenceError) {
+          return res.status(400).json({ success: false, message: licenceError });
+        }
       }
 
       const connection = await this.pool.getConnection();
