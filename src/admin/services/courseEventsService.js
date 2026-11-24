@@ -1,5 +1,6 @@
 const RECORDS_PER_PAGE = 40;
 const { deleteRideToCourse } = require('./rideToApiService');
+const { linkedSpacesForListRows } = require('../../utils/courseEventGroup');
 
 function trim(value) {
   return value == null ? '' : String(value).trim();
@@ -212,15 +213,20 @@ async function getFrozenMap(pool, eventIds) {
   return map;
 }
 
-function mapListRow(row, frozenMap) {
+function mapListRow(row, frozenMap, linkedSpaces) {
   const frozen = frozenMap.get(row.course_event_id);
   const isFrozen = Boolean(frozen);
+  const linked = isFrozen
+    ? null
+    : linkedSpaces?.get(Number(row.course_event_id));
   const bookingsDone = isFrozen
     ? String(frozen.bookings_done ?? row.bookings_done ?? '0')
-    : String(row.bookings_done ?? '0');
+    : String(linked ? linked.bookings_done : (row.bookings_done ?? '0'));
   const bookingLimit = Number(row.booking_limit) || 0;
   const bookingsNum = Number(bookingsDone) || 0;
-  const currentLocks = Number(row.current_locks) || 0;
+  const currentLocks = linked
+    ? linked.current_locks
+    : Number(row.current_locks) || 0;
   const availableSpaces = Math.max(0, bookingLimit - bookingsNum - currentLocks);
 
   return {
@@ -245,7 +251,7 @@ function mapListRow(row, frozenMap) {
     event_type: row.event_type,
     parent: row.parent,
     status: String(row.status ?? '0'),
-    current_locks: Number(row.current_locks) || 0,
+    current_locks: currentLocks,
     is_frozen: isFrozen,
     row_style: getRowStyle(isFrozen, row.event_date),
     price_type:
@@ -416,10 +422,13 @@ async function listCourseEvents(pool, { page = 1, searchterm = {} } = {}) {
   });
 
   const eventIds = sortedRows.map((row) => row.course_event_id);
-  const frozenMap = await getFrozenMap(pool, eventIds);
+  const [frozenMap, linkedSpaces] = await Promise.all([
+    getFrozenMap(pool, eventIds),
+    linkedSpacesForListRows(pool, sortedRows),
+  ]);
 
   return {
-    items: sortedRows.map((row) => mapListRow(row, frozenMap)),
+    items: sortedRows.map((row) => mapListRow(row, frozenMap, linkedSpaces)),
     pagination: {
       page: pageNum,
       perPage: RECORDS_PER_PAGE,

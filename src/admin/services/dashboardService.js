@@ -357,7 +357,8 @@ async function enrichCourseAvails(pool, rows, adminId = 0) {
       const confirmed = confirmedSeats.get(eventId) || 0;
       const group = groupAvailByEventId.get(eventId);
 
-      // Each linked course uses its own seats. A full A2 does not fill A1 or DAS.
+      // Linked courses share one seat pool. A booking on any of them
+      // reduces the spaces left on the others.
       let bookingLimit = Number(row.booking_limit) || 0;
       let bookingsDone = confirmed;
       let confirmedBookings = confirmed;
