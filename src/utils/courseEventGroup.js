@@ -768,6 +768,9 @@ async function eventsShareCapacity(db, eventIdA, eventIdB) {
  * shared course date cannot fit `spacesNeeded`.
  * `creditSpaces` adds back seats this operation already holds on the same
  * date (an in-progress lock, or a booking moving inside the same course group).
+ * `alreadyCountedSpaces` adds back seats this operation has already confirmed.
+ * Those rows are inside the availability count, so they must not be required
+ * as free seats a second time.
  */
 async function assertAdminCanTakeSpaces(db, courseEventId, spacesNeeded, options = {}) {
   const needed = Math.max(1, Number(spacesNeeded) || 1);
@@ -786,10 +789,11 @@ async function assertAdminCanTakeSpaces(db, courseEventId, spacesNeeded, options
     );
     if (!same) credit = 0;
   }
+  const alreadyCounted = Math.max(0, Number(options.alreadyCountedSpaces) || 0);
 
   const group = await getGroupAvailability(db, courseEventId);
   const raw = Number(group?.rawAvailableSpaces);
-  const available = (Number.isFinite(raw) ? raw : 0) + credit;
+  const available = (Number.isFinite(raw) ? raw : 0) + credit + alreadyCounted;
   if (!group || available < needed) {
     const err = new Error(ADMIN_DATE_FULL_MESSAGE);
     err.status = 400;

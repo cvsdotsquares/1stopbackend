@@ -1273,6 +1273,7 @@ async function addBookingsDone(pool, session, evId, spaceRequired) {
   if (spaceRequired <= 0) return;
 
   let heldOnThisDate = 0;
+  let alreadyConfirmed = 0;
   const lockId = Number(session?.adminBooking?.lock_session?.id) || 0;
   if (lockId > 0) {
     const [lockRows] = await pool.query(
@@ -1284,10 +1285,28 @@ async function addBookingsDone(pool, session, evId, spaceRequired) {
     if (lock && heldEventId && (await eventsShareCapacity(pool, evId, heldEventId))) {
       heldOnThisDate = Math.min(spaceRequired, Number(lock.space_required) || spaceRequired);
     }
+
+    // Cash submit sets these rows to status 1 before this check. Availability
+    // already counts them, and the admin hold is still in current_locks.
+    // A public checkout hold on the same date then makes the course look full
+    // even though this booking has already been saved.
+    const [confirmedRows] = await pool.query(
+      `SELECT COALESCE(SUM(spaces), 0) AS spaces
+       FROM bookings
+       WHERE lockid = ?
+         AND status = 1
+         AND IFNULL(on_hold, 0) = 0`,
+      [lockId]
+    );
+    alreadyConfirmed = Math.min(
+      spaceRequired,
+      Number(confirmedRows?.[0]?.spaces) || 0
+    );
   }
 
   await assertAdminCanTakeSpaces(pool, evId, spaceRequired, {
     creditSpaces: heldOnThisDate,
+    alreadyCountedSpaces: alreadyConfirmed,
   });
 
   const connection = await pool.getConnection();
