@@ -85,7 +85,7 @@ class DashboardController {
 
       const [courseAvails, selectCourses, selectLocationsList, currentLocksTotal] =
         await Promise.all([
-          courseAvailsDashboard(this.pool, searchterm, req.query),
+          courseAvailsDashboard(this.pool, searchterm, req.query, this.getAdminId(req)),
           selectFutureCourses(this.pool),
           selectLocations(this.pool),
           getCurrentLocksTotal(this.pool, req.session),

@@ -191,7 +191,7 @@ const {
   reconcileBookingsDoneIfLagging,
 } = require('../../utils/courseEventGroup');
 
-async function courseAvailsDashboard(pool, searchterm, query = {}) {
+async function courseAvailsDashboard(pool, searchterm, query = {}, adminId = 0) {
   const dateWindow = resolveAvailWindow(query);
   const { where, params } = buildSearchWhere(searchterm, dateWindow);
   const hasOwnVehicleColumn = await courseEventsHasOwnVehicleFlag(pool);
@@ -202,6 +202,7 @@ async function courseAvailsDashboard(pool, searchterm, query = {}) {
   const sql = `SELECT
       course_events.id AS course_event_id,
       course_events.event_type,
+      course_events.parent,
       course_events.booking_limit,
       course_events.bookings_done,
       course_events.current_locks,
@@ -226,10 +227,49 @@ async function courseAvailsDashboard(pool, searchterm, query = {}) {
     ORDER BY courses.course_name ASC, locations.loc_abb ASC`;
 
   const [rows] = await pool.query(sql, params);
-  return enrichCourseAvails(pool, rows || []);
+  return enrichCourseAvails(pool, rows || [], adminId);
 }
 
-async function enrichCourseAvails(pool, rows) {
+async function ownTerminalLockCreditByEvent(pool, adminId, rows) {
+  const credits = new Map();
+  const id = Number(adminId) || 0;
+  if (!id || !rows.length) return credits;
+
+  const eventIds = [
+    ...new Set(rows.map((row) => Number(row.course_event_id)).filter((n) => n > 0)),
+  ];
+  if (!eventIds.length) return credits;
+
+  const [locks] = await pool.query(
+    `SELECT event_id, parent, space_required
+     FROM lock_bookings
+     WHERE delete_process = 0
+       AND user_id = ?
+       AND locked_by = 'terminal'
+       AND (event_id IN (?) OR parent IN (?))`,
+    [id, eventIds, eventIds]
+  );
+
+  for (const row of rows) {
+    const eventId = Number(row.course_event_id);
+    const parent = Number(row.parent) || eventId;
+    const isMulti = String(row.event_type || '').toLowerCase() === 'multi';
+    let credit = 0;
+    for (const lock of locks || []) {
+      const lockEvent = Number(lock.event_id) || 0;
+      const lockParent = Number(lock.parent) || lockEvent;
+      const holdsThisDate =
+        lockEvent === eventId ||
+        (isMulti && lockParent > 0 && lockParent === parent);
+      if (holdsThisDate) credit += Number(lock.space_required) || 0;
+    }
+    if (credit > 0) credits.set(eventId, credit);
+  }
+
+  return credits;
+}
+
+async function enrichCourseAvails(pool, rows, adminId = 0) {
   if (!rows.length) {
     return [];
   }
@@ -288,16 +328,22 @@ async function enrichCourseAvails(pool, rows) {
   }
 
   const uniqueEventIds = [...new Set(rows.map((r) => Number(r.course_event_id)))];
-  const groupAvailByEventId = new Map();
-  await Promise.all(
-    uniqueEventIds.map(async (eventId) => {
-      let group = await getGroupAvailability(pool, eventId);
-      if (group && (await reconcileBookingsDoneIfLagging(pool, eventId, group))) {
-        group = await getGroupAvailability(pool, eventId);
-      }
-      groupAvailByEventId.set(eventId, group);
-    })
-  );
+  const [groupAvailByEventId, ownLockCredits] = await Promise.all([
+    (async () => {
+      const groups = new Map();
+      await Promise.all(
+        uniqueEventIds.map(async (eventId) => {
+          let group = await getGroupAvailability(pool, eventId);
+          if (group && (await reconcileBookingsDoneIfLagging(pool, eventId, group))) {
+            group = await getGroupAvailability(pool, eventId);
+          }
+          groups.set(eventId, group);
+        })
+      );
+      return groups;
+    })(),
+    ownTerminalLockCreditByEvent(pool, adminId, rows),
+  ]);
 
   return rows
     .map((row) => {
@@ -311,19 +357,30 @@ async function enrichCourseAvails(pool, rows) {
       const confirmed = confirmedSeats.get(eventId) || 0;
       const group = groupAvailByEventId.get(eventId);
 
-      // Shared cohort pool (legacy dashboard + public booking).
+      // Each linked course uses its own seats. A full A2 does not fill A1 or DAS.
       let bookingLimit = Number(row.booking_limit) || 0;
-      let bookingsDone = isFrozen
-        ? confirmed
-        : Math.max(Number(row.bookings_done) || 0, confirmed);
+      let bookingsDone = confirmed;
+      let confirmedBookings = confirmed;
       let currentLocks = Number(row.current_locks) || 0;
-      if (group) {
+      if (group && !isFrozen) {
         bookingLimit = group.booking_limit;
-        if (!isFrozen) {
-          bookingsDone = group.bookings_done;
-        }
+        bookingsDone = group.bookings_done;
         currentLocks = group.current_locks;
+        confirmedBookings =
+          group.event_bookings_done != null
+            ? group.event_bookings_done
+            : confirmed;
+      } else if (group) {
+        bookingLimit = group.booking_limit;
       }
+
+      // The admin who is mid-booking already holds this lock. Add Booking gives
+      // those seats back; the calendar has to do the same or the two pages disagree.
+      const ownCredit = Math.min(
+        ownLockCredits.get(eventId) || 0,
+        currentLocks
+      );
+      currentLocks -= ownCredit;
 
       return {
         course_event_id: row.course_event_id,
@@ -339,6 +396,7 @@ async function enrichCourseAvails(pool, rows) {
         event_end_time: formatTimeValue(times.end || row.event_end_time),
         booking_limit: bookingLimit,
         bookings_done: bookingsDone,
+        confirmed_bookings: confirmedBookings,
         current_locks: currentLocks,
         vehicle_type_manual: Number(vehicleSource.vehicle_type_manual) || 0,
         vehicle_type_automatic: Number(vehicleSource.vehicle_type_automatic) || 0,

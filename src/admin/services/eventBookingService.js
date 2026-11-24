@@ -180,8 +180,8 @@ function deriveBookingDisplayStatus(booking) {
 }
 
 /**
- * Same shared-pool rules as public booking / assertAdminCanTakeSpaces.
- * `creditSpaces` — seats already held by this admin session on the same cohort.
+ * Seats left on this course event. `creditSpaces` adds back seats this
+ * admin session already holds on the same course.
  */
 async function computeSpacesAvailable(pool, eventId, isFrozen, creditSpaces = 0) {
   if (isFrozen) return { spaces: 0, group: null };
@@ -419,7 +419,10 @@ async function getEventBookingPage(pool, evId, session) {
 
   if (groupAvail) {
     event.booking_limit = groupAvail.booking_limit;
-    event.bookings_done = groupAvail.bookings_done;
+    event.bookings_done =
+      groupAvail.event_bookings_done != null
+        ? groupAvail.event_bookings_done
+        : groupAvail.bookings_done;
     event.current_locks = groupAvail.current_locks;
   }
 

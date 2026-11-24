@@ -5,12 +5,7 @@ const {
   ensureEnglandBankHolidaysLoaded,
   isEnglandBankHoliday,
 } = require('../../utils/ukEnglandBankHolidays');
-const {
-  getGroupRootId,
-  getGroupAvailability,
-  isCourseEventFrozen,
-  getCohortMemberIds,
-} = require('../../utils/courseEventGroup');
+const { getGroupAvailability } = require('../../utils/courseEventGroup');
 
 /**
  * Tests-to-cancel alert courses (cancel window: 3 days motorcycle, 4 days module).
@@ -243,11 +238,7 @@ function formatEventTimeRange(start, end) {
   return s || e || '';
 }
 
-/** Linked motorcycle cohorts (shared capacity): one alert, label "3 Day Course". */
-function displayAbbForTestsToCancel(abb, courseName, isLinkedMotorcyclePackage) {
-  if (isLinkedMotorcyclePackage) {
-    return { abb: '3 Day Course', name: '3 Day Course' };
-  }
+function displayAbbForTestsToCancel(abb, courseName) {
   return {
     abb: String(abb || '').trim(),
     name: String(courseName || '').trim(),
@@ -277,89 +268,49 @@ async function getTestsToCancelAlerts(pool) {
   const today = todayIso();
   const horizon = addDaysIso(today, 90);
 
+  // One row per course event, on that course's first real day. Later days of a
+  // multi-day course are not separate alerts. The freeze table is per course,
+  // so a frozen linked course drops out on its own and its siblings stay.
   const [rows] = await pool.query(
     `SELECT ce.id AS course_event_id,
             ce.course_id,
-            DATE_FORMAT(ced.event_date, '%Y-%m-%d') AS event_date,
+            DATE_FORMAT(start_dates.start_date, '%Y-%m-%d') AS event_date,
             ced.event_start_time,
             ced.event_end_time,
             l.loc_abb,
             l.location_name
      FROM course_events ce
-     INNER JOIN course_event_dates ced ON ced.course_event_id = ce.id
+     INNER JOIN (
+       SELECT course_event_id, MIN(event_date) AS start_date
+       FROM course_event_dates
+       WHERE event_date > '1900-01-01'
+         AND event_date NOT IN ('1111-11-11', '0000-00-00')
+       GROUP BY course_event_id
+     ) start_dates ON start_dates.course_event_id = ce.id
+     INNER JOIN course_event_dates ced
+       ON ced.course_event_id = ce.id
+      AND ced.event_date = start_dates.start_date
      LEFT JOIN locations l ON l.id = ce.location_id
      LEFT JOIN freeze f ON f.course_event_id = ce.id
      WHERE ce.status = '1'
        AND ce.course_id IN (?)
-       AND ced.event_date >= ?
-       AND ced.event_date <= ?
-       AND ced.event_date > '1900-01-01'
+       AND start_dates.start_date >= ?
+       AND start_dates.start_date <= ?
        AND f.id IS NULL
-     ORDER BY ced.event_date ASC`,
+     ORDER BY start_dates.start_date ASC, ce.id ASC`,
     [courseIds, today, horizon]
   );
 
-  const rootCache = new Map();
   const availCache = new Map();
-  const frozenCache = new Map();
-  const cohortSizeCache = new Map();
   const alerts = [];
-
-  async function groupRoot(eventId) {
-    const key = Number(eventId);
-    if (!rootCache.has(key)) {
-      const root = (await getGroupRootId(pool, key)) || key;
-      rootCache.set(key, root);
-    }
-    return rootCache.get(key);
-  }
+  const seenEventIds = new Set();
 
   async function groupAvail(eventId) {
     const key = Number(eventId);
     if (!availCache.has(key)) {
-      availCache.set(
-        key,
-        await getGroupAvailability(pool, key)
-      );
+      availCache.set(key, await getGroupAvailability(pool, key));
     }
     return availCache.get(key);
-  }
-
-  async function eventFrozen(eventId) {
-    const key = Number(eventId);
-    if (!frozenCache.has(key)) {
-      frozenCache.set(key, await isCourseEventFrozen(pool, key));
-    }
-    return frozenCache.get(key);
-  }
-
-  async function cohortMemberCount(eventId) {
-    const key = Number(eventId);
-    if (!cohortSizeCache.has(key)) {
-      const members = await getCohortMemberIds(pool, key);
-      cohortSizeCache.set(key, members.length);
-    }
-    return cohortSizeCache.get(key);
-  }
-
-  /**
-   * Align with dashboard calendar (getCalendarDisplayDates):
-   * - Module tests: one alert per course_event, first confirmed date only
-   *   (multi events are not repeated on every scheduled day).
-   * - Linked 3-day motorcycle cohorts: one row per package root, day 1 only.
-   * - Otherwise: one alert per course_event + start date.
-   */
-  const packages = new Map();
-
-  async function resolvePackageKey(meta, eventId, rootId, eventDate) {
-    if (meta.baseDays === 4) {
-      return `mod:${eventId}`;
-    }
-    if (meta.baseDays === 3) {
-      const cohort = await cohortMemberCount(eventId);
-      if (cohort > 1) return `cohort:${rootId}`;
-    }
-    return `session:${eventId}:${eventDate}`;
   }
 
   for (const row of rows || []) {
@@ -367,91 +318,44 @@ async function getTestsToCancelAlerts(pool) {
     if (isTbcDate(eventDate)) continue;
 
     const eventId = Number(row.course_event_id);
+    if (seenEventIds.has(eventId)) continue;
+    seenEventIds.add(eventId);
+
     const courseId = Number(row.course_id);
     const meta = abbByCourseId.get(courseId);
     if (!meta) continue;
+    if (!isWithinAdjustedWindow(today, eventDate, meta.baseDays)) continue;
 
-    const rootId = await groupRoot(eventId);
-    const packageKey = await resolvePackageKey(meta, eventId, rootId, eventDate);
-
-    const candidate = {
-      rootId,
-      eventId,
-      courseId,
-      firstDate: eventDate,
-      loc_abb: row.loc_abb,
-      location_name: row.location_name,
-      event_start_time: row.event_start_time,
-      event_end_time: row.event_end_time,
-    };
-
-    const existing = packages.get(packageKey);
-    if (!existing) {
-      packages.set(packageKey, candidate);
-      continue;
-    }
-    if (
-      packageKey.startsWith('cohort:') ||
-      packageKey.startsWith('mod:')
-    ) {
-      if (eventDate < existing.firstDate) {
-        existing.firstDate = eventDate;
-        existing.eventId = eventId;
-        existing.loc_abb = row.loc_abb;
-        existing.location_name = row.location_name;
-        existing.event_start_time = row.event_start_time;
-        existing.event_end_time = row.event_end_time;
-      }
-    }
-  }
-
-  for (const pkg of packages.values()) {
-    const meta = abbByCourseId.get(pkg.courseId);
-    if (!meta) continue;
-    if (!isWithinAdjustedWindow(today, pkg.firstDate, meta.baseDays)) continue;
-    if (await eventFrozen(pkg.eventId)) continue;
-
-    const avail = await groupAvail(pkg.eventId);
+    const avail = await groupAvail(eventId);
     if (!avail || avail.availableSpaces <= 0) continue;
 
-    const daysUntil = diffCalendarDays(today, pkg.firstDate);
-    const locationLabel = formatLocationLabel(pkg.loc_abb, pkg.location_name);
-    const startLabel = formatLongDate(pkg.firstDate);
+    const daysUntil = diffCalendarDays(today, eventDate);
+    const locationLabel = formatLocationLabel(row.loc_abb, row.location_name);
+    const startLabel = formatLongDate(eventDate);
     const spaces = avail.availableSpaces;
-    const isLinkedMotorcyclePackage =
-      isMotorcycle3DayTestsToCancelCourse(meta.abb, meta.course_name) &&
-      (await cohortMemberCount(pkg.rootId)) > 1;
-    const display = displayAbbForTestsToCancel(
-      meta.abb,
-      meta.course_name,
-      isLinkedMotorcyclePackage
-    );
-
+    const display = displayAbbForTestsToCancel(meta.abb, meta.course_name);
     const timeLabel = formatEventTimeRange(
-      pkg.event_start_time,
-      pkg.event_end_time
+      row.event_start_time,
+      row.event_end_time
     );
-    const alertEventId = isLinkedMotorcyclePackage ? pkg.rootId : pkg.eventId;
-
-    const cancelByUk = formatUkDate(pkg.firstDate);
 
     alerts.push({
       category: 'tests_to_cancel',
-      message: `Cancel Tests on ${cancelByUk} NOW`,
+      message: '',
       course_abb: display.abb,
       course_name: display.name,
-      course_event_id: alertEventId,
-      start_date: pkg.firstDate,
+      course_event_id: eventId,
+      start_date: eventDate,
       start_date_label: startLabel,
-      event_start_time: formatEventTime(pkg.event_start_time) || null,
-      event_end_time: formatEventTime(pkg.event_end_time) || null,
+      event_start_time: formatEventTime(row.event_start_time) || null,
+      event_end_time: formatEventTime(row.event_end_time) || null,
       time_label: timeLabel || null,
       location_label: locationLabel,
       spaces_available: spaces,
       days_until_start: daysUntil,
       days_until_label: daysUntilLabel(daysUntil),
       cancel_window_days: meta.baseDays,
-      sort_key: `${pkg.firstDate}\t${timeLabel || ''}\t${alertEventId}`,
+      sort_key: `${eventDate}\t${timeLabel || ''}\t${eventId}`,
     });
   }
 
