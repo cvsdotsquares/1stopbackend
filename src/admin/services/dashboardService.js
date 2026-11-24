@@ -185,9 +185,13 @@ const {
   courseEventsHasOwnVehicleFlag,
   inferOwnVehicleEnabled,
 } = require('../../utils/ownVehicleAvailability');
-const { getConfirmedSeatCounts } = require('../../utils/courseEventGroup');
+const {
+  getConfirmedSeatCounts,
+  getGroupAvailability,
+  reconcileBookingsDoneIfLagging,
+} = require('../../utils/courseEventGroup');
 
-async function courseAvailsDashboard(pool, searchterm, query = {}) {
+async function courseAvailsDashboard(pool, searchterm, query = {}, adminId = 0) {
   const dateWindow = resolveAvailWindow(query);
   const { where, params } = buildSearchWhere(searchterm, dateWindow);
   const hasOwnVehicleColumn = await courseEventsHasOwnVehicleFlag(pool);
@@ -198,6 +202,7 @@ async function courseAvailsDashboard(pool, searchterm, query = {}) {
   const sql = `SELECT
       course_events.id AS course_event_id,
       course_events.event_type,
+      course_events.parent,
       course_events.booking_limit,
       course_events.bookings_done,
       course_events.current_locks,
@@ -222,10 +227,49 @@ async function courseAvailsDashboard(pool, searchterm, query = {}) {
     ORDER BY courses.course_name ASC, locations.loc_abb ASC`;
 
   const [rows] = await pool.query(sql, params);
-  return enrichCourseAvails(pool, rows || []);
+  return enrichCourseAvails(pool, rows || [], adminId);
 }
 
-async function enrichCourseAvails(pool, rows) {
+async function ownTerminalLockCreditByEvent(pool, adminId, rows) {
+  const credits = new Map();
+  const id = Number(adminId) || 0;
+  if (!id || !rows.length) return credits;
+
+  const eventIds = [
+    ...new Set(rows.map((row) => Number(row.course_event_id)).filter((n) => n > 0)),
+  ];
+  if (!eventIds.length) return credits;
+
+  const [locks] = await pool.query(
+    `SELECT event_id, parent, space_required
+     FROM lock_bookings
+     WHERE delete_process = 0
+       AND user_id = ?
+       AND locked_by = 'terminal'
+       AND (event_id IN (?) OR parent IN (?))`,
+    [id, eventIds, eventIds]
+  );
+
+  for (const row of rows) {
+    const eventId = Number(row.course_event_id);
+    const parent = Number(row.parent) || eventId;
+    const isMulti = String(row.event_type || '').toLowerCase() === 'multi';
+    let credit = 0;
+    for (const lock of locks || []) {
+      const lockEvent = Number(lock.event_id) || 0;
+      const lockParent = Number(lock.parent) || lockEvent;
+      const holdsThisDate =
+        lockEvent === eventId ||
+        (isMulti && lockParent > 0 && lockParent === parent);
+      if (holdsThisDate) credit += Number(lock.space_required) || 0;
+    }
+    if (credit > 0) credits.set(eventId, credit);
+  }
+
+  return credits;
+}
+
+async function enrichCourseAvails(pool, rows, adminId = 0) {
   if (!rows.length) {
     return [];
   }
@@ -283,19 +327,60 @@ async function enrichCourseAvails(pool, rows) {
     datesByEvent[id] = filterConfirmedDates(datesByEvent[id]);
   }
 
+  const uniqueEventIds = [...new Set(rows.map((r) => Number(r.course_event_id)))];
+  const [groupAvailByEventId, ownLockCredits] = await Promise.all([
+    (async () => {
+      const groups = new Map();
+      await Promise.all(
+        uniqueEventIds.map(async (eventId) => {
+          let group = await getGroupAvailability(pool, eventId);
+          if (group && (await reconcileBookingsDoneIfLagging(pool, eventId, group))) {
+            group = await getGroupAvailability(pool, eventId);
+          }
+          groups.set(eventId, group);
+        })
+      );
+      return groups;
+    })(),
+    ownTerminalLockCreditByEvent(pool, adminId, rows),
+  ]);
+
   return rows
     .map((row) => {
-      const eventDates = datesByEvent[row.course_event_id] || [];
+      const eventId = Number(row.course_event_id);
+      const eventDates = datesByEvent[eventId] || [];
       const primaryDate = getPrimaryEventDate(eventDates, null);
-      const times = timeByEvent[row.course_event_id] || {};
-      const frozenRow = frozenByEventId.get(row.course_event_id);
+      const times = timeByEvent[eventId] || {};
+      const frozenRow = frozenByEventId.get(eventId);
       const isFrozen = Boolean(frozenRow);
       const vehicleSource = isFrozen ? frozenRow : row;
-      const confirmed = confirmedSeats.get(Number(row.course_event_id)) || 0;
-      const storedBookings = Number(row.bookings_done) || 0;
-      // Freeze rewrites bookings_done to the vehicle total so the date cannot
-      // be sold. That number is not a booking count.
-      const bookingsDone = isFrozen ? confirmed : Math.max(storedBookings, confirmed);
+      const confirmed = confirmedSeats.get(eventId) || 0;
+      const group = groupAvailByEventId.get(eventId);
+
+      // Each linked course uses its own seats. A full A2 does not fill A1 or DAS.
+      let bookingLimit = Number(row.booking_limit) || 0;
+      let bookingsDone = confirmed;
+      let confirmedBookings = confirmed;
+      let currentLocks = Number(row.current_locks) || 0;
+      if (group && !isFrozen) {
+        bookingLimit = group.booking_limit;
+        bookingsDone = group.bookings_done;
+        currentLocks = group.current_locks;
+        confirmedBookings =
+          group.event_bookings_done != null
+            ? group.event_bookings_done
+            : confirmed;
+      } else if (group) {
+        bookingLimit = group.booking_limit;
+      }
+
+      // The admin who is mid-booking already holds this lock. Add Booking gives
+      // those seats back; the calendar has to do the same or the two pages disagree.
+      const ownCredit = Math.min(
+        ownLockCredits.get(eventId) || 0,
+        currentLocks
+      );
+      currentLocks -= ownCredit;
 
       return {
         course_event_id: row.course_event_id,
@@ -309,17 +394,18 @@ async function enrichCourseAvails(pool, rows) {
         dashboard_color: row.dashboard_color || '#94a3b8',
         event_start_time: formatTimeValue(times.start || row.event_start_time),
         event_end_time: formatTimeValue(times.end || row.event_end_time),
-        booking_limit: Number(row.booking_limit) || 0,
+        booking_limit: bookingLimit,
         bookings_done: bookingsDone,
-        current_locks: Number(row.current_locks) || 0,
+        confirmed_bookings: confirmedBookings,
+        current_locks: currentLocks,
         vehicle_type_manual: Number(vehicleSource.vehicle_type_manual) || 0,
         vehicle_type_automatic: Number(vehicleSource.vehicle_type_automatic) || 0,
         vehicle_type_own: inferOwnVehicleEnabled(row),
         manual_lock_done: Number(vehicleSource.manual_lock_done) || 0,
         automatic_lock_done: Number(vehicleSource.automatic_lock_done) || 0,
         eventDates,
-        eventDateTimes: dateTimesByEvent[row.course_event_id] || {},
-        eventDayCount: dayCountByEvent[row.course_event_id] || eventDates.length,
+        eventDateTimes: dateTimesByEvent[eventId] || {},
+        eventDayCount: dayCountByEvent[eventId] || eventDates.length,
         isFrozen,
       };
     })
@@ -592,7 +678,6 @@ async function getNextCourseDates(pool, courseAbb, options = {}) {
        AND ced.event_date <= DATE_ADD(?, INTERVAL ? MONTH)
        AND ced.event_date > '1900-01-01'
        AND f.id IS NULL
-       AND (ce.booking_limit - ce.bookings_done - COALESCE(ce.current_locks, 0)) > 0
      ORDER BY ced.event_date ASC, l.loc_abb ASC, ced.event_start_time ASC`,
     [
       course.id,
@@ -602,15 +687,26 @@ async function getNextCourseDates(pool, courseAbb, options = {}) {
     ]
   );
 
+  const groupAvailByEventId = new Map();
   const eventSlots = new Map();
   for (const row of rows || []) {
-    const eventId = row.course_event_id;
-    const spaces = Math.max(
-      0,
-      Number(row.booking_limit || 0) -
-        Number(row.bookings_done || 0) -
-        Number(row.current_locks || 0)
-    );
+    const eventId = Number(row.course_event_id);
+    if (!groupAvailByEventId.has(eventId)) {
+      let group = await getGroupAvailability(pool, eventId);
+      if (group && (await reconcileBookingsDoneIfLagging(pool, eventId, group))) {
+        group = await getGroupAvailability(pool, eventId);
+      }
+      groupAvailByEventId.set(eventId, group);
+    }
+    const group = groupAvailByEventId.get(eventId);
+    const spaces = group
+      ? Math.max(0, group.availableSpaces)
+      : Math.max(
+          0,
+          Number(row.booking_limit || 0) -
+            Number(row.bookings_done || 0) -
+            Number(row.current_locks || 0)
+        );
     if (spaces <= 0) continue;
 
     const eventDate = formatDateValue(row.event_date);

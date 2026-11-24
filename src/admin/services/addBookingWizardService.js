@@ -411,6 +411,84 @@ function formatCustomerLabel(row) {
     .join(', ');
 }
 
+function customerMatchSql(alias) {
+  return `(
+      ${alias}.first_name LIKE ?
+      OR ${alias}.sur_name LIKE ?
+      OR ${alias}.email LIKE ?
+      OR ${alias}.contact1 LIKE ?
+      OR ${alias}.contact2 LIKE ?
+      OR ${alias}.contact3 LIKE ?
+      OR ${alias}.license_number LIKE ?
+      OR CONCAT(${alias}.first_name, ' ', ${alias}.sur_name) LIKE ?
+    )`;
+}
+
+function customerMatchParams(like) {
+  return [like, like, like, like, like, like, like, like];
+}
+
+function rememberCustomerKeys(row, seenEmails, seenLicences) {
+  const email = trim(row.email).toLowerCase();
+  const licence = trim(row.license_number).toLowerCase();
+  if (email) seenEmails.add(email);
+  if (licence) seenLicences.add(licence);
+}
+
+function customerAlreadySeen(row, seenEmails, seenLicences) {
+  const email = trim(row.email).toLowerCase();
+  const licence = trim(row.license_number).toLowerCase();
+  if (email && seenEmails.has(email)) return true;
+  if (licence && seenLicences.has(licence)) return true;
+  return false;
+}
+
+/**
+ * Contact cards are the primary list, but a cancelled booking can remove the
+ * card while the user account and past attendee rows remain. Search those too
+ * so an existing person can still be selected.
+ */
+async function searchCustomersOutsideCards(pool, term, seenEmails, seenLicences, needed) {
+  if (!term || needed <= 0) return [];
+
+  const like = `%${term}%`;
+  const extras = [];
+  const sources = [
+    {
+      prefix: 'a',
+      sql: `SELECT id, first_name, sur_name, contact1, email, license_number
+            FROM booking_attendees
+            WHERE ${customerMatchSql('booking_attendees')}
+            ORDER BY id DESC
+            LIMIT 150`,
+    },
+    {
+      prefix: 'u',
+      sql: `SELECT id, first_name, sur_name, contact1, email, license_number
+            FROM users
+            WHERE ${customerMatchSql('users')}
+            ORDER BY id DESC
+            LIMIT 150`,
+    },
+  ];
+
+  for (const source of sources) {
+    if (extras.length >= needed) break;
+    const [rows] = await pool.query(source.sql, customerMatchParams(like));
+    for (const row of rows || []) {
+      if (extras.length >= needed) break;
+      if (customerAlreadySeen(row, seenEmails, seenLicences)) continue;
+      rememberCustomerKeys(row, seenEmails, seenLicences);
+      extras.push({
+        id: `${source.prefix}-${row.id}`,
+        label: formatCustomerLabel(row),
+      });
+    }
+  }
+
+  return extras;
+}
+
 async function searchExistingCustomers(
   pool,
   { q = '', offset = 0, limit = 50 } = {}
@@ -425,17 +503,8 @@ async function searchExistingCustomers(
   const term = trim(q);
   if (term) {
     const like = `%${term}%`;
-    where += ` AND (
-      booking_attendees.first_name LIKE ?
-      OR booking_attendees.sur_name LIKE ?
-      OR booking_attendees.email LIKE ?
-      OR booking_attendees.contact1 LIKE ?
-      OR booking_attendees.contact2 LIKE ?
-      OR booking_attendees.contact3 LIKE ?
-      OR booking_attendees.license_number LIKE ?
-      OR CONCAT(booking_attendees.first_name, ' ', booking_attendees.sur_name) LIKE ?
-    )`;
-    params.push(like, like, like, like, like, like, like, like);
+    where += ` AND ${customerMatchSql('booking_attendees')}`;
+    params.push(...customerMatchParams(like));
   }
 
   const [rows] = await pool.query(
@@ -456,10 +525,27 @@ async function searchExistingCustomers(
 
   const list = rows || [];
   const hasMore = list.length > safeLimit;
-  const items = list.slice(0, safeLimit).map((row) => ({
-    id: row.uid,
-    label: formatCustomerLabel(row),
-  }));
+  const page = list.slice(0, safeLimit);
+  const seenEmails = new Set();
+  const seenLicences = new Set();
+  const items = page.map((row) => {
+    rememberCustomerKeys(row, seenEmails, seenLicences);
+    return {
+      id: row.uid,
+      label: formatCustomerLabel(row),
+    };
+  });
+
+  if (term && !hasMore && items.length < safeLimit) {
+    const extras = await searchCustomersOutsideCards(
+      pool,
+      term,
+      seenEmails,
+      seenLicences,
+      safeLimit - items.length
+    );
+    items.push(...extras);
+  }
 
   return {
     items,
@@ -470,7 +556,36 @@ async function searchExistingCustomers(
 }
 
 async function getContactCard(pool, userId) {
-  const id = Number(userId);
+  const rawId = trim(userId);
+  const attendeeRef = /^a-(\d+)$/.exec(rawId);
+  if (attendeeRef) {
+    const [rows] = await pool.query(
+      'SELECT * FROM booking_attendees WHERE id = ? LIMIT 1',
+      [attendeeRef[1]]
+    );
+    if (!rows?.[0]) return null;
+    return {
+      ...rows[0],
+      date_of_birth: formatDateOfBirthDisplay(rows[0].date_of_birth),
+    };
+  }
+
+  const userRef = /^u-(\d+)$/.exec(rawId);
+  if (userRef) {
+    const [rows] = await pool.query(
+      'SELECT * FROM users WHERE id = ? LIMIT 1',
+      [userRef[1]]
+    );
+    if (!rows?.[0]) return null;
+    const row = rows[0];
+    delete row.password;
+    return {
+      ...row,
+      date_of_birth: formatDateOfBirthDisplay(row.date_of_birth),
+    };
+  }
+
+  const id = Number(rawId);
   if (!Number.isFinite(id) || id <= 0) return null;
 
   const [dropdownRows] = await pool.query(
@@ -491,6 +606,7 @@ async function getContactCard(pool, userId) {
   );
   if (userRows?.[0]) {
     const row = userRows[0];
+    delete row.password;
     return {
       ...row,
       date_of_birth: formatDateOfBirthDisplay(row.date_of_birth),

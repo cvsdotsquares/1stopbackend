@@ -373,6 +373,21 @@ async function buildCartIdFromSession(pool, session) {
   return refs.join('-');
 }
 
+const CONFIRMATION_VEHICLE_LABELS = {
+  0: 'Manual',
+  1: 'Automatic',
+  3: 'I will be using my own vehicle',
+};
+
+function confirmationVehicleLabel(vehicleType) {
+  if (vehicleType == null || vehicleType === '') return '';
+  return (
+    CONFIRMATION_VEHICLE_LABELS[vehicleType] ||
+    CONFIRMATION_VEHICLE_LABELS[Number(vehicleType)] ||
+    ''
+  );
+}
+
 async function getBookingConfirmationDetails(pool, { evId, cartId } = {}) {
   let bookingIds = [];
   if (cartId) {
@@ -388,13 +403,16 @@ async function getBookingConfirmationDetails(pool, { evId, cartId } = {}) {
     const [rows] = await pool.query(
       `SELECT b.id, b.status, b.payment_due, b.admin_payment_received, b.total_amount,
               b.type_of_book, b.created,
-              ba.booking_ref, ba.first_name, ba.sur_name, ba.email, ba.contact1,
-              ba.vehicle_type, ba.license_number,
+              ba.booking_ref, ba.first_name, ba.sur_name, ba.email,
+              ba.contact1, ba.contact2, ba.vehicle_type, ba.license_number,
+              ba.license_type, dlt.licence_type AS licence_type_label,
               ce.id AS course_event_id
        FROM bookings b
        JOIN booking_attendees ba ON ba.booking_id = b.id
        JOIN course_events ce ON ce.id = b.course_event_id
+       LEFT JOIN driving_licence_types dlt ON dlt.id = ba.license_type
        WHERE b.id = ?
+       ORDER BY ba.\`primary\` DESC, ba.id ASC
        LIMIT 1`,
       [bookingId]
     );
@@ -419,6 +437,10 @@ async function getBookingConfirmationDetails(pool, { evId, cartId } = {}) {
         name: `${row.first_name || ''} ${row.sur_name || ''}`.trim(),
         email: row.email || '',
         contact1: row.contact1 || '',
+        contact2: row.contact2 || '',
+        license_number: row.license_number || '',
+        licence_type: row.licence_type_label || '',
+        vehicle_type: confirmationVehicleLabel(row.vehicle_type),
         payment_received: paymentReceived,
         payment_due: paymentDue,
         total_amount: totalAmount,

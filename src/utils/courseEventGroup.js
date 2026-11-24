@@ -3,8 +3,9 @@
  *
  * Data conventions:
  * - event_type = 'single' — standalone; locks/bookings_done apply to this row only
- * - event_type = 'multi' — shared pool; all siblings share the same parent column value
- *   (legacy PHP: UPDATE … WHERE parent = (SELECT parent FROM course_events WHERE id = ?))
+ * - event_type = 'multi' — linked courses (A1/A2/DAS) share a parent id.
+ *   Each course keeps its own booking limit and its own confirmed seats.
+ *   Legacy PHP still adds bookings_done on every sibling; this read path does not.
  * - parent: single → parent = event id or 0; multi → parent = first event id in the group
  */
 
@@ -548,22 +549,112 @@ async function getConfirmedSeatCounts(db, eventIds) {
   return counts;
 }
 
+async function isRequestedEventFrozen(db, courseEventId) {
+  const id = Number(courseEventId);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  const [rows] = await db.query(
+    `SELECT
+       EXISTS (SELECT 1 FROM freeze WHERE course_event_id = ?) AS freeze_rows,
+       EXISTS (
+         SELECT 1 FROM course_event_dates
+         WHERE course_event_id = ?
+           AND freeze = 1
+           AND event_date > '1900-01-01'
+           AND event_date NOT IN ('1111-11-11', '0000-00-00')
+       ) AS frozen_dates`,
+    [id, id]
+  );
+  return Boolean(Number(rows[0]?.freeze_rows) || Number(rows[0]?.frozen_dates));
+}
+
+function closedIfFrozen(result, eventFrozen) {
+  if (!result || !eventFrozen) return result;
+  return {
+    ...result,
+    availableSpaces: 0,
+    rawAvailableSpaces: Math.min(0, result.rawAvailableSpaces),
+  };
+}
+
 function occupiedBookingsDone(storedDone, eventId, confirmedByEvent) {
   const confirmed = confirmedByEvent.get(Number(eventId)) || 0;
   return Math.max(Number(storedDone) || 0, confirmed);
 }
 
 /**
- * Min available spaces across siblings (shared cohort capacity).
+ * Point each non-frozen linked course at its own confirmed seats.
+ * Legacy PHP adds the same delta onto every sibling; a later page load
+ * writes that copy back down so A1 does not inherit A2's students.
+ * Frozen rows keep the snapshot that unfreeze restores.
+ */
+async function reconcileBookingsDoneIfLagging(db, courseEventId, groupAvail) {
+  if (!groupAvail) return false;
+  const eventId = Number(courseEventId);
+  if (!Number.isFinite(eventId) || eventId <= 0) return false;
+
+  const cohortIds = await getCohortMemberIds(db, eventId);
+  if (!cohortIds.length) return false;
+
+  const confirmedByEvent = await getConfirmedSeatCounts(db, cohortIds);
+  const placeholders = cohortIds.map(() => '?').join(',');
+  const [storedRows] = await db.query(
+    `SELECT id, bookings_done FROM course_events WHERE id IN (${placeholders})`,
+    cohortIds
+  );
+  const [frozenRows] = await db.query(
+    `SELECT DISTINCT course_event_id
+     FROM freeze
+     WHERE course_event_id IN (${placeholders})`,
+    cohortIds
+  );
+  const frozenIds = new Set(
+    (frozenRows || []).map((row) => Number(row.course_event_id))
+  );
+
+  let anyUpdated = false;
+  for (const row of storedRows || []) {
+    const id = Number(row.id);
+    if (frozenIds.has(id)) continue;
+    const stored = Number(row.bookings_done) || 0;
+    const confirmed = confirmedByEvent.get(id) || 0;
+    if (stored === confirmed) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const [result] = await db.query(
+      `UPDATE course_events
+       SET bookings_done = ?, modified = NOW()
+       WHERE id = ? AND bookings_done <> ?`,
+      [confirmed, id, confirmed]
+    );
+    if (result?.affectedRows) anyUpdated = true;
+  }
+
+  return anyUpdated;
+}
+
+/**
+ * Seats left on this course event.
+ * Linked A1/A2/DAS courses share a parent id, but each course uses its own
+ * booking limit, its own confirmed bookings, and its own locks.
+ *
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} db
  * @param {number} courseEventId
- * @returns {Promise<{ availableSpaces: number, booking_limit: number, bookings_done: number, current_locks: number }|null>}
+ * @param {{ useStoredCountersOnly?: boolean }} [options]
+ *   When `useStoredCountersOnly` is true, use `course_events.bookings_done` only.
+ *   When false (default), count confirmed booking rows on this course event.
+ * @returns {Promise<{ availableSpaces: number, rawAvailableSpaces: number, booking_limit: number, bookings_done: number, current_locks: number, event_bookings_done: number }|null>}
  */
-async function getGroupAvailability(db, courseEventId) {
+async function getGroupAvailability(db, courseEventId, options = {}) {
+  const useStoredCountersOnly = Boolean(options.useStoredCountersOnly);
   const cohortIds = await getCohortMemberIds(db, courseEventId);
   if (!cohortIds.length) return null;
 
-  const confirmedByEvent = await getConfirmedSeatCounts(db, cohortIds);
+  const confirmedByEvent = useStoredCountersOnly
+    ? new Map()
+    : await getConfirmedSeatCounts(db, cohortIds);
+  const eventFrozen = useStoredCountersOnly
+    ? false
+    : await isRequestedEventFrozen(db, courseEventId);
+  const finish = (result) => closedIfFrozen(result, eventFrozen);
 
   // Single-day (parent = event id): use only this event's counters
   if (cohortIds.length === 1) {
@@ -574,20 +665,19 @@ async function getGroupAvailability(db, courseEventId) {
     );
     if (!rows.length) return null;
     const booking_limit = Number(rows[0].booking_limit) || 0;
-    const bookings_done = occupiedBookingsDone(
-      rows[0].bookings_done,
-      cohortIds[0],
-      confirmedByEvent
-    );
+    const bookings_done = useStoredCountersOnly
+      ? Number(rows[0].bookings_done) || 0
+      : occupiedBookingsDone(rows[0].bookings_done, cohortIds[0], confirmedByEvent);
     const current_locks = Number(rows[0].current_locks) || 0;
     const rawAvailableSpaces = booking_limit - bookings_done - current_locks;
-    return {
+    return finish({
       availableSpaces: Math.max(0, rawAvailableSpaces),
       rawAvailableSpaces,
       booking_limit,
       bookings_done,
       current_locks,
-    };
+      event_bookings_done: bookings_done,
+    });
   }
 
   const placeholders = cohortIds.map(() => '?').join(',');
@@ -600,31 +690,23 @@ async function getGroupAvailability(db, courseEventId) {
 
   if (!rows.length) return null;
 
-  let minAvailable = Infinity;
-  let ref = rows[0];
-  for (const row of rows) {
-    const limit = Number(row.booking_limit) || 0;
-    const done = occupiedBookingsDone(row.bookings_done, row.id, confirmedByEvent);
-    const locks = Number(row.current_locks) || 0;
-    const available = limit - done - locks;
-    if (available < minAvailable) {
-      minAvailable = available;
-      ref = { ...row, bookings_done: done };
-    }
-  }
+  const requestedId = Number(courseEventId);
+  const requested = rows.find((row) => Number(row.id) === requestedId) || rows[0];
+  const booking_limit = Number(requested.booking_limit) || 0;
+  const current_locks = Number(requested.current_locks) || 0;
+  const storedDone = Number(requested.bookings_done) || 0;
+  const confirmed = confirmedByEvent.get(Number(requested.id)) || 0;
+  const bookings_done = useStoredCountersOnly ? storedDone : confirmed;
+  const rawAvailableSpaces = booking_limit - bookings_done - current_locks;
 
-  const booking_limit = Number(ref.booking_limit) || 0;
-  const bookings_done = Number(ref.bookings_done) || 0;
-  const current_locks = Number(ref.current_locks) || 0;
-  const rawAvailableSpaces = minAvailable === Infinity ? 0 : minAvailable;
-
-  return {
+  return finish({
     availableSpaces: Math.max(0, rawAvailableSpaces),
     rawAvailableSpaces,
     booking_limit,
     bookings_done,
     current_locks,
-  };
+    event_bookings_done: bookings_done,
+  });
 }
 
 const ADMIN_DATE_FULL_MESSAGE =
@@ -906,6 +988,7 @@ module.exports = {
   getNearestDateSiblingEventId,
   getConfirmedSeatCounts,
   getGroupAvailability,
+  reconcileBookingsDoneIfLagging,
   eventsShareCapacity,
   assertAdminCanTakeSpaces,
   adminSeatsWouldFit,
