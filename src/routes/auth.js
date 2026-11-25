@@ -91,12 +91,17 @@ function createAuthRoutes(pool) {
       }),
 
     body('license_number')
-      .optional({ values: 'falsy' })
-      .custom((value) => {
+      .custom((value, { req }) => {
+        const licenseType = Number.parseInt(req.body?.license_type, 10);
+        if (licenseType === 4) return true;
         const { validateDrivingLicenceNumber } = require('../utils/drivingLicenceValidation');
-        const result = validateDrivingLicenceNumber(value, { required: false });
+        const result = validateDrivingLicenceNumber(value, { required: true });
         if (!result.valid) {
-          throw new Error(result.message);
+          const message =
+            result.kind === 'empty' || String(result.message || '').includes('required')
+              ? result.message
+              : 'Driving licence number is not valid.';
+          throw new Error(message);
         }
         return true;
       }),

@@ -24,7 +24,11 @@ function validatePublicAttendeeDrivingLicence(attendee, attendeeIndex) {
   const result = validateDrivingLicenceNumber(attendee?.license_number, { required: true });
   if (!result.valid) {
     const label = Number.isFinite(attendeeIndex) ? `Attendee ${attendeeIndex + 1}: ` : '';
-    return `${label}${result.message}`;
+    const message =
+      result.kind === 'empty' || String(result.message || '').includes('required')
+        ? result.message
+        : 'Driving licence number is not valid.';
+    return `${label}${message}`;
   }
   return null;
 }
