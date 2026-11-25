@@ -15,6 +15,7 @@ const {
   eventsShareCapacity,
   getGroupAvailability,
   reconcileBookingsDoneIfLagging,
+  releaseOnlineCheckoutHoldsForCohort,
 } = require('../../utils/courseEventGroup');
 const {
   canHoldBooking,
@@ -578,6 +579,10 @@ async function lockEventSeats(pool, evId, spaceRequired, session, adminId) {
         heldOnThisDate = previousSpaces;
       }
     }
+
+    // Pay-by-bank customer may still have the QR open; admin hold wins.
+    await releaseOnlineCheckoutHoldsForCohort(pool, eventId);
+
     await assertAdminCanTakeSpaces(pool, eventId, spaces, {
       creditSpaces: heldOnThisDate,
     });

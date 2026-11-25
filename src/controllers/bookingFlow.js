@@ -13,6 +13,7 @@ const {
   isGroupFirstDayPassed,
   applyGroupSpaceDelta,
   lockSiblingEventsForUpdate,
+  getCourseCapacityMutexName,
 } = require('../utils/courseEventGroup');
 const { validateDrivingLicenceNumber } = require('../utils/drivingLicenceValidation');
 
@@ -1288,63 +1289,81 @@ class BookingFlowController {
           userIds.push(userId);
         }
 
-        // Lock linked siblings so capacity stays consistent across the cohort
-        await lockSiblingEventsForUpdate(connection, course_event_id);
+        let capacityMutexName = null;
+        let capacityMutexHeld = false;
+        try {
+          capacityMutexName = await getCourseCapacityMutexName(this.pool, course_event_id);
+          const [mutexRows] = await this.pool.query(
+            'SELECT GET_LOCK(?, 10) AS acquired',
+            [capacityMutexName]
+          );
+          capacityMutexHeld = Number(mutexRows[0]?.acquired) === 1;
+          if (!capacityMutexHeld) {
+            await connection.rollback();
+            connection.release();
+            return res.status(503).json({
+              success: false,
+              message: 'We could not reserve your space right now. Please try again in a moment.',
+            });
+          }
 
-        const [event] = await connection.query(`
+          // Lock linked siblings so capacity stays consistent across the cohort
+          await lockSiblingEventsForUpdate(connection, course_event_id);
+
+          const [event] = await connection.query(`
           SELECT booking_limit, bookings_done, current_locks,
                  vehicle_type_manual, vehicle_type_automatic, vehicle_type_own
           FROM course_events
           WHERE id = ?
         `, [course_event_id]);
 
-        if (!event.length) {
-          throw new Error('Event not found');
-        }
-        const groupAvail = await getGroupAvailability(connection, course_event_id);
-        const currentLocks = groupAvail?.current_locks ?? (event[0].current_locks || 0);
-        const bookingsDone = groupAvail?.bookings_done ?? (event[0].bookings_done || 0);
-        const bookingLimit = groupAvail?.booking_limit ?? event[0].booking_limit;
-        const availableSpaces = groupAvail?.availableSpaces
-          ?? (bookingLimit - bookingsDone - currentLocks);
+          if (!event.length) {
+            throw new Error('Event not found');
+          }
+          const groupAvail = await getGroupAvailability(connection, course_event_id);
+          const currentLocks = groupAvail?.current_locks ?? (event[0].current_locks || 0);
+          const bookingsDone = groupAvail?.bookings_done ?? (event[0].bookings_done || 0);
+          const bookingLimit = groupAvail?.booking_limit ?? event[0].booking_limit;
+          const availableSpaces = groupAvail?.availableSpaces
+            ?? (bookingLimit - bookingsDone - currentLocks);
 
-        if (await isGroupFirstDayPassed(connection, course_event_id)) {
-          await connection.rollback();
-          connection.release();
-          return res.status(400).json({
-            success: false,
-            message: 'This course is no longer available for booking because the first day has already passed.',
-          });
-        }
+          if (await isGroupFirstDayPassed(connection, course_event_id)) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({
+              success: false,
+              message: 'This course is no longer available for booking because the first day has already passed.',
+            });
+          }
 
-        if (availableSpaces < attendees_count) {
-          await connection.rollback();
-          connection.release();
-          return res.status(400).json({
-            success: false,
-            message: `Sorry, this course is now fully booked. Only ${availableSpaces} space(s) available, but you requested ${attendees_count}.`,
-            available_spaces: availableSpaces
-          });
-        }
+          if (availableSpaces < attendees_count) {
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({
+              success: false,
+              message: `Sorry, this course is now fully booked. Only ${availableSpaces} space(s) available, but you requested ${attendees_count}.`,
+              available_spaces: availableSpaces
+            });
+          }
 
-        // Validate vehicle-type capacity for this specific event
-        const requestedVehicleCounts = attendees.reduce((acc, attendee) => {
-          const vehicleType = Number.parseInt(attendee.vehicle_type, 10);
-          if (vehicleType === 0) acc.manual += 1;
-          if (vehicleType === 1) acc.automatic += 1;
-          if (vehicleType === 3) acc.own += 1;
-          return acc;
-        }, { manual: 0, automatic: 0, own: 0 });
+          // Validate vehicle-type capacity for this specific event
+          const requestedVehicleCounts = attendees.reduce((acc, attendee) => {
+            const vehicleType = Number.parseInt(attendee.vehicle_type, 10);
+            if (vehicleType === 0) acc.manual += 1;
+            if (vehicleType === 1) acc.automatic += 1;
+            if (vehicleType === 3) acc.own += 1;
+            return acc;
+          }, { manual: 0, automatic: 0, own: 0 });
 
-        if (requestedVehicleCounts.own > 0 && Number(event[0].vehicle_type_own) !== 1) {
-          await connection.rollback();
-          return res.status(400).json({
-            success: false,
-            message: 'Own-vehicle option is not available for this event.'
-          });
-        }
+          if (requestedVehicleCounts.own > 0 && Number(event[0].vehicle_type_own) !== 1) {
+            await connection.rollback();
+            return res.status(400).json({
+              success: false,
+              message: 'Own-vehicle option is not available for this event.'
+            });
+          }
 
-        const [vehicleUsageRows] = await connection.query(`
+          const [vehicleUsageRows] = await connection.query(`
           SELECT
             SUM(CASE WHEN ba.vehicle_type = 0 THEN 1 ELSE 0 END) AS manual_used,
             SUM(CASE WHEN ba.vehicle_type = 1 THEN 1 ELSE 0 END) AS automatic_used
@@ -1354,33 +1373,38 @@ class BookingFlowController {
             AND b.status IN (0, 1, 2)
         `, [course_event_id]);
 
-        const manualUsed = Number(vehicleUsageRows?.[0]?.manual_used || 0);
-        const automaticUsed = Number(vehicleUsageRows?.[0]?.automatic_used || 0);
+          const manualUsed = Number(vehicleUsageRows?.[0]?.manual_used || 0);
+          const automaticUsed = Number(vehicleUsageRows?.[0]?.automatic_used || 0);
 
-        const manualAvailable = Math.max(0, Number(event[0].vehicle_type_manual || 0) - manualUsed);
-        const automaticAvailable = Math.max(0, Number(event[0].vehicle_type_automatic || 0) - automaticUsed);
+          const manualAvailable = Math.max(0, Number(event[0].vehicle_type_manual || 0) - manualUsed);
+          const automaticAvailable = Math.max(0, Number(event[0].vehicle_type_automatic || 0) - automaticUsed);
 
-        if (requestedVehicleCounts.manual > manualAvailable) {
-          await connection.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Manual vehicle slots unavailable. Requested ${requestedVehicleCounts.manual}, available ${manualAvailable}. Please reduce manual attendees or choose another vehicle type.`
+          if (requestedVehicleCounts.manual > manualAvailable) {
+            await connection.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Manual vehicle slots unavailable. Requested ${requestedVehicleCounts.manual}, available ${manualAvailable}. Please reduce manual attendees or choose another vehicle type.`
+            });
+          }
+
+          if (requestedVehicleCounts.automatic > automaticAvailable) {
+            await connection.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Automatic vehicle slots unavailable. Requested ${requestedVehicleCounts.automatic}, available ${automaticAvailable}. Please reduce automatic attendees or choose another vehicle type.`
+            });
+          }
+
+          // Reserve spaces on all linked course_events (shared multi-day cohort)
+          // bookings_done is incremented when payment is confirmed via webhook
+          await applyGroupSpaceDelta(connection, course_event_id, {
+            lockDelta: attendees_count,
           });
+        } finally {
+          if (capacityMutexHeld && capacityMutexName) {
+            await this.pool.query('SELECT RELEASE_LOCK(?)', [capacityMutexName]);
+          }
         }
-
-        if (requestedVehicleCounts.automatic > automaticAvailable) {
-          await connection.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Automatic vehicle slots unavailable. Requested ${requestedVehicleCounts.automatic}, available ${automaticAvailable}. Please reduce automatic attendees or choose another vehicle type.`
-          });
-        }
-
-        // Reserve spaces on all linked course_events (shared multi-day cohort)
-        // bookings_done is incremented when payment is confirmed via webhook
-        await applyGroupSpaceDelta(connection, course_event_id, {
-          lockDelta: attendees_count,
-        });
 
         const [courseData] = await connection.query(`
           SELECT c.dsa_fees, c.course_name, ce.school_one_off_price, ce.own_one_off_price,

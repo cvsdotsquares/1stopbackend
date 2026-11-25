@@ -764,6 +764,99 @@ async function eventsShareCapacity(db, eventIdA, eventIdB) {
 }
 
 /**
+ * Mutex key shared by admin portal holds and public checkout reservations.
+ */
+async function getCourseCapacityMutexName(db, courseEventId) {
+  const id = Number(courseEventId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return 'course_capacity_unknown';
+  }
+  const [rows] = await db.query(
+    'SELECT parent FROM course_events WHERE id = ? LIMIT 1',
+    [id]
+  );
+  const parentId = Number(rows[0]?.parent) || 0;
+  const capacityKey = parentId > 0 ? `p${parentId}` : `e${id}`;
+  return `course_capacity_${capacityKey}`;
+}
+
+/**
+ * Seats held by admin portal "Take booking" locks (locked_by = terminal) on this cohort.
+ * Public payment confirmation must not treat these as the customer's own reservation.
+ */
+async function getTerminalAdminHoldSpacesOnCohort(db, courseEventId) {
+  const cohortIds = await getCohortMemberIds(db, courseEventId);
+  if (!cohortIds.length) return 0;
+
+  const [parentRows] = await db.query(
+    'SELECT parent FROM course_events WHERE id = ? LIMIT 1',
+    [Number(courseEventId)]
+  );
+  const parentId = Number(parentRows[0]?.parent) || 0;
+  const placeholders = cohortIds.map(() => '?').join(',');
+  const params = [...cohortIds];
+  let parentClause = '';
+  if (parentId > 0) {
+    parentClause = ' OR lb.parent = ?';
+    params.push(parentId);
+  }
+
+  const [rows] = await db.query(
+    `SELECT COALESCE(SUM(lb.space_required), 0) AS held
+     FROM lock_bookings lb
+     WHERE lb.delete_process = 0
+       AND lb.locked_by = 'terminal'
+       AND (lb.event_id IN (${placeholders})${parentClause})`,
+    params
+  );
+  return Math.max(0, Number(rows[0]?.held) || 0);
+}
+
+/**
+ * Admin terminal holds take priority over public checkout QR / Pay by Bank.
+ * Release `current_locks` held by unpaid online bookings on this cohort so an
+ * admin can take the last seat while a customer is still on the payment step.
+ * Booking rows stay pending (status 0) until payment succeeds; webhook then refunds.
+ */
+async function releaseOnlineCheckoutHoldsForCohort(db, courseEventId) {
+  const cohortIds = await getCohortMemberIds(db, courseEventId);
+  if (!cohortIds.length) {
+    return { releasedSpaces: 0, bookingIds: [] };
+  }
+
+  const [rows] = await db.query(
+    `SELECT id, spaces
+     FROM bookings
+     WHERE status = 0
+       AND type_of_book = 'o'
+       AND IFNULL(lockid, 0) = 0
+       AND IFNULL(admin_payment_received, 0) = 0
+       AND LOWER(TRIM(COALESCE(booking_made_by, ''))) = 'customer'
+       AND course_event_id IN (?)
+     ORDER BY id ASC`,
+    [cohortIds]
+  );
+
+  let releasedSpaces = 0;
+  const bookingIds = [];
+  for (const row of rows || []) {
+    const spaces = Math.max(1, Number(row.spaces) || 1);
+    releasedSpaces += spaces;
+    bookingIds.push(Number(row.id));
+  }
+
+  if (releasedSpaces > 0) {
+    await applyGroupSpaceDelta(db, courseEventId, { lockDelta: -releasedSpaces });
+    console.log(
+      `[capacity] Released ${releasedSpaces} public checkout lock space(s) on cohort ` +
+        `${courseEventId} for admin priority; bookings=${bookingIds.join(',')}`
+    );
+  }
+
+  return { releasedSpaces, bookingIds };
+}
+
+/**
  * Reject an admin seat take (add booking, change date, reinstate) when the
  * shared course date cannot fit `spacesNeeded`.
  * `creditSpaces` adds back seats this operation already holds on the same
@@ -1106,6 +1199,9 @@ module.exports = {
   getGroupAvailability,
   reconcileBookingsDoneIfLagging,
   eventsShareCapacity,
+  getCourseCapacityMutexName,
+  getTerminalAdminHoldSpacesOnCohort,
+  releaseOnlineCheckoutHoldsForCohort,
   assertAdminCanTakeSpaces,
   adminSeatsWouldFit,
   canConfirmSpacesOnCohort,

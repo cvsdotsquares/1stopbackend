@@ -8,6 +8,7 @@ const {
   getGroupAvailability,
   isCourseEventFrozen,
   lockSiblingEventsForUpdate,
+  getTerminalAdminHoldSpacesOnCohort,
 } = require('../utils/courseEventGroup');
 const { archiveAndDeleteBooking } = require('../utils/archiveBooking');
 
@@ -264,7 +265,10 @@ class StripeWebhookController {
         }
       } else if (Number(primaryBooking?.status) === 0) {
         // Public checkout reserves via current_locks only (lockid stays 0).
-        creditSpaces = Math.min(bookingSpaces, cohortLocks);
+        // Admin terminal holds take priority — do not credit those toward this payment.
+        const adminHeld = await getTerminalAdminHoldSpacesOnCohort(connection, courseEventId);
+        const publicLockPool = Math.max(0, cohortLocks - adminHeld);
+        creditSpaces = Math.min(bookingSpaces, publicLockPool);
       }
 
       const capacityCheck = await canConfirmSpacesOnCohort(
