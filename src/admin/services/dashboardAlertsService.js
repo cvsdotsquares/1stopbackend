@@ -238,11 +238,17 @@ function formatEventTimeRange(start, end) {
   return s || e || '';
 }
 
+const LINKED_3_DAY_ALERT_NAME = '3 Day Course';
+
 function displayAbbForTestsToCancel(abb, courseName) {
   return {
     abb: String(abb || '').trim(),
     name: String(courseName || '').trim(),
   };
+}
+
+function isLinkedMultiEvent(eventType, parent) {
+  return String(eventType || '').trim().toLowerCase() === 'multi' && Number(parent) > 0;
 }
 
 async function getTestsToCancelAlerts(pool) {
@@ -269,11 +275,14 @@ async function getTestsToCancelAlerts(pool) {
   const horizon = addDaysIso(today, 90);
 
   // One row per course event, on that course's first real day. Later days of a
-  // multi-day course are not separate alerts. The freeze table is per course,
-  // so a frozen linked course drops out on its own and its siblings stay.
+  // multi-day course are not separate alerts. Linked A1/A2/DAS courses share a
+  // parent and one seat pool, so those collapse to a single "3 Day Course" alert.
+  // A frozen sibling is omitted here; an unfrozen sibling still represents the group.
   const [rows] = await pool.query(
     `SELECT ce.id AS course_event_id,
             ce.course_id,
+            ce.parent,
+            ce.event_type,
             DATE_FORMAT(start_dates.start_date, '%Y-%m-%d') AS event_date,
             ced.event_start_time,
             ced.event_end_time,
@@ -304,6 +313,7 @@ async function getTestsToCancelAlerts(pool) {
   const availCache = new Map();
   const alerts = [];
   const seenEventIds = new Set();
+  const seenLinkedGroups = new Set();
 
   async function groupAvail(eventId) {
     const key = Number(eventId);
@@ -324,16 +334,28 @@ async function getTestsToCancelAlerts(pool) {
     const courseId = Number(row.course_id);
     const meta = abbByCourseId.get(courseId);
     if (!meta) continue;
-    if (!isWithinAdjustedWindow(today, eventDate, meta.baseDays)) continue;
+
+    const linked3Day =
+      meta.baseDays === 3 && isLinkedMultiEvent(row.event_type, row.parent);
+    const linkedKey = linked3Day ? `${Number(row.parent)}:${eventDate}` : '';
+    if (linkedKey && seenLinkedGroups.has(linkedKey)) continue;
+
+    if (!isWithinAdjustedWindow(today, eventDate, meta.baseDays)) {
+      if (linkedKey) seenLinkedGroups.add(linkedKey);
+      continue;
+    }
 
     const avail = await groupAvail(eventId);
+    if (linkedKey) seenLinkedGroups.add(linkedKey);
     if (!avail || avail.availableSpaces <= 0) continue;
 
     const daysUntil = diffCalendarDays(today, eventDate);
     const locationLabel = formatLocationLabel(row.loc_abb, row.location_name);
     const startLabel = formatLongDate(eventDate);
     const spaces = avail.availableSpaces;
-    const display = displayAbbForTestsToCancel(meta.abb, meta.course_name);
+    const display = linked3Day
+      ? { abb: LINKED_3_DAY_ALERT_NAME, name: LINKED_3_DAY_ALERT_NAME }
+      : displayAbbForTestsToCancel(meta.abb, meta.course_name);
     const timeLabel = formatEventTimeRange(
       row.event_start_time,
       row.event_end_time
