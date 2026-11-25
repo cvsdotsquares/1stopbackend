@@ -16,6 +16,20 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
+function positiveIds(value) {
+  const parts = Array.isArray(value) ? value : String(value == null ? '' : value).split(',');
+  const ids = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const id = Number(String(part).trim());
+    if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    if (ids.length >= 50) break;
+    ids.push(id);
+  }
+  return ids;
+}
+
 function paginationMeta(page, perPage, total) {
   const pageNum = Math.max(1, Number(page) || 1);
   return {
@@ -114,15 +128,37 @@ function resolveBookedLabel(booking, paymentRow, expiredPaymentLink) {
   return formatBookingCreated(booking.created);
 }
 
+function tokenList(value, allowed) {
+  const parts = Array.isArray(value) ? value : String(value == null ? '' : value).split(',');
+  const tokens = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const token = String(part).trim().toLowerCase();
+    if (!token || seen.has(token) || (allowed && !allowed.has(token))) continue;
+    seen.add(token);
+    if (tokens.length >= 50) break;
+    tokens.push(token);
+  }
+  return tokens;
+}
+
+function allowedTypeOfBookCodes() {
+  const codes = new Set(
+    getTransactionTypeFilterOptions()
+      .map((option) => String(option.value || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  codes.add('w');
+  return codes;
+}
+
 function buildPaymentFilter(paymentScr) {
-  const key = trim(paymentScr).toLowerCase();
-  if (key === 'paid') {
+  const keys = tokenList(paymentScr, new Set(['paid', 'outstanding']));
+  if (keys.length !== 1) return '';
+  if (keys[0] === 'paid') {
     return ' AND IFNULL(bookings.payment_due, 0) <= 0 ';
   }
-  if (key === 'outstanding') {
-    return ' AND IFNULL(bookings.payment_due, 0) > 0 ';
-  }
-  return '';
+  return ' AND IFNULL(bookings.payment_due, 0) > 0 ';
 }
 
 function buildStatusFilter(statusScr) {
@@ -183,10 +219,10 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   const pageNum = Math.max(1, Number(page) || 1);
   const nameScr = trim(searchterm?.name_scr);
   const statusScr = trim(searchterm?.status_scr);
-  const courseScr = trim(searchterm?.course_scr);
-  const locationScr = trim(searchterm?.location_scr);
-  const tobScr = trim(searchterm?.tob_scr);
-  const paymentScr = trim(searchterm?.payment_scr);
+  const courseIds = positiveIds(searchterm?.course_scr);
+  const locationIds = positiveIds(searchterm?.location_scr);
+  const tobCodes = tokenList(searchterm?.tob_scr, allowedTypeOfBookCodes());
+  const paymentKeys = tokenList(searchterm?.payment_scr, new Set(['paid', 'outstanding']));
   const fromScr = trim(searchterm?.from_scr);
   const toScr = trim(searchterm?.to_scr);
 
@@ -195,23 +231,21 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
   const params = [];
 
   where += buildStatusFilter(statusScr);
-  where += buildPaymentFilter(paymentScr);
+  where += buildPaymentFilter(paymentKeys);
 
-  const courseId = Number(courseScr);
-  if (Number.isFinite(courseId) && courseId > 0) {
-    where += ' AND bookings.course_id = ? ';
-    params.push(courseId);
+  if (courseIds.length) {
+    where += ` AND bookings.course_id IN (${courseIds.map(() => '?').join(',')}) `;
+    params.push(...courseIds);
   }
 
-  const locationId = Number(locationScr);
-  if (Number.isFinite(locationId) && locationId > 0) {
-    where += ' AND course_events.location_id = ? ';
-    params.push(locationId);
+  if (locationIds.length) {
+    where += ` AND course_events.location_id IN (${locationIds.map(() => '?').join(',')}) `;
+    params.push(...locationIds);
   }
 
-  if (tobScr) {
-    where += ' AND bookings.type_of_book = ? ';
-    params.push(tobScr);
+  if (tobCodes.length) {
+    where += ` AND bookings.type_of_book IN (${tobCodes.map(() => '?').join(',')}) `;
+    params.push(...tobCodes);
   }
 
   if (fromScr) {
@@ -403,10 +437,10 @@ async function listBookings(pool, { page = 1, searchterm = {} } = {}) {
     filters: {
       name_scr: nameScr,
       status_scr: statusScr,
-      course_scr: courseScr,
-      location_scr: locationScr,
-      tob_scr: tobScr,
-      payment_scr: paymentScr,
+      course_scr: courseIds.join(','),
+      location_scr: locationIds.join(','),
+      tob_scr: tobCodes.join(','),
+      payment_scr: paymentKeys.join(','),
       from_scr: fromScr,
       to_scr: toScr,
     },
