@@ -80,14 +80,21 @@ function createAuthRoutes(pool) {
       .withMessage('Contact 2 must be a valid phone number'),
 
     body('date_of_birth')
-      .optional({ values: 'falsy' })
       .trim()
+      .notEmpty()
+      .withMessage('Date of birth is required')
       .custom((value) => {
-        if (!value) return true;
-        const str = String(value).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return true; // ISO format
-        if (/^\d{2}[/-]\d{2}[/-]\d{4}$/.test(str)) return true; // booking-form style
-        throw new Error('Date of birth must be in dd/mm/yyyy or yyyy-mm-dd format');
+        const { validateUkDateOfBirth } = require('../utils/ukDateValidation');
+        const str = String(value || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+          const [, y, m, d] = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+          const check = validateUkDateOfBirth(`${d}/${m}/${y}`, { minAge: 16 });
+          if (!check.valid) throw new Error(check.message);
+          return true;
+        }
+        const check = validateUkDateOfBirth(str, { minAge: 16 });
+        if (!check.valid) throw new Error(check.message);
+        return true;
       }),
 
     body('license_number')

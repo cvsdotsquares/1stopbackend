@@ -2,34 +2,63 @@ function trim(value) {
   return value == null ? '' : String(value).trim();
 }
 
-/** Optional DOB: empty OK; DD/MM/YYYY must pass day/month/year checks (public form parity). */
-function validateUkDateOfBirth(value) {
+function isCalendarValidUkDob(day, month, year) {
+  const date = new Date(year, month - 1, day);
+  return (
+    date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+  );
+}
+
+function ukDobAgeOnDate(dobStr, onDate = new Date()) {
+  const match = String(dobStr || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return -1;
+  const day = Number.parseInt(match[1], 10);
+  const month = Number.parseInt(match[2], 10);
+  const year = Number.parseInt(match[3], 10);
+  const birth = new Date(year, month - 1, day);
+  let age = onDate.getFullYear() - birth.getFullYear();
+  const monthDiff = onDate.getMonth() - birth.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && onDate.getDate() < birth.getDate())) {
+    age -= 1;
+  }
+  return age;
+}
+
+/** Optional DOB: empty OK; DD/MM/YYYY must be a real calendar date (public form parity). */
+function validateUkDateOfBirth(value, options = {}) {
   const raw = trim(value);
   if (!raw) return { valid: true };
 
-  const match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const match = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (!match) {
     return {
       valid: false,
-      message: 'Date of birth must be complete (DD/MM/YYYY)',
+      message: 'Please enter a valid date in dd/mm/yyyy format.',
     };
   }
 
   const day = Number.parseInt(match[1], 10);
   const month = Number.parseInt(match[2], 10);
-  const year = match[3];
+  const year = Number.parseInt(match[3], 10);
 
-  if (!Number.isFinite(day) || day < 1 || day > 31) {
-    return { valid: false, message: 'Day (DD) must be between 01 and 31' };
-  }
-  if (!Number.isFinite(month) || month < 1 || month > 12) {
-    return { valid: false, message: 'Month (MM) must be between 01 and 12' };
-  }
-  if (!/^19|^20/.test(year)) {
+  if (!isCalendarValidUkDob(day, month, year)) {
     return {
       valid: false,
-      message: 'Year (YYYY) must start with 19 or 20',
+      message: 'Please enter a valid date in dd/mm/yyyy format.',
     };
+  }
+
+  const minAge = options.minAge;
+  if (minAge != null && Number.isFinite(minAge)) {
+    const age = ukDobAgeOnDate(raw, options.referenceDate || new Date());
+    if (age < minAge) {
+      return {
+        valid: false,
+        message: 'You must be at least 16 years of age to register.',
+      };
+    }
   }
 
   return { valid: true };
