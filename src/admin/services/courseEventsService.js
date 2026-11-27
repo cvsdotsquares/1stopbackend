@@ -133,7 +133,7 @@ const LIST_SELECT = `
 
 const LIST_GROUP_ORDER = `
   GROUP BY course_events.course_id, course_events.parent
-  ORDER BY course_event_dates.event_date ASC, course_events.id DESC
+  ORDER BY course_event_dates.event_date ASC, course_event_dates.event_start_time ASC, locations.location_name ASC, course_events.id ASC
 `;
 
 const TBC_EVENT_DATE = '0000-00-00';
